@@ -1,0 +1,4019 @@
+using System.Globalization;
+using System.Diagnostics;
+using System.Net.Http;
+using System.Text.Json;
+using System.Text;
+using Discord;
+using Discord.WebSocket;
+using Microsoft.EntityFrameworkCore;
+using SwedesClanTracker.Core;
+
+namespace SwedesClanTracker.Worker;
+
+public class DiscordPromotionBotWorker(
+    IServiceScopeFactory scopeFactory,
+    IConfiguration configuration,
+    IHttpClientFactory httpClientFactory,
+    IPlayerUpdateQueue queue,
+    AppStatusReporter statusReporter,
+    ILogger<DiscordPromotionBotWorker> logger) : BackgroundService
+{
+    private DiscordSocketClient? _client;
+    private DiscordBotOptions _options = new();
+    private int _discordDeleteDelayMinutes = 5;
+    private int _discordDeleteHardCapMinutes = 10;
+    private readonly TimeZoneInfo _swedishTimeZone = ResolveSwedishTimeZone();
+    private static readonly IReadOnlyList<WomRoleChoice> WomRoleChoices =
+    [
+        new("Officer", "officer"),
+        new("Commander", "commander"),
+        new("Lieutenant", "lieutenant"),
+        new("Captain", "captain"),
+        new("Astral", "astral"),
+        new("General", "general"),
+        new("Brigadier", "brigadier"),
+        new("Admiral", "admiral"),
+        new("Marshal", "marshal"),
+        new("Beast", "beast"),
+        new("Imp", "imp")
+    ];
+    private enum TrackedMessageState
+    {
+        Found,
+        Missing,
+        Unknown
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        _options = configuration.GetSection("DiscordBot").Get<DiscordBotOptions>() ?? new DiscordBotOptions();
+        _discordDeleteDelayMinutes = Math.Max(1, configuration.GetValue<int?>("Tracker:DiscordDeleteDelayMinutes") ?? 5);
+        _discordDeleteHardCapMinutes = Math.Max(1, configuration.GetValue<int?>("Tracker:DiscordDeleteHardCapMinutes") ?? 10);
+        if (!_options.Enabled)
+        {
+            await statusReporter.ReportAsync("Discord", "Disabled", "Discord bot is disabled.", stoppingToken);
+            logger.LogInformation("Discord bot disabled.");
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(_options.Token) || _options.ChannelId <= 0)
+        {
+            await statusReporter.ReportAsync("Discord", "Misconfigured", "Discord bot token or channel id is missing.", stoppingToken);
+            logger.LogWarning("Discord bot enabled but Token/ChannelId missing.");
+            return;
+        }
+
+        await statusReporter.ReportAsync("Discord", "Starting", "Discord worker is logging in.", stoppingToken);
+        _client = new DiscordSocketClient(new DiscordSocketConfig
+        {
+            GatewayIntents = GatewayIntents.Guilds | GatewayIntents.GuildMessages
+        });
+
+        _client.Log += msg =>
+        {
+            logger.LogInformation("Discord: {Msg}", msg.Message);
+            return Task.CompletedTask;
+        };
+        _client.Ready += OnReadyAsync;
+        _client.ButtonExecuted += HandleButtonAsync;
+        _client.SlashCommandExecuted += HandleSlashCommandAsync;
+
+        await _client.LoginAsync(TokenType.Bot, _options.Token);
+        await _client.StartAsync();
+        await Task.Delay(TimeSpan.FromSeconds(3), stoppingToken);
+        await statusReporter.ReportAsync("Discord", "Online", "Discord worker is connected.", stoppingToken);
+
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            await RunDiscordStep("PostPendingPromotionCandidates", () => PostPendingPromotionCandidates(stoppingToken), stoppingToken);
+            await RunDiscordStep("PostTempleMissingActionMessages", () => PostTempleMissingActionMessages(stoppingToken), stoppingToken);
+            await RunDiscordStep("PostWomMissingActionMessages", () => PostWomMissingActionMessages(stoppingToken), stoppingToken);
+            await RunDiscordStep("PostWomRankMismatchMessages", () => PostWomRankMismatchMessages(stoppingToken), stoppingToken);
+            await RunDiscordStep("ProcessMessageActionUpdates", () => ProcessMessageActionUpdates(stoppingToken), stoppingToken);
+            await RunDiscordStep("ProcessTempleMissingActionUpdates", () => ProcessTempleMissingActionUpdates(stoppingToken), stoppingToken);
+            await RunDiscordStep("UpdatePetHiscoresMessages", () => UpdatePetHiscoresMessages(stoppingToken), stoppingToken);
+            await RunDiscordStep("ReconcileCompletedMessageDeletes", () => ReconcileCompletedMessageDeletes(stoppingToken), stoppingToken);
+            await RunDiscordStep("ProcessScheduledDeletes", () => ProcessScheduledDeletes(stoppingToken), stoppingToken);
+            await statusReporter.ReportAsync("Discord", "Waiting", "Waiting for the next Discord maintenance cycle.", stoppingToken);
+            await Task.Delay(TimeSpan.FromSeconds(20), stoppingToken);
+        }
+    }
+
+    private async Task RunDiscordStep(string stepName, Func<Task> action, CancellationToken ct)
+    {
+        var friendlyStep = FriendlyStepName(stepName);
+        try
+        {
+            await statusReporter.ReportAsync("Discord", "Working", friendlyStep, ct, new { Step = stepName });
+            await action();
+            await statusReporter.ReportAsync("Discord", "Online", $"Finished: {friendlyStep}", ct, new { Step = stepName });
+        }
+        catch (Exception ex)
+        {
+            await statusReporter.ReportAsync("Discord", "Error", $"Discord step failed: {friendlyStep}", ct, new { Step = stepName, Error = ex.GetType().Name });
+            logger.LogError(ex, "Discord worker step failed: {Step}", stepName);
+        }
+    }
+
+    private static async Task ReassignOrRemoveStatusEventsAsync(TrackerDbContext db, int removedPlayerId)
+    {
+        var replacementPlayerId = await db.Players
+            .Where(x => x.Id != removedPlayerId)
+            .OrderBy(x => x.Id)
+            .Select(x => (int?)x.Id)
+            .FirstOrDefaultAsync();
+        var statusRows = await db.LifecycleEvents
+            .Where(x => x.PlayerId == removedPlayerId && x.EventType == AppStatusConstants.EventType)
+            .ToListAsync();
+
+        if (replacementPlayerId.HasValue)
+        {
+            foreach (var status in statusRows) status.PlayerId = replacementPlayerId.Value;
+        }
+        else
+        {
+            db.LifecycleEvents.RemoveRange(statusRows);
+        }
+    }
+
+    private static async Task CloseOpenLifecycleEventsAsync(TrackerDbContext db, int playerId, params string[] eventTypes)
+    {
+        var events = await db.LifecycleEvents
+            .Where(x => x.PlayerId == playerId && x.Status == "OPEN" && eventTypes.Contains(x.EventType))
+            .ToListAsync();
+        foreach (var ev in events)
+        {
+            ev.Status = "DONE";
+        }
+    }
+
+    private static async Task EnsureOpenMergeSuggestedEventAsync(TrackerDbContext db, int playerId, string username, string handledBy)
+    {
+        var hasOpenMerge = await db.LifecycleEvents.AnyAsync(x =>
+            x.PlayerId == playerId &&
+            x.EventType == "MERGE_SUGGESTED" &&
+            x.Status == "OPEN");
+        if (hasOpenMerge) return;
+
+        db.LifecycleEvents.Add(new LifecycleEvent
+        {
+            PlayerId = playerId,
+            EventType = "MERGE_SUGGESTED",
+            MetadataJson = JsonUtil.Serialize(new { Username = username, Source = "discord", HandledBy = handledBy }),
+            Status = "OPEN",
+            CreatedAt = DateTimeOffset.UtcNow
+        });
+    }
+
+    private static string FriendlyStepName(string stepName)
+    {
+        return stepName switch
+        {
+            "PostPendingPromotionCandidates" => "Checking pending promotions for Discord posts.",
+            "PostTempleMissingActionMessages" => "Checking Temple missing-player review messages.",
+            "PostWomMissingActionMessages" => "Checking Wise Old Man missing-player review messages.",
+            "PostWomRankMismatchMessages" => "Checking Wise Old Man rank mismatch alerts.",
+            "ProcessMessageActionUpdates" => "Applying Discord promotion button actions.",
+            "ProcessTempleMissingActionUpdates" => "Applying Temple missing-player actions.",
+            "UpdatePetHiscoresMessages" => "Updating pet hiscore Discord messages.",
+            "ReconcileCompletedMessageDeletes" => "Reconciling completed Discord cleanup.",
+            "ProcessScheduledDeletes" => "Processing scheduled Discord message deletes.",
+            _ => stepName
+        };
+    }
+
+    private async Task PostPendingPromotionCandidates(CancellationToken ct)
+    {
+        if (_client is null) return;
+        var channel = _client.GetChannel(_options.ChannelId) as IMessageChannel;
+        if (channel is null) return;
+
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+
+        var pending = await db.PromotionCandidates
+            .Where(x => x.Status == PromotionStatus.PENDING)
+            .OrderBy(x => x.CreatedAt)
+            .Select(x => new
+            {
+                x.Id,
+                x.PlayerId,
+                x.OldRank,
+                x.NewRank,
+                x.Reason,
+                PlayerName = x.Player.Username,
+                LastSynced = x.Player.LastSynced,
+                StoredPetCount = x.Player.StoredPetCount,
+                ManualPetOverride = x.Player.ManualPetOverride,
+                Latest = x.Player.Snapshots
+                    .OrderByDescending(s => s.Timestamp)
+                    .Select(s => new
+                    {
+                        s.Ehb,
+                        s.Ehp
+                    })
+                    .FirstOrDefault()
+            })
+            .ToListAsync(ct);
+
+        foreach (var c in pending)
+        {
+            var marker = $"\"CandidateId\":{c.Id}";
+            var alreadyPosted = await db.LifecycleEvents.AnyAsync(x =>
+                x.EventType == "PROMOTION_DISCORD_POSTED" &&
+                x.MetadataJson.Contains(marker), ct);
+            if (alreadyPosted) continue;
+
+            var embed = BuildPromotionEmbed(
+                c.PlayerName,
+                c.OldRank,
+                c.NewRank,
+                BuildStatsSummary(c.Latest?.Ehb, c.Latest?.Ehp, c.ManualPetOverride ?? c.StoredPetCount),
+                c.Reason,
+                FormatSwedishTime(c.LastSynced));
+
+            var builder = new ComponentBuilder()
+                .WithButton("Approve", $"promo:approve:{c.Id}", ButtonStyle.Success)
+                .WithButton("Dismiss", $"promo:dismiss:{c.Id}", ButtonStyle.Danger)
+                .WithButton("Mark Rename Suspect", $"promo:rename:{c.Id}", ButtonStyle.Secondary);
+
+            var msg = await channel.SendMessageAsync(embed: embed, components: builder.Build());
+            db.LifecycleEvents.Add(new LifecycleEvent
+            {
+                PlayerId = c.PlayerId,
+                EventType = "PROMOTION_DISCORD_POSTED",
+                MetadataJson = JsonUtil.Serialize(new { CandidateId = c.Id, DiscordMessageId = msg.Id, ChannelId = _options.ChannelId }),
+                Status = "DONE",
+                CreatedAt = DateTimeOffset.UtcNow
+            });
+            await db.SaveChangesAsync(ct);
+        }
+    }
+
+    private async Task OnReadyAsync()
+    {
+        if (_client is null) return;
+        if (_options.GuildId == 0)
+        {
+            logger.LogWarning("DiscordBot:GuildId is not configured, slash command registration skipped.");
+            return;
+        }
+
+        try
+        {
+            var socketGuild = _client.GetGuild(_options.GuildId);
+            if (socketGuild is null)
+            {
+                logger.LogWarning("Could not resolve guild {GuildId} for slash command registration.", _options.GuildId);
+                return;
+            }
+
+            var lookup = new SlashCommandBuilder()
+                .WithName("lookup")
+                .WithDescription("Lookup a specific player in SwedesClanTracker.")
+                .AddOption("player", ApplicationCommandOptionType.String, "Player username", isRequired: true);
+            var update = new SlashCommandBuilder()
+                .WithName("update")
+                .WithDescription("Prioritize a player for immediate stats update.")
+                .AddOption("player", ApplicationCommandOptionType.String, "Player username", isRequired: true);
+            var templeAdd = new SlashCommandBuilder()
+                .WithName("temple-add")
+                .WithDescription("Add one or more players to the TempleOSRS group.")
+                .AddOption("players", ApplicationCommandOptionType.String, "Comma-separated player names", isRequired: true);
+            var add = new SlashCommandBuilder()
+                .WithName("add")
+                .WithDescription("Add one or more players to both TempleOSRS and WiseOldMan.")
+                .AddOption("players", ApplicationCommandOptionType.String, "Comma-separated player names", isRequired: true);
+            var remove = new SlashCommandBuilder()
+                .WithName("remove")
+                .WithDescription("Remove one or more players from both TempleOSRS and WiseOldMan.")
+                .AddOption("players", ApplicationCommandOptionType.String, "Comma-separated player names", isRequired: true);
+            var templeRemove = new SlashCommandBuilder()
+                .WithName("temple-remove")
+                .WithDescription("Remove one or more players from the TempleOSRS group.")
+                .AddOption("players", ApplicationCommandOptionType.String, "Comma-separated player names", isRequired: true);
+            var womAdd = new SlashCommandBuilder()
+                .WithName("wom-add")
+                .WithDescription("Add one or more players to the WiseOldMan group.")
+                .AddOption("players", ApplicationCommandOptionType.String, "Comma-separated player names", isRequired: true);
+            var womRemove = new SlashCommandBuilder()
+                .WithName("wom-remove")
+                .WithDescription("Remove one or more players from the WiseOldMan group.")
+                .AddOption("players", ApplicationCommandOptionType.String, "Comma-separated player names", isRequired: true);
+            var womRoleUpdate = new SlashCommandBuilder()
+                .WithName("wom-role-update")
+                .WithDescription("Update a player's WiseOldMan group role.")
+                .AddOption("player", ApplicationCommandOptionType.String, "Player username", isRequired: true)
+                .AddOption(BuildWomRoleOption());
+            var setPets = new SlashCommandBuilder()
+                .WithName("set-pets")
+                .WithDescription("Manually set a player's pet count override.")
+                .AddOption("player", ApplicationCommandOptionType.String, "Player username", isRequired: true)
+                .AddOption("count", ApplicationCommandOptionType.Integer, "Manual pet count (0 or higher)", isRequired: true);
+
+            await socketGuild.CreateApplicationCommandAsync(lookup.Build());
+            await socketGuild.CreateApplicationCommandAsync(update.Build());
+            await socketGuild.CreateApplicationCommandAsync(add.Build());
+            await socketGuild.CreateApplicationCommandAsync(remove.Build());
+            await socketGuild.CreateApplicationCommandAsync(templeAdd.Build());
+            await socketGuild.CreateApplicationCommandAsync(templeRemove.Build());
+            await socketGuild.CreateApplicationCommandAsync(womAdd.Build());
+            await socketGuild.CreateApplicationCommandAsync(womRemove.Build());
+            await socketGuild.CreateApplicationCommandAsync(womRoleUpdate.Build());
+            await socketGuild.CreateApplicationCommandAsync(setPets.Build());
+            logger.LogInformation("Registered /lookup slash command in guild {GuildId}.", _options.GuildId);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Slash command registration failed (may already exist).");
+        }
+    }
+
+    private static SlashCommandOptionBuilder BuildWomRoleOption()
+    {
+        var option = new SlashCommandOptionBuilder()
+            .WithName("rank")
+            .WithDescription("WiseOldMan rank to set")
+            .WithType(ApplicationCommandOptionType.String)
+            .WithRequired(true);
+
+        foreach (var role in WomRoleChoices)
+        {
+            option.AddChoice(role.Label, role.Value);
+        }
+
+        return option;
+    }
+
+    private async Task HandleButtonAsync(SocketMessageComponent component)
+    {
+        var sw = Stopwatch.StartNew();
+        logger.LogInformation("Discord button start: {CustomId} by {User}", component.Data.CustomId, component.User.Username);
+        try
+        {
+            var parts = component.Data.CustomId.Split(':');
+            if (IsAdminLockedButton(parts.FirstOrDefault()) && !HasDiscordAdminRole(component.User))
+            {
+                await DenyComponentAsync(component);
+                return;
+            }
+
+            if (!component.HasResponded)
+            {
+                await component.DeferAsync();
+            }
+
+            if (parts.Length < 3)
+            {
+                await RespondToComponentAsync(component, "Unknown action.", ephemeral: true);
+                return;
+            }
+            if (parts[0] == "missing")
+            {
+                if (parts.Length != 3)
+                {
+                    await RespondToComponentAsync(component, "Unknown action.", ephemeral: true);
+                    return;
+                }
+                await HandleMissingTempleButtonAsync(component, parts);
+                return;
+            }
+            if (parts[0] == "wommissing")
+            {
+                if (parts.Length != 3)
+                {
+                    await RespondToComponentAsync(component, "Unknown action.", ephemeral: true);
+                    return;
+                }
+                await HandleMissingWomButtonAsync(component, parts);
+                return;
+            }
+            if (parts[0] == "womrank")
+            {
+                if (parts.Length is not (3 or 4))
+                {
+                    await RespondToComponentAsync(component, "Unknown action.", ephemeral: true);
+                    return;
+                }
+                await HandleWomRankMismatchButtonAsync(component, parts);
+                return;
+            }
+            if (parts[0] != "promo" || parts.Length != 3) return;
+            var action = parts[1];
+            if (!int.TryParse(parts[2], out var candidateId)) return;
+
+            await using var scope = scopeFactory.CreateAsyncScope();
+            var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+            var candidate = await db.PromotionCandidates.FirstOrDefaultAsync(x => x.Id == candidateId);
+            if (candidate is null)
+            {
+                await RespondToComponentAsync(component, "Candidate not found.", ephemeral: true);
+                return;
+            }
+
+            var player = await db.Players.FirstOrDefaultAsync(x => x.Id == candidate.PlayerId);
+            if (player is null)
+            {
+                await RespondToComponentAsync(component, "Player not found.", ephemeral: true);
+                return;
+            }
+
+            if (candidate.Status != PromotionStatus.PENDING)
+            {
+                await RespondToComponentAsync(component, $"This promotion was already handled ({candidate.Status}).", ephemeral: true);
+                return;
+            }
+
+            if (action == "approve")
+            {
+                player.CurrentRank = candidate.NewRank;
+                await CloseOpenLifecycleEventsAsync(db, player.Id, "WOM_RANK_MISMATCH_IGNORED", "WOM_RANK_MISMATCH_REQUIRED");
+                candidate.Status = PromotionStatus.APPROVED;
+                ScheduleDelete(candidate.Id, player.Id);
+            }
+            else if (action == "dismiss")
+            {
+                candidate.Status = PromotionStatus.DISMISSED;
+                ScheduleDelete(candidate.Id, player.Id);
+            }
+            else if (action == "rename")
+            {
+                player.Status = PlayerStatus.MERGE_SUGGESTED;
+                await CloseOpenLifecycleEventsAsync(db, player.Id, "NEW_PLAYER", "DISCORD_MARK_RENAME_SUSPECT");
+                await EnsureOpenMergeSuggestedEventAsync(db, player.Id, player.Username, component.User.Username);
+                ScheduleDelete(candidate.Id, player.Id);
+                db.LifecycleEvents.Add(new LifecycleEvent
+                {
+                    PlayerId = player.Id,
+                    EventType = "DISCORD_MARK_RENAME_SUSPECT",
+                    MetadataJson = JsonUtil.Serialize(new { CandidateId = candidate.Id, User = component.User.Username, HandledBy = component.User.Username, HandledByDiscordUserId = component.User.Id }),
+                    Status = "DONE",
+                    CreatedAt = DateTimeOffset.UtcNow
+                });
+            }
+            else
+            {
+                await RespondToComponentAsync(component, "Unknown action.", ephemeral: true);
+                return;
+            }
+
+            db.LifecycleEvents.Add(new LifecycleEvent
+            {
+                PlayerId = player.Id,
+                EventType = "PROMOTION_DISCORD_ACTION_APPLIED",
+                MetadataJson = JsonUtil.Serialize(new
+                {
+                    CandidateId = candidate.Id,
+                    Action = action,
+                    HandledBy = component.User.Username,
+                    HandledByDiscordUserId = component.User.Id,
+                    Source = "discord",
+                    ChannelId = component.Channel.Id,
+                    DiscordMessageId = component.Message.Id
+                }),
+                Status = "DONE",
+                CreatedAt = DateTimeOffset.UtcNow
+            });
+
+            await db.SaveChangesAsync();
+
+            var handled = $"Handled by {component.User.Username} ({action})";
+            await UpdateComponentMessageAsync(component, BuildHandledEmbed(component.Message.Embeds.FirstOrDefault(), handled, action));
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed handling Discord button.");
+            await RespondToComponentAsync(component, "Failed to handle action.", ephemeral: true);
+        }
+        finally
+        {
+            logger.LogInformation("Discord button end: {CustomId} in {ElapsedMs}ms", component.Data.CustomId, sw.ElapsedMilliseconds);
+        }
+    }
+
+    private async Task UpdateComponentMessageAsync(SocketMessageComponent component, Embed embed)
+    {
+        if (component.Message is IUserMessage userMessage)
+        {
+            await userMessage.ModifyAsync(props =>
+            {
+                props.Components = new ComponentBuilder().Build();
+                props.Embed = embed;
+            });
+        }
+    }
+
+    private async Task HandleMissingTempleButtonAsync(SocketMessageComponent component, string[] parts)
+    {
+        var action = parts[1];
+        if (!int.TryParse(parts[2], out var playerId)) return;
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        var player = await db.Players.FirstOrDefaultAsync(x => x.Id == playerId);
+        if (player is null)
+        {
+            await RespondToComponentAsync(component, "Player not found.", ephemeral: true);
+            return;
+        }
+        var scheduleOwnerPlayerId = playerId;
+
+        if (action == "add")
+        {
+            var templeOk = await AddPlayerToTempleAsync(player.Username);
+            var womOk = await AddPlayerToWomAsync(player.Username);
+            if (!templeOk)
+            {
+                await RespondToComponentAsync(component, "Failed to add player to Temple/WiseOldMan.", ephemeral: true);
+                return;
+            }
+
+            if (!womOk)
+            {
+                var womGroupId = configuration.GetValue<int?>("WiseOldMan:GroupId") ?? 0;
+                var alreadyInWom = womGroupId > 0 && await IsPlayerInWiseOldManGroupAsync(player.Username, womGroupId);
+                if (!alreadyInWom)
+                {
+                    await RespondToComponentAsync(component, "Temple add succeeded, but WiseOldMan add failed.", ephemeral: true);
+                    return;
+                }
+            }
+
+            player.Status = PlayerStatus.ACTIVE;
+            await CloseOpenLifecycleEventsAsync(db, player.Id,
+                "NEW_PLAYER",
+                "MERGE_SUGGESTED",
+                "DISCORD_MARK_RENAME_SUSPECT",
+                "MISSING_IN_ROSTER",
+                "TEMPLE_MISSING_ACTION_REQUIRED",
+                "WOM_MISSING_ACTION_REQUIRED");
+        }
+        else if (action == "remove")
+        {
+            scheduleOwnerPlayerId = await db.Players
+                .Where(x => x.Id != player.Id)
+                .OrderBy(x => x.Id)
+                .Select(x => x.Id)
+                .FirstOrDefaultAsync();
+
+            var womRemoved = await RemovePlayerFromWomAsync(player.Username);
+            if (!womRemoved)
+            {
+                var womGroupId = configuration.GetValue<int?>("WiseOldMan:GroupId") ?? 0;
+                var stillInWom = womGroupId > 0 && await IsPlayerInWiseOldManGroupAsync(player.Username, womGroupId);
+                if (stillInWom)
+                {
+                    await RespondToComponentAsync(component, "Failed to remove player from WiseOldMan.", ephemeral: true);
+                    return;
+                }
+            }
+            await ReassignOrRemoveStatusEventsAsync(db, player.Id);
+            db.LifecycleEvents.RemoveRange(db.LifecycleEvents.Where(x => x.PlayerId == player.Id && x.EventType != AppStatusConstants.EventType));
+            db.PlayerSnapshots.RemoveRange(db.PlayerSnapshots.Where(x => x.PlayerId == player.Id));
+            db.PromotionCandidates.RemoveRange(db.PromotionCandidates.Where(x => x.PlayerId == player.Id));
+            db.Players.Remove(player);
+        }
+        else
+        {
+            await RespondToComponentAsync(component, "Unknown action.", ephemeral: true);
+            return;
+        }
+
+        var actionEventPlayerId = action == "remove" && scheduleOwnerPlayerId > 0 ? scheduleOwnerPlayerId : playerId;
+        db.LifecycleEvents.Add(new LifecycleEvent
+        {
+            PlayerId = actionEventPlayerId,
+            EventType = "TEMPLE_MISSING_ACTION_APPLIED",
+            MetadataJson = JsonUtil.Serialize(new
+            {
+                Player = player.Username,
+                Action = action,
+                HandledBy = component.User.Username,
+                HandledByDiscordUserId = component.User.Id,
+                Source = "discord",
+                ChannelId = component.Channel.Id,
+                DiscordMessageId = component.Message.Id
+            }),
+            Status = "DONE",
+            CreatedAt = DateTimeOffset.UtcNow
+        });
+        await db.SaveChangesAsync();
+
+        var handled = $"Handled by {component.User.Username} ({action})";
+        await UpdateComponentMessageAsync(component, BuildHandledEmbed(component.Message.Embeds.FirstOrDefault(), handled, action == "add" ? "approve" : "dismiss"));
+
+        if (scheduleOwnerPlayerId > 0)
+        {
+            ScheduleChannelMessageDelete(
+                db,
+                scheduleOwnerPlayerId,
+                component.Channel.Id,
+                component.Message.Id,
+                "TEMPLE_MISSING_DISCORD_DELETE_SCHEDULED",
+                new { Reason = "temple-missing-action-handled", Action = action });
+            await db.SaveChangesAsync();
+        }
+        else if (action == "remove")
+        {
+            try
+            {
+                await component.Message.DeleteAsync();
+            }
+            catch
+            {
+                // best effort if no valid player row exists for lifecycle scheduling
+            }
+        }
+    }
+
+    private async Task HandleMissingWomButtonAsync(SocketMessageComponent component, string[] parts)
+    {
+        var action = parts[1];
+        if (!int.TryParse(parts[2], out var playerId)) return;
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        var player = await db.Players.FirstOrDefaultAsync(x => x.Id == playerId);
+        if (player is null)
+        {
+            await RespondToComponentAsync(component, "Player not found.", ephemeral: true);
+            return;
+        }
+
+        var scheduleOwnerPlayerId = playerId;
+        if (action == "reinstate")
+        {
+            var womOk = await AddPlayerToWomAsync(player.Username);
+            if (!womOk)
+            {
+                var womGroupId = configuration.GetValue<int?>("WiseOldMan:GroupId") ?? 0;
+                var alreadyInWom = womGroupId > 0 && await IsPlayerInWiseOldManGroupAsync(player.Username, womGroupId);
+                if (!alreadyInWom)
+                {
+                    await RespondToComponentAsync(component, "Failed to reinstate player in WiseOldMan.", ephemeral: true);
+                    return;
+                }
+            }
+            player.Status = PlayerStatus.ACTIVE;
+            await CloseOpenLifecycleEventsAsync(db, player.Id,
+                "NEW_PLAYER",
+                "MERGE_SUGGESTED",
+                "DISCORD_MARK_RENAME_SUSPECT",
+                "MISSING_IN_ROSTER",
+                "TEMPLE_MISSING_ACTION_REQUIRED",
+                "WOM_MISSING_ACTION_REQUIRED");
+        }
+        else if (action == "remove")
+        {
+            scheduleOwnerPlayerId = await db.Players
+                .Where(x => x.Id != player.Id)
+                .OrderBy(x => x.Id)
+                .Select(x => x.Id)
+                .FirstOrDefaultAsync();
+
+            var templeOk = await RemovePlayerFromTempleAsync(player.Username);
+            if (!templeOk)
+            {
+                var templeGroupId = configuration.GetValue<int?>("TempleOsrs:GroupId") ?? 449;
+                var stillInTemple = await IsPlayerInTempleGroupAsync(player.Username, templeGroupId);
+                if (stillInTemple)
+                {
+                    await RespondToComponentAsync(component, "Failed to remove player from TempleOSRS.", ephemeral: true);
+                    return;
+                }
+            }
+
+            await ReassignOrRemoveStatusEventsAsync(db, player.Id);
+            db.LifecycleEvents.RemoveRange(db.LifecycleEvents.Where(x => x.PlayerId == player.Id && x.EventType != AppStatusConstants.EventType));
+            db.PlayerSnapshots.RemoveRange(db.PlayerSnapshots.Where(x => x.PlayerId == player.Id));
+            db.PromotionCandidates.RemoveRange(db.PromotionCandidates.Where(x => x.PlayerId == player.Id));
+            db.Players.Remove(player);
+        }
+        else
+        {
+            await RespondToComponentAsync(component, "Unknown action.", ephemeral: true);
+            return;
+        }
+
+        var actionEventPlayerId = action == "remove" && scheduleOwnerPlayerId > 0 ? scheduleOwnerPlayerId : playerId;
+        db.LifecycleEvents.Add(new LifecycleEvent
+        {
+            PlayerId = actionEventPlayerId,
+            EventType = "WOM_MISSING_ACTION_APPLIED",
+            MetadataJson = JsonUtil.Serialize(new
+            {
+                Player = player.Username,
+                Action = action,
+                HandledBy = component.User.Username,
+                HandledByDiscordUserId = component.User.Id,
+                Source = "discord",
+                ChannelId = component.Channel.Id,
+                DiscordMessageId = component.Message.Id
+            }),
+            Status = "DONE",
+            CreatedAt = DateTimeOffset.UtcNow
+        });
+        await db.SaveChangesAsync();
+
+        var handled = $"Handled by {component.User.Username} ({action})";
+        await UpdateComponentMessageAsync(component, BuildHandledEmbed(component.Message.Embeds.FirstOrDefault(), handled, action == "reinstate" ? "approve" : "dismiss"));
+
+        if (scheduleOwnerPlayerId > 0)
+        {
+            ScheduleChannelMessageDelete(
+                db,
+                scheduleOwnerPlayerId,
+                component.Channel.Id,
+                component.Message.Id,
+                "WOM_MISSING_DISCORD_DELETE_SCHEDULED",
+                new { Reason = "wom-missing-action-handled", Action = action });
+            await db.SaveChangesAsync();
+        }
+        else if (action == "remove")
+        {
+            try { await component.Message.DeleteAsync(); } catch { }
+        }
+    }
+
+    private async Task HandleWomRankMismatchButtonAsync(SocketMessageComponent component, string[] parts)
+    {
+        var action = parts[1];
+        if (action is not ("dismiss" or "ignore" or "sync_wom_to_db" or "sync_db_to_wom"))
+        {
+            await RespondToComponentAsync(component, "Unknown action.", ephemeral: true);
+            return;
+        }
+        if (!int.TryParse(parts[2], out var playerId)) return;
+        int? requiredEventId = null;
+        if (parts.Length == 4)
+        {
+            if (!int.TryParse(parts[3], out var parsedRequiredEventId))
+            {
+                await RespondToComponentAsync(component, "Unknown action.", ephemeral: true);
+                return;
+            }
+            requiredEventId = parsedRequiredEventId;
+        }
+
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        var wiseOldMan = scope.ServiceProvider.GetRequiredService<IWiseOldManClient>();
+
+        var player = await db.Players.FirstOrDefaultAsync(x => x.Id == playerId);
+        var openMismatches = await db.LifecycleEvents
+            .Where(x => x.PlayerId == playerId && x.EventType == "WOM_RANK_MISMATCH_REQUIRED" && x.Status == "OPEN")
+            .OrderBy(x => x.CreatedAt)
+            .ToListAsync();
+        var postedEvents = await db.LifecycleEvents
+            .Where(x => x.PlayerId == playerId && x.EventType == "WOM_RANK_MISMATCH_DISCORD_POSTED")
+            .OrderByDescending(x => x.CreatedAt)
+            .ToListAsync();
+        var clickedPostedEvent = FindLifecycleEventByDiscordMessageId(postedEvents, component.Message.Id);
+        var latestPostedEvent = postedEvents.FirstOrDefault();
+        var isLegacyStaleClick = requiredEventId is null &&
+            latestPostedEvent is not null &&
+            clickedPostedEvent?.Id != latestPostedEvent.Id;
+
+        var matchingOpenMismatches = requiredEventId.HasValue
+            ? openMismatches.Where(x => x.Id == requiredEventId.Value).ToList()
+            : isLegacyStaleClick ? [] : openMismatches;
+        var metadataSource = matchingOpenMismatches.LastOrDefault() ??
+            openMismatches.LastOrDefault() ??
+            clickedPostedEvent ??
+            latestPostedEvent;
+        var metadata = ReadLifecycleMetadata(metadataSource?.MetadataJson ?? "{}");
+        var playerName = player?.Username ?? PickLifecycleValue(metadata, "Player", "Username") ?? "Unknown player";
+        var expectedRank = PickLifecycleValue(metadata, "ExpectedRank") ?? player?.CurrentRank ?? "Unknown";
+        var actualWomRole = PickLifecycleValue(metadata, "ActualWomRole") ?? "Unknown";
+        var requestedRole = expectedRank;
+        var updatedRole = (string?)null;
+        int? womPlayerId = null;
+        string? womDisplayName = null;
+        int? womHttpStatus = null;
+        string? womDetails = null;
+        var dbRankBefore = player?.CurrentRank ?? expectedRank;
+        var dbRankAfter = dbRankBefore;
+        var womRankBefore = actualWomRole;
+        var womRankAfter = actualWomRole;
+        var closedRequiredEventIds = matchingOpenMismatches.Select(x => x.Id).ToArray();
+        var shouldCloseMismatch = action is not "sync_db_to_wom";
+        foreach (var ev in matchingOpenMismatches)
+        {
+            if (shouldCloseMismatch)
+            {
+                ev.Status = "DONE";
+            }
+        }
+        var closedActiveMismatch = shouldCloseMismatch && closedRequiredEventIds.Length > 0;
+
+        if (action == "sync_wom_to_db")
+        {
+            if (player is null)
+            {
+                await RespondToComponentAsync(component, "Player not found.", ephemeral: true);
+                return;
+            }
+
+            player.CurrentRank = actualWomRole;
+            dbRankAfter = player.CurrentRank;
+
+            // Re-enable mismatch tracking after an explicit sync decision.
+            await CloseOpenLifecycleEventsAsync(db, player.Id, "WOM_RANK_MISMATCH_IGNORED");
+        }
+        else if (action == "sync_db_to_wom")
+        {
+            var womUpdate = await ExecuteWomRoleUpdateForPlayerAsync(playerName, requestedRole);
+            womHttpStatus = womUpdate.HttpStatus;
+            womDetails = womUpdate.Details;
+            updatedRole = womUpdate.UpdatedRole;
+            womPlayerId = womUpdate.WomPlayerId;
+            womDisplayName = womUpdate.DisplayName;
+            womRankAfter = womUpdate.UpdatedRole ?? womRankBefore;
+            if (!womUpdate.Success)
+            {
+                await RespondToComponentAsync(component, $"Failed to update WiseOldMan role: {womUpdate.Details}", ephemeral: true);
+                closedActiveMismatch = false;
+            }
+            else
+            {
+                foreach (var ev in matchingOpenMismatches)
+                {
+                    ev.Status = "DONE";
+                }
+                closedActiveMismatch = closedRequiredEventIds.Length > 0;
+                if (player is not null)
+                {
+                    await CloseOpenLifecycleEventsAsync(db, player.Id, "WOM_RANK_MISMATCH_IGNORED");
+                }
+            }
+        }
+
+        if (action == "ignore")
+        {
+            var hasOpenIgnore = await db.LifecycleEvents.AnyAsync(x =>
+                x.PlayerId == playerId &&
+                x.EventType == "WOM_RANK_MISMATCH_IGNORED" &&
+                x.Status == "OPEN");
+            if (closedActiveMismatch && player is not null && !hasOpenIgnore)
+            {
+                db.LifecycleEvents.Add(new LifecycleEvent
+                {
+                    PlayerId = playerId,
+                    EventType = "WOM_RANK_MISMATCH_IGNORED",
+                    MetadataJson = JsonUtil.Serialize(new
+                    {
+                        Player = player.Username,
+                        ExpectedRank = expectedRank,
+                        ActualWomRole = actualWomRole,
+                        IgnoredBy = component.User.Username,
+                        HandledBy = component.User.Username,
+                        HandledByDiscordUserId = component.User.Id,
+                        IgnoredAt = DateTimeOffset.UtcNow
+                    }),
+                    Status = "OPEN",
+                    CreatedAt = DateTimeOffset.UtcNow
+                });
+            }
+        }
+
+        var ownerId = player?.Id ?? await ResolveLifecycleOwnerPlayerIdAsync(db, playerId, CancellationToken.None);
+        if (ownerId.HasValue)
+        {
+            db.LifecycleEvents.Add(new LifecycleEvent
+            {
+                PlayerId = ownerId.Value,
+                EventType = "WOM_RANK_MISMATCH_ACTION_APPLIED",
+                MetadataJson = JsonUtil.Serialize(new
+                {
+                    Player = playerName,
+                    ExpectedRank = expectedRank,
+                    ActualWomRole = actualWomRole,
+                    Action = action,
+                    Direction = GetWomRankMismatchDirection(expectedRank, actualWomRole),
+                    DbRankBefore = dbRankBefore,
+                    DbRankAfter = dbRankAfter,
+                    WomRankBefore = womRankBefore,
+                    WomRankAfter = womRankAfter,
+                    RequestedRole = requestedRole,
+                    UpdatedRole = updatedRole,
+                    WiseOldManPlayerId = womPlayerId,
+                    WiseOldManDisplayName = womDisplayName,
+                    HttpStatus = womHttpStatus,
+                    Details = womDetails,
+                    HandledBy = component.User.Username,
+                    HandledByDiscordUserId = component.User.Id,
+                    Source = "discord",
+                    RequiredEventId = requiredEventId,
+                    ClosedRequiredEventIds = closedRequiredEventIds,
+                    ChannelId = component.Channel.Id,
+                    DiscordMessageId = component.Message.Id,
+                    Stale = !closedActiveMismatch
+                }),
+                Status = "DONE",
+                CreatedAt = DateTimeOffset.UtcNow
+            });
+        }
+
+        await wiseOldMan.InvalidateCacheAsync(CancellationToken.None);
+        await db.SaveChangesAsync();
+
+        var handled = (action, closedActiveMismatch) switch
+        {
+            ("ignore", true) => $"Allowed/ignored by {component.User.Username}",
+            ("ignore", false) => $"Stale WOM rank mismatch alert cleaned up by {component.User.Username}",
+            ("sync_wom_to_db", true) => $"Synced both sides to WOM rank by {component.User.Username}",
+            ("sync_wom_to_db", false) => $"Database sync requested by {component.User.Username}, but alert was stale",
+            ("sync_db_to_wom", true) => $"Synced both sides to database rank by {component.User.Username}",
+            ("sync_db_to_wom", false) => $"WiseOldMan sync attempt by {component.User.Username} did not resolve the active mismatch",
+            ("dismiss", true) => $"Dismissed by {component.User.Username}; update the rank in game/WOM if it still mismatches",
+            _ => $"Already handled; cleaned up by {component.User.Username}"
+        };
+        var handledActionStyle = action is "ignore" or "sync_wom_to_db" or "sync_db_to_wom" ? "approve" : "dismiss";
+        await UpdateComponentMessageAsync(component, BuildHandledEmbed(component.Message.Embeds.FirstOrDefault(), handled, handledActionStyle));
+
+        if (ownerId.HasValue)
+        {
+            ScheduleWomRankMismatchMessageDelete(
+                db,
+                ownerId.Value,
+                component.Channel.Id,
+                component.Message.Id,
+                "wom-rank-mismatch-action-handled",
+                $"WOM rank mismatch alert for {playerName}",
+                action);
+            await db.SaveChangesAsync();
+        }
+        else
+        {
+            try
+            {
+                await component.Message.DeleteAsync();
+            }
+            catch
+            {
+                // best effort if no valid player row exists for lifecycle scheduling
+            }
+        }
+    }
+
+    private void ScheduleDelete(int candidateId, int playerId)
+    {
+        using var scope = scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        ulong? channelId = null;
+        ulong? messageId = null;
+        var posted = db.LifecycleEvents
+            .Where(x => x.EventType == "PROMOTION_DISCORD_POSTED")
+            .AsEnumerable();
+        foreach (var ev in posted)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(ev.MetadataJson);
+                if (!doc.RootElement.TryGetProperty("CandidateId", out var c) || c.GetInt32() != candidateId) continue;
+                if (doc.RootElement.TryGetProperty("ChannelId", out var ch)) channelId = ch.GetUInt64();
+                if (doc.RootElement.TryGetProperty("DiscordMessageId", out var m)) messageId = m.GetUInt64();
+                break;
+            }
+            catch { }
+        }
+
+        if (messageId.HasValue)
+        {
+            var hasOpenDeleteForMessage = db.LifecycleEvents.Any(x =>
+                x.EventType == "PROMOTION_DISCORD_DELETE_SCHEDULED" &&
+                x.Status == "OPEN" &&
+                x.MetadataJson.Contains($"\"DiscordMessageId\":{messageId.Value}"));
+            if (hasOpenDeleteForMessage) return;
+        }
+        else
+        {
+            var hasAnyDeleteForCandidate = db.LifecycleEvents.Any(x =>
+                x.EventType == "PROMOTION_DISCORD_DELETE_SCHEDULED" &&
+                x.MetadataJson.Contains($"\"CandidateId\":{candidateId}"));
+            if (hasAnyDeleteForCandidate) return;
+        }
+
+        ScheduleChannelMessageDelete(
+            db,
+            playerId,
+            channelId,
+            messageId,
+            "PROMOTION_DISCORD_DELETE_SCHEDULED",
+            new { CandidateId = candidateId, Reason = "promotion-action-handled" },
+            dedupeCompletedSchedules: false);
+        db.SaveChanges();
+    }
+
+    private void ScheduleChannelMessageDelete(
+        TrackerDbContext db,
+        int playerId,
+        ulong? channelId,
+        ulong? messageId,
+        string eventType,
+        object extraMetadata,
+        DateTimeOffset? deleteAfterUtc = null,
+        DateTimeOffset? hardDeleteAfterUtc = null,
+        bool dedupeCompletedSchedules = true)
+    {
+        if (messageId.HasValue)
+        {
+            var hasScheduledForMessage = db.LifecycleEvents.Any(x =>
+                (x.EventType == "PROMOTION_DISCORD_DELETE_SCHEDULED" ||
+                 x.EventType == "TEMPLE_MISSING_DISCORD_DELETE_SCHEDULED" ||
+                 x.EventType == "WOM_MISSING_DISCORD_DELETE_SCHEDULED" ||
+                 x.EventType == "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED") &&
+                (dedupeCompletedSchedules || x.Status == "OPEN") &&
+                x.MetadataJson.Contains($"\"DiscordMessageId\":{messageId.Value}"));
+            if (hasScheduledForMessage) return;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var deleteAfter = deleteAfterUtc ?? now.AddMinutes(Math.Min(_discordDeleteDelayMinutes, _discordDeleteHardCapMinutes));
+        var hardDeleteAfter = hardDeleteAfterUtc ?? now.AddMinutes(_discordDeleteHardCapMinutes);
+        db.LifecycleEvents.Add(new LifecycleEvent
+        {
+            PlayerId = playerId,
+            EventType = eventType,
+            MetadataJson = JsonUtil.Serialize(new
+            {
+                ChannelId = channelId,
+                DiscordMessageId = messageId,
+                DeleteAfterUtc = deleteAfter,
+                HardDeleteAfterUtc = hardDeleteAfter,
+                Extra = extraMetadata
+            }),
+            Status = "OPEN",
+            CreatedAt = now
+        });
+    }
+
+    private void ScheduleWomRankMismatchMessageDelete(
+        TrackerDbContext db,
+        int playerId,
+        ulong? channelId,
+        ulong? messageId,
+        string reason,
+        string messageDescription,
+        string? action = null,
+        DateTimeOffset? deleteAfterUtc = null,
+        DateTimeOffset? hardDeleteAfterUtc = null)
+    {
+        ScheduleChannelMessageDelete(
+            db,
+            playerId,
+            channelId,
+            messageId,
+            "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED",
+            new
+            {
+                Reason = reason,
+                Action = action,
+                MessageDescription = messageDescription
+            },
+            deleteAfterUtc,
+            hardDeleteAfterUtc);
+    }
+
+    private static async Task<bool> HasOpenWomRankMismatchDeleteForPlayerAsync(
+        TrackerDbContext db,
+        int playerId,
+        CancellationToken ct)
+    {
+        return await db.LifecycleEvents.AnyAsync(x =>
+            x.PlayerId == playerId &&
+            x.EventType == "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED" &&
+            x.Status == "OPEN" &&
+            (x.MetadataJson.Contains("wom-rank-mismatch") ||
+             x.MetadataJson.Contains("WOM rank mismatch")), ct);
+    }
+
+    private async Task<(IUserMessage? Message, ulong? ChannelId, ulong? MessageId)> TryGetPostedUserMessageAsync(LifecycleEvent postedEvent)
+    {
+        ulong? channelId = null;
+        ulong? messageId = null;
+        try
+        {
+            using var postedDoc = JsonDocument.Parse(postedEvent.MetadataJson);
+            if (!TryReadUlong(postedDoc.RootElement, "ChannelId", out var parsedChannelId) ||
+                !TryReadUlong(postedDoc.RootElement, "DiscordMessageId", out var parsedMessageId))
+            {
+                return (null, channelId, messageId);
+            }
+
+            channelId = parsedChannelId;
+            messageId = parsedMessageId;
+            var postedChannel = await ResolveMessageChannelAsync(parsedChannelId);
+            if (postedChannel is null)
+            {
+                return (null, channelId, messageId);
+            }
+
+            var existingMessage = await postedChannel.GetMessageAsync(parsedMessageId);
+            return (existingMessage as IUserMessage, channelId, messageId);
+        }
+        catch
+        {
+            return (null, channelId, messageId);
+        }
+    }
+
+    private static async Task<bool> HasWomRankMismatchActionForPostedEventAsync(
+        TrackerDbContext db,
+        int playerId,
+        LifecycleEvent postedEvent,
+        CancellationToken ct)
+    {
+        var postedMessageId = ExtractUlong(postedEvent.MetadataJson, "DiscordMessageId");
+        var postedRequiredEventId = ExtractInt(postedEvent.MetadataJson, "RequiredEventId");
+        var actions = await db.LifecycleEvents
+            .Where(x =>
+                x.PlayerId == playerId &&
+                x.EventType == "WOM_RANK_MISMATCH_ACTION_APPLIED" &&
+                x.CreatedAt >= postedEvent.CreatedAt)
+            .OrderByDescending(x => x.CreatedAt)
+            .ToListAsync(ct);
+
+        foreach (var action in actions)
+        {
+            var actionMetadata = ReadLifecycleMetadata(action.MetadataJson);
+            var actionMessageIdText = PickLifecycleValue(actionMetadata, "DiscordMessageId", "ClickedDiscordMessageId");
+            if (postedMessageId.HasValue && ulong.TryParse(actionMessageIdText, out var actionMessageId))
+            {
+                if (actionMessageId == postedMessageId.Value) return true;
+                continue;
+            }
+
+            var actionRequiredEventIdText = PickLifecycleValue(actionMetadata, "RequiredEventId");
+            if (postedRequiredEventId.HasValue && int.TryParse(actionRequiredEventIdText, out var actionRequiredEventId))
+            {
+                if (actionRequiredEventId == postedRequiredEventId.Value) return true;
+                continue;
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
+    private async Task EnsureMessageDeleteScheduledOrDeletedAsync(
+        TrackerDbContext db,
+        int preferredPlayerId,
+        ulong channelId,
+        ulong messageId,
+        string eventType,
+        object extraMetadata,
+        DateTimeOffset messageCreatedAt,
+        CancellationToken ct)
+    {
+        var hasScheduledDelete = await db.LifecycleEvents.AnyAsync(x =>
+            (x.EventType == "PROMOTION_DISCORD_DELETE_SCHEDULED" ||
+             x.EventType == "TEMPLE_MISSING_DISCORD_DELETE_SCHEDULED" ||
+             x.EventType == "WOM_MISSING_DISCORD_DELETE_SCHEDULED" ||
+             x.EventType == "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED") &&
+            x.MetadataJson.Contains($"\"DiscordMessageId\":{messageId}"), ct);
+        if (hasScheduledDelete) return;
+
+        var now = DateTimeOffset.UtcNow;
+        var preferredDeleteAt = messageCreatedAt.AddMinutes(_discordDeleteDelayMinutes);
+        var hardDeleteAt = messageCreatedAt.AddMinutes(_discordDeleteHardCapMinutes);
+        var dueAt = preferredDeleteAt <= hardDeleteAt ? preferredDeleteAt : hardDeleteAt;
+
+        if (dueAt <= now)
+        {
+            var channel = await ResolveMessageChannelAsync(channelId);
+            if (channel is not null)
+            {
+                try
+                {
+                    await channel.DeleteMessageAsync(messageId);
+                    return;
+                }
+                catch (Discord.Net.HttpException ex) when (ex.HttpCode == System.Net.HttpStatusCode.NotFound ||
+                                                           ex.HttpCode == System.Net.HttpStatusCode.Forbidden)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(
+                        ex,
+                        "Failed to immediately delete Discord message {MessageId} in channel {ChannelId}; scheduling retry.",
+                        messageId,
+                        channelId);
+                    // fall through to schedule immediate retry
+                }
+            }
+            else
+            {
+                logger.LogWarning(
+                    "Unable to resolve Discord channel {ChannelId} for due message delete {MessageId}; scheduling retry.",
+                    channelId,
+                    messageId);
+            }
+        }
+
+        var ownerId = await ResolveLifecycleOwnerPlayerIdAsync(db, preferredPlayerId, ct);
+        if (!ownerId.HasValue) return;
+
+        var scheduleDue = dueAt <= now ? now : dueAt;
+        var scheduleHard = hardDeleteAt <= now ? now : hardDeleteAt;
+        if (scheduleHard < scheduleDue) scheduleHard = scheduleDue;
+
+        ScheduleChannelMessageDelete(
+            db,
+            ownerId.Value,
+            channelId,
+            messageId,
+            eventType,
+            extraMetadata,
+            scheduleDue,
+            scheduleHard);
+    }
+
+    private async Task<int?> ResolveLifecycleOwnerPlayerIdAsync(TrackerDbContext db, int preferredPlayerId, CancellationToken ct)
+    {
+        var preferredExists = await db.Players.AnyAsync(x => x.Id == preferredPlayerId, ct);
+        if (preferredExists) return preferredPlayerId;
+        var fallback = await db.Players.OrderBy(x => x.Id).Select(x => (int?)x.Id).FirstOrDefaultAsync(ct);
+        return fallback;
+    }
+
+    private async Task ScheduleInteractionResponseDeleteAsync(SocketSlashCommand command, string? messageDescription = null)
+    {
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        var ownerId = await ResolveLifecycleOwnerPlayerIdAsync(db, 0, CancellationToken.None);
+        if (!ownerId.HasValue)
+        {
+            logger.LogWarning("Unable to schedule interaction-response delete for command {CommandName}; no valid player row exists for lifecycle ownership.", command.CommandName);
+            return;
+        }
+        var now = DateTimeOffset.UtcNow;
+        var deleteAfter = now.AddMinutes(Math.Min(_discordDeleteDelayMinutes, _discordDeleteHardCapMinutes));
+        var hardDeleteAfter = now.AddMinutes(_discordDeleteHardCapMinutes);
+        db.LifecycleEvents.Add(new LifecycleEvent
+        {
+            PlayerId = ownerId.Value,
+            EventType = "DISCORD_INTERACTION_RESPONSE_DELETE_SCHEDULED",
+            MetadataJson = JsonUtil.Serialize(new
+            {
+                InteractionId = command.Id,
+                ApplicationId = command.ApplicationId,
+                InteractionToken = command.Token,
+                DeleteAfterUtc = deleteAfter,
+                HardDeleteAfterUtc = hardDeleteAfter,
+                Extra = new
+                {
+                    Reason = $"slash-{command.CommandName}-interaction-response",
+                    MessageDescription = BuildInteractionCleanupDescription(command, messageDescription)
+                }
+            }),
+            Status = "OPEN",
+            CreatedAt = now
+        });
+        await db.SaveChangesAsync();
+    }
+
+    private async Task ScheduleChannelResponseDeleteAsync(ulong channelId, ulong messageId, string reason, string? messageDescription = null)
+    {
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        var hasScheduledDelete = await db.LifecycleEvents.AnyAsync(x =>
+            (x.EventType == "PROMOTION_DISCORD_DELETE_SCHEDULED" ||
+             x.EventType == "TEMPLE_MISSING_DISCORD_DELETE_SCHEDULED" ||
+             x.EventType == "WOM_MISSING_DISCORD_DELETE_SCHEDULED" ||
+             x.EventType == "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED") &&
+            x.MetadataJson.Contains($"\"DiscordMessageId\":{messageId}"));
+        if (hasScheduledDelete) return;
+
+        var ownerId = await ResolveLifecycleOwnerPlayerIdAsync(db, 0, CancellationToken.None);
+        if (!ownerId.HasValue)
+        {
+            logger.LogWarning("Unable to schedule channel-response delete for message {MessageId}; no valid player row exists for lifecycle ownership.", messageId);
+            return;
+        }
+
+        ScheduleChannelMessageDelete(
+            db,
+            ownerId.Value,
+            channelId,
+            messageId,
+            "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED",
+            new
+            {
+                Reason = reason,
+                MessageDescription = NormalizeCleanupDescription(messageDescription, reason)
+            });
+        await db.SaveChangesAsync();
+    }
+
+    private async Task ProcessScheduledDeletes(CancellationToken ct)
+    {
+        if (_client is null) return;
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        var now = DateTimeOffset.UtcNow;
+
+        var scheduled = await db.LifecycleEvents
+            .Where(x =>
+                (x.EventType == "PROMOTION_DISCORD_DELETE_SCHEDULED" ||
+                 x.EventType == "TEMPLE_MISSING_DISCORD_DELETE_SCHEDULED" ||
+                 x.EventType == "WOM_MISSING_DISCORD_DELETE_SCHEDULED" ||
+                 x.EventType == "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED" ||
+                 x.EventType == "DISCORD_INTERACTION_RESPONSE_DELETE_SCHEDULED") &&
+                x.Status == "OPEN")
+            .ToListAsync(ct);
+        if (scheduled.Count == 0) return;
+
+        foreach (var s in scheduled)
+        {
+            using var sd = JsonDocument.Parse(s.MetadataJson);
+            if (!TryReadDateTimeOffset(sd.RootElement, "DeleteAfterUtc", out var due))
+            {
+                due = DateTimeOffset.MinValue;
+            }
+            if (TryReadDateTimeOffset(sd.RootElement, "HardDeleteAfterUtc", out var hardCap) && hardCap < due)
+            {
+                due = hardCap;
+            }
+            if (due > now) continue;
+
+            if (s.EventType == "DISCORD_INTERACTION_RESPONSE_DELETE_SCHEDULED")
+            {
+                if (!TryReadUlong(sd.RootElement, "ApplicationId", out var appId) ||
+                    !sd.RootElement.TryGetProperty("InteractionToken", out var tokenProp))
+                {
+                    s.Status = "DONE";
+                    continue;
+                }
+
+                var token = tokenProp.GetString();
+                if (string.IsNullOrWhiteSpace(token))
+                {
+                    s.Status = "DONE";
+                    continue;
+                }
+
+                try
+                {
+                    var client = httpClientFactory.CreateClient();
+                    var url = $"https://discord.com/api/v10/webhooks/{appId}/{token}/messages/@original";
+                    using var req = new HttpRequestMessage(HttpMethod.Delete, url);
+                    using var resp = await client.SendAsync(req, ct);
+                    if (resp.IsSuccessStatusCode ||
+                        resp.StatusCode == System.Net.HttpStatusCode.NotFound ||
+                        resp.StatusCode == System.Net.HttpStatusCode.Unauthorized ||
+                        resp.StatusCode == System.Net.HttpStatusCode.Forbidden)
+                    {
+                        s.Status = "DONE";
+                    }
+                }
+                catch
+                {
+                    logger.LogWarning(
+                        "Scheduled Discord interaction delete {LifecycleEventId} is due but failed; it will be retried.",
+                        s.Id);
+                    // keep OPEN for retry on transient network failures
+                }
+                continue;
+            }
+
+            if (!TryReadUlong(sd.RootElement, "ChannelId", out var channelId) ||
+                !TryReadUlong(sd.RootElement, "DiscordMessageId", out var messageId))
+            {
+                s.Status = "DONE";
+                continue;
+            }
+
+            var channel = await ResolveMessageChannelAsync(channelId);
+            if (channel is null)
+            {
+                logger.LogWarning(
+                    "Scheduled Discord delete {LifecycleEventId} for message {MessageId} in channel {ChannelId} is due but the channel could not be resolved.",
+                    s.Id,
+                    messageId,
+                    channelId);
+                // keep OPEN so a later cycle can retry if cache/rest resolution failed transiently
+                continue;
+            }
+
+            try
+            {
+                await channel.DeleteMessageAsync(messageId);
+                s.Status = "DONE";
+            }
+            catch (Discord.Net.HttpException ex) when (ex.HttpCode == System.Net.HttpStatusCode.NotFound ||
+                                                       ex.HttpCode == System.Net.HttpStatusCode.Forbidden)
+            {
+                // Already gone or inaccessible: treat as complete.
+                s.Status = "DONE";
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(
+                    ex,
+                    "Scheduled Discord delete {LifecycleEventId} for message {MessageId} in channel {ChannelId} failed; it will be retried.",
+                    s.Id,
+                    messageId,
+                    channelId);
+                // keep OPEN for retry on transient failures
+            }
+        }
+        await db.SaveChangesAsync(ct);
+    }
+
+    private async Task ReconcileCompletedMessageDeletes(CancellationToken ct)
+    {
+        if (_client is null) return;
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+
+        var promotionPosted = await db.LifecycleEvents
+            .Where(x => x.EventType == "PROMOTION_DISCORD_POSTED")
+            .OrderByDescending(x => x.CreatedAt)
+            .ToListAsync(ct);
+        foreach (var ev in promotionPosted)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(ev.MetadataJson);
+                if (!doc.RootElement.TryGetProperty("CandidateId", out var candProp)) continue;
+                var candidateId = candProp.GetInt32();
+                if (!TryReadUlong(doc.RootElement, "ChannelId", out var chId) ||
+                    !TryReadUlong(doc.RootElement, "DiscordMessageId", out var msgId)) continue;
+
+                var candidate = await db.PromotionCandidates.FirstOrDefaultAsync(x => x.Id == candidateId, ct);
+                if (candidate is null || candidate.Status != PromotionStatus.PENDING)
+                {
+                    var hasOpenDeleteSchedule = await db.LifecycleEvents.AnyAsync(x =>
+                        x.EventType == "PROMOTION_DISCORD_DELETE_SCHEDULED" &&
+                        x.Status == "OPEN" &&
+                        x.MetadataJson.Contains($"\"DiscordMessageId\":{msgId}"), ct);
+                    if (hasOpenDeleteSchedule) continue;
+
+                    await DeletePostedMessageIfFoundAsync(chId, msgId);
+                }
+            }
+            catch
+            {
+                // ignore malformed old metadata
+            }
+        }
+
+        var templePosted = await db.LifecycleEvents
+            .Where(x => x.EventType == "TEMPLE_MISSING_DISCORD_POSTED")
+            .OrderByDescending(x => x.CreatedAt)
+            .ToListAsync(ct);
+        foreach (var ev in templePosted)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(ev.MetadataJson);
+                if (!TryReadUlong(doc.RootElement, "ChannelId", out var chId) ||
+                    !TryReadUlong(doc.RootElement, "DiscordMessageId", out var msgId)) continue;
+
+                var player = await db.Players.FirstOrDefaultAsync(x => x.Id == ev.PlayerId, ct);
+                var stillNeedsAction = player is not null && player.Status == PlayerStatus.MISSING_PENDING_REVIEW;
+                if (stillNeedsAction) continue;
+
+                await EnsureMessageDeleteScheduledOrDeletedAsync(
+                    db,
+                    ev.PlayerId,
+                    chId,
+                    msgId,
+                    "TEMPLE_MISSING_DISCORD_DELETE_SCHEDULED",
+                    new { Reason = "reconcile-completed-temple-missing" },
+                    ev.CreatedAt,
+                    ct);
+            }
+            catch
+            {
+                // ignore malformed old metadata
+            }
+        }
+
+        var womRankMismatchPosted = await db.LifecycleEvents
+            .Where(x => x.EventType == "WOM_RANK_MISMATCH_DISCORD_POSTED")
+            .OrderByDescending(x => x.CreatedAt)
+            .ToListAsync(ct);
+        var latestWomRankMismatchPostIds = womRankMismatchPosted
+            .GroupBy(x => x.PlayerId)
+            .Select(x => x.OrderByDescending(ev => ev.CreatedAt).First().Id)
+            .ToHashSet();
+        foreach (var ev in womRankMismatchPosted)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(ev.MetadataJson);
+                if (!TryReadUlong(doc.RootElement, "ChannelId", out var chId) ||
+                    !TryReadUlong(doc.RootElement, "DiscordMessageId", out var msgId)) continue;
+
+                var player = await db.Players.FirstOrDefaultAsync(x => x.Id == ev.PlayerId, ct);
+                if (!latestWomRankMismatchPostIds.Contains(ev.Id))
+                {
+                    await EnsureMessageDeleteScheduledOrDeletedAsync(
+                        db,
+                        ev.PlayerId,
+                        chId,
+                        msgId,
+                        "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED",
+                        new
+                        {
+                            Reason = "wom-rank-mismatch-duplicate",
+                            MessageDescription = $"WOM rank mismatch alert for {player?.Username ?? "player"}"
+                        },
+                        ev.CreatedAt,
+                        ct);
+                    continue;
+                }
+
+                var hasOpenMismatch = await db.LifecycleEvents.AnyAsync(x =>
+                    x.PlayerId == ev.PlayerId &&
+                    x.EventType == "WOM_RANK_MISMATCH_REQUIRED" &&
+                    x.Status == "OPEN", ct);
+                var isIgnored = await db.LifecycleEvents.AnyAsync(x =>
+                    x.PlayerId == ev.PlayerId &&
+                    x.EventType == "WOM_RANK_MISMATCH_IGNORED" &&
+                    x.Status == "OPEN", ct);
+                if (hasOpenMismatch && !isIgnored && player is not null) continue;
+
+                await EnsureMessageDeleteScheduledOrDeletedAsync(
+                    db,
+                    ev.PlayerId,
+                    chId,
+                    msgId,
+                    "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED",
+                    new { Reason = "wom-rank-mismatch-resolved", MessageDescription = "WOM rank mismatch alert" },
+                    ev.CreatedAt,
+                    ct);
+            }
+            catch
+            {
+                // ignore malformed old metadata
+            }
+        }
+
+        await db.SaveChangesAsync(ct);
+    }
+
+    private async Task DeletePostedMessageIfFoundAsync(ulong channelId, ulong messageId)
+    {
+        var channel = await ResolveMessageChannelAsync(channelId);
+        if (channel is null) return;
+
+        try
+        {
+            var message = await channel.GetMessageAsync(messageId);
+            if (message is IUserMessage userMessage)
+            {
+                await userMessage.DeleteAsync();
+            }
+        }
+        catch (Discord.Net.HttpException ex) when (ex.HttpCode == System.Net.HttpStatusCode.NotFound ||
+                                                   ex.HttpCode == System.Net.HttpStatusCode.Forbidden)
+        {
+            // Missing or inaccessible historical messages do not need cleanup rows.
+        }
+    }
+
+    private async Task UpdatePetHiscoresMessages(CancellationToken ct)
+    {
+        if (_client is null) return;
+        if (_options.PetHiscoresChannelId == 0)
+        {
+            return;
+        }
+
+        var channel = await ResolveMessageChannelAsync(_options.PetHiscoresChannelId);
+        if (channel is null) return;
+
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        var ownerId = await db.Players
+            .OrderBy(x => x.Id)
+            .Select(x => (int?)x.Id)
+            .FirstOrDefaultAsync(ct);
+        if (!ownerId.HasValue)
+        {
+            logger.LogInformation("Skipping pet hiscore update because there are no players in database.");
+            return;
+        }
+
+        var postedEvents = await db.LifecycleEvents
+            .Where(x => x.EventType == "PET_HISCORES_DISCORD_POSTED")
+            .OrderBy(x => x.CreatedAt)
+            .ToListAsync(ct);
+        var postedForChannel = postedEvents
+            .Where(x => ExtractUlong(x.MetadataJson, "ChannelId") == _options.PetHiscoresChannelId)
+            .ToList();
+
+        var bannerState = await GetPetHiscoresBannerStateAsync(db, channel, ct);
+        if (bannerState == TrackedMessageState.Missing && postedForChannel.Count > 0)
+        {
+            foreach (var ev in postedForChannel)
+            {
+                var msgId = ExtractUlong(ev.MetadataJson, "DiscordMessageId");
+                if (msgId.HasValue)
+                {
+                    try
+                    {
+                        var existing = await channel.GetMessageAsync(msgId.Value);
+                        if (existing is IUserMessage userMessage)
+                        {
+                            await userMessage.DeleteAsync();
+                        }
+                    }
+                    catch
+                    {
+                        // ignore and continue cleanup
+                    }
+                }
+            }
+
+            db.LifecycleEvents.RemoveRange(postedForChannel);
+            await db.SaveChangesAsync(ct);
+            postedForChannel = [];
+        }
+        else if (bannerState == TrackedMessageState.Unknown)
+        {
+            logger.LogWarning("Pet hiscore banner state could not be resolved for channel {ChannelId}; skipping cleanup/recreate to avoid duplicates.", _options.PetHiscoresChannelId);
+        }
+
+        await EnsurePetHiscoresBannerMessageAsync(db, channel, ownerId.Value, ct);
+
+        var rowsRaw = await db.Players
+            .Select(x => new
+            {
+                x.Username,
+                x.StoredPetCount,
+                x.ManualPetOverride
+            })
+            .ToListAsync(ct);
+
+        var rows = rowsRaw
+            .Select(x => new
+            {
+                x.Username,
+                Pets = Math.Max(x.StoredPetCount, x.ManualPetOverride ?? 0)
+            })
+            .Where(x => x.Pets >= 10)
+            .OrderByDescending(x => x.Pets)
+            .ThenBy(x => x.Username)
+            .ToList();
+
+        var pages = BuildPetHiscorePages(rows.Select((x, i) => (Rank: i + 1, x.Username, x.Pets)).ToList());
+
+        if (postedForChannel.Count == 0)
+        {
+            var ownerPlayerId = await db.Players
+                .OrderBy(x => x.Id)
+                .Select(x => (int?)x.Id)
+                .FirstOrDefaultAsync(ct);
+            if (!ownerPlayerId.HasValue)
+            {
+                logger.LogInformation("Skipping pet hiscore message bootstrap because no players exist yet.");
+                return;
+            }
+
+            for (var i = 0; i < pages.Count; i++)
+            {
+                var msg = await channel.SendMessageAsync(pages[i]);
+                db.LifecycleEvents.Add(new LifecycleEvent
+                {
+                    PlayerId = ownerPlayerId.Value,
+                    EventType = "PET_HISCORES_DISCORD_POSTED",
+                    MetadataJson = JsonUtil.Serialize(new
+                    {
+                        ChannelId = _options.PetHiscoresChannelId,
+                        DiscordMessageId = msg.Id,
+                        Page = i
+                    }),
+                    Status = "DONE",
+                    CreatedAt = DateTimeOffset.UtcNow
+                });
+            }
+            await db.SaveChangesAsync(ct);
+            return;
+        }
+
+        var mapped = postedForChannel
+            .Select(x => new
+            {
+                Event = x,
+                Page = ExtractInt(x.MetadataJson, "Page") ?? 0,
+                MessageId = ExtractUlong(x.MetadataJson, "DiscordMessageId")
+            })
+            .Where(x => x.MessageId.HasValue)
+            .GroupBy(x => x.Page)
+            .Select(g => g.OrderByDescending(x => x.Event.CreatedAt).First())
+            .OrderBy(x => x.Page)
+            .ToList();
+
+        if (mapped.Count == 0)
+        {
+            for (var i = 0; i < pages.Count; i++)
+            {
+                var msg = await channel.SendMessageAsync(pages[i]);
+                db.LifecycleEvents.Add(new LifecycleEvent
+                {
+                    PlayerId = ownerId.Value,
+                    EventType = "PET_HISCORES_DISCORD_POSTED",
+                    MetadataJson = JsonUtil.Serialize(new
+                    {
+                        ChannelId = _options.PetHiscoresChannelId,
+                        DiscordMessageId = msg.Id,
+                        Page = i
+                    }),
+                    Status = "DONE",
+                    CreatedAt = DateTimeOffset.UtcNow
+                });
+            }
+            await db.SaveChangesAsync(ct);
+            return;
+        }
+
+        for (var i = 0; i < pages.Count; i++)
+        {
+            var existing = mapped.FirstOrDefault(x => x.Page == i);
+            if (existing is not null && existing.MessageId.HasValue)
+            {
+                var (messageState, userMessage) = await TryGetTrackedUserMessageAsync(channel, existing.MessageId.Value);
+                if (messageState == TrackedMessageState.Found && userMessage is not null)
+                {
+                    await userMessage.ModifyAsync(p => p.Content = pages[i]);
+                    continue;
+                }
+                if (messageState == TrackedMessageState.Unknown)
+                {
+                    logger.LogWarning("Pet hiscore page message lookup was inconclusive for page {Page} in channel {ChannelId}; skipping recreate this cycle to avoid duplicates.", i, _options.PetHiscoresChannelId);
+                    continue;
+                }
+            }
+
+            var newMsg = await channel.SendMessageAsync(pages[i]);
+            db.LifecycleEvents.Add(new LifecycleEvent
+            {
+                PlayerId = ownerId.Value,
+                EventType = "PET_HISCORES_DISCORD_POSTED",
+                MetadataJson = JsonUtil.Serialize(new
+                {
+                    ChannelId = _options.PetHiscoresChannelId,
+                    DiscordMessageId = newMsg.Id,
+                    Page = i
+                }),
+                Status = "DONE",
+                CreatedAt = DateTimeOffset.UtcNow
+            });
+        }
+
+        if (mapped.Count > pages.Count)
+        {
+            for (var i = pages.Count; i < mapped.Count; i++)
+            {
+                try
+                {
+                    var msg = await channel.GetMessageAsync(mapped[i].MessageId!.Value);
+                    if (msg is IUserMessage userMessage)
+                    {
+                        await userMessage.ModifyAsync(p => p.Content = "Pet Hiscores\n\nNo entries for this page.");
+                    }
+                }
+                catch { }
+            }
+        }
+
+        await db.SaveChangesAsync(ct);
+    }
+
+    private async Task<TrackedMessageState> GetPetHiscoresBannerStateAsync(TrackerDbContext db, IMessageChannel channel, CancellationToken ct)
+    {
+        var bannerEvent = await db.LifecycleEvents
+            .Where(x => x.EventType == "PET_HISCORES_BANNER_POSTED")
+            .OrderByDescending(x => x.CreatedAt)
+            .FirstOrDefaultAsync(ct);
+        if (bannerEvent is null) return TrackedMessageState.Missing;
+
+        var trackedChannel = ExtractUlong(bannerEvent.MetadataJson, "ChannelId");
+        var trackedMessage = ExtractUlong(bannerEvent.MetadataJson, "DiscordMessageId");
+        if (trackedChannel != _options.PetHiscoresChannelId || !trackedMessage.HasValue) return TrackedMessageState.Missing;
+        var (state, _) = await TryGetTrackedUserMessageAsync(channel, trackedMessage.Value);
+        return state;
+    }
+
+    private async Task EnsurePetHiscoresBannerMessageAsync(
+        TrackerDbContext db,
+        IMessageChannel channel,
+        int ownerPlayerId,
+        CancellationToken ct)
+    {
+        var bannerEvent = await db.LifecycleEvents
+            .Where(x => x.EventType == "PET_HISCORES_BANNER_POSTED")
+            .OrderByDescending(x => x.CreatedAt)
+            .FirstOrDefaultAsync(ct);
+
+        if (bannerEvent is not null)
+        {
+            var trackedChannel = ExtractUlong(bannerEvent.MetadataJson, "ChannelId");
+            var trackedMessage = ExtractUlong(bannerEvent.MetadataJson, "DiscordMessageId");
+            if (trackedChannel == _options.PetHiscoresChannelId && trackedMessage.HasValue)
+            {
+                var (state, _) = await TryGetTrackedUserMessageAsync(channel, trackedMessage.Value);
+                if (state == TrackedMessageState.Found)
+                {
+                    return;
+                }
+                if (state == TrackedMessageState.Unknown)
+                {
+                    logger.LogWarning("Pet hiscore banner lookup was inconclusive for channel {ChannelId}; skipping banner recreate this cycle to avoid duplicates.", _options.PetHiscoresChannelId);
+                    return;
+                }
+            }
+        }
+
+        var bannerPath = Path.Combine(AppContext.BaseDirectory, "Assets", "catch_em_all_banner.png");
+        if (!File.Exists(bannerPath))
+        {
+            logger.LogWarning("Pet hiscore banner file not found at {Path}", bannerPath);
+            return;
+        }
+
+        var posted = await channel.SendFileAsync(bannerPath, text: "");
+        db.LifecycleEvents.Add(new LifecycleEvent
+        {
+            PlayerId = ownerPlayerId,
+            EventType = "PET_HISCORES_BANNER_POSTED",
+            MetadataJson = JsonUtil.Serialize(new
+            {
+                ChannelId = _options.PetHiscoresChannelId,
+                DiscordMessageId = posted.Id
+            }),
+            Status = "DONE",
+            CreatedAt = DateTimeOffset.UtcNow
+        });
+        await db.SaveChangesAsync(ct);
+    }
+
+    private async Task<(TrackedMessageState State, IUserMessage? Message)> TryGetTrackedUserMessageAsync(IMessageChannel channel, ulong messageId)
+    {
+        try
+        {
+            var msg = await channel.GetMessageAsync(messageId);
+            if (msg is IUserMessage userMessage) return (TrackedMessageState.Found, userMessage);
+            return (TrackedMessageState.Missing, null);
+        }
+        catch (Discord.Net.HttpException ex) when (ex.HttpCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return (TrackedMessageState.Missing, null);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to resolve tracked Discord message {MessageId} in channel {ChannelId}", messageId, _options.PetHiscoresChannelId);
+            return (TrackedMessageState.Unknown, null);
+        }
+    }
+
+    private List<string> BuildPetHiscorePages(List<(int Rank, string Username, int Pets)> entries)
+    {
+        var pages = new List<string>();
+        var intro =
+            "Samtliga medlemmar i Swedes med 10+ pets har möjligheten att bli addade till ⁠pet-hiscores. " +
+            "Ladda ner pluginen **\"TempleOSRS\"**, kryssa i **\"Collection Log Update Button\"** och **\"Automatically Sync Collection Log\"** - gå sedan in på er collection log och klicka på **\"Temple\"** i det övre högra hörnet. " +
+            "Om ni behöver hjälp med detta så pma <@214909384617099264> eller <@193851480422219777>. " +
+            "Om du har 30+ pets så har du chansen att få dina pets tillagda på din Templeprofil via Petcord <http://discord.gg/petcord>, Alice (sugarbunny.) är den som lägger till på din profil.\n\n**Pet Leaderboards**\n";
+        const string continuedHeader = "**Pet Leaderboards (forts.)**\n";
+        if (entries.Count == 0)
+        {
+            pages.Add($"{intro}> Inga spelare med 10+ pets just nu.");
+            return pages;
+        }
+
+        const int maxChars = 1800;
+        var current = new StringBuilder(intro);
+        foreach (var e in entries)
+        {
+            var prefix = e.Rank switch
+            {
+                1 => "🥇 ",
+                2 => "🥈 ",
+                3 => "🥉 ",
+                _ => $"{e.Rank}. "
+            };
+            var line = $"> {prefix}{e.Username} - {e.Pets}\n";
+            if (current.Length + line.Length > maxChars)
+            {
+                pages.Add(current.ToString().TrimEnd());
+                current.Clear();
+                current.Append(continuedHeader);
+            }
+            current.Append(line);
+        }
+
+        if (current.Length > 0)
+        {
+            pages.Add(current.ToString().TrimEnd());
+        }
+
+        return pages;
+    }
+
+    private static int? ExtractInt(string json, string property)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty(property, out var prop)) return null;
+            return prop.GetInt32();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static ulong? ExtractUlong(string json, string property)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty(property, out var prop)) return null;
+            if (prop.ValueKind == JsonValueKind.Number && prop.TryGetUInt64(out var n)) return n;
+            if (prop.ValueKind == JsonValueKind.String && ulong.TryParse(prop.GetString(), out var s)) return s;
+            return null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static LifecycleEvent? FindLifecycleEventByDiscordMessageId(IEnumerable<LifecycleEvent> events, ulong messageId)
+    {
+        return events.FirstOrDefault(x => ExtractUlong(x.MetadataJson, "DiscordMessageId") == messageId);
+    }
+
+    private static Dictionary<string, string> ReadLifecycleMetadata(string metadataJson)
+    {
+        var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            using var doc = JsonDocument.Parse(metadataJson);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return values;
+            foreach (var prop in doc.RootElement.EnumerateObject())
+            {
+                values[prop.Name] = JsonValueToString(prop.Value);
+            }
+        }
+        catch
+        {
+            // best-effort metadata for Discord display/action handling
+        }
+        return values;
+    }
+
+    private static string? PickLifecycleValue(Dictionary<string, string> metadata, params string[] keys)
+    {
+        foreach (var key in keys)
+        {
+            if (metadata.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value))
+            {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private static string JsonValueToString(JsonElement value)
+    {
+        return value.ValueKind switch
+        {
+            JsonValueKind.String => value.GetString() ?? "",
+            JsonValueKind.Number => value.GetRawText(),
+            JsonValueKind.True => "true",
+            JsonValueKind.False => "false",
+            JsonValueKind.Null => "",
+            _ => value.GetRawText()
+        };
+    }
+
+    private static string TrimMessage(string content)
+    {
+        if (content.Length <= 1900) return content;
+        return content[..1900];
+    }
+
+    private static bool TryReadDateTimeOffset(JsonElement root, string property, out DateTimeOffset value)
+    {
+        value = default;
+        if (!root.TryGetProperty(property, out var prop)) return false;
+        if (prop.ValueKind != JsonValueKind.String) return false;
+        return DateTimeOffset.TryParse(prop.GetString(), out value);
+    }
+
+    private static bool TryReadUlong(JsonElement root, string property, out ulong value)
+    {
+        value = 0;
+        if (!root.TryGetProperty(property, out var prop)) return false;
+        if (prop.ValueKind == JsonValueKind.Number && prop.TryGetUInt64(out var n))
+        {
+            value = n;
+            return true;
+        }
+        if (prop.ValueKind == JsonValueKind.String && ulong.TryParse(prop.GetString(), out var s))
+        {
+            value = s;
+            return true;
+        }
+        return false;
+    }
+
+    private async Task ProcessMessageActionUpdates(CancellationToken ct)
+    {
+        if (_client is null) return;
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+
+        var updates = await db.LifecycleEvents
+            .Where(x => x.EventType == "PROMOTION_DISCORD_ACTION_APPLIED" && x.Status == "OPEN")
+            .OrderBy(x => x.CreatedAt)
+            .ToListAsync(ct);
+        if (updates.Count == 0) return;
+
+        var posted = await db.LifecycleEvents
+            .Where(x => x.EventType == "PROMOTION_DISCORD_POSTED")
+            .ToListAsync(ct);
+
+        foreach (var u in updates)
+        {
+            try
+            {
+                using var ud = JsonDocument.Parse(u.MetadataJson);
+                if (!ud.RootElement.TryGetProperty("CandidateId", out var candProp)) { u.Status = "DONE"; continue; }
+                var candidateId = candProp.GetInt32();
+                var action = ud.RootElement.TryGetProperty("Action", out var a) ? a.GetString() ?? "unknown" : "unknown";
+                var handledBy = ud.RootElement.TryGetProperty("HandledBy", out var h) ? h.GetString() ?? "web-admin" : "web-admin";
+                var source = ud.RootElement.TryGetProperty("Source", out var s) ? s.GetString() ?? "web" : "web";
+
+                LifecycleEvent? postEvent = null;
+                foreach (var pe in posted)
+                {
+                    using var pd = JsonDocument.Parse(pe.MetadataJson);
+                    if (!pd.RootElement.TryGetProperty("CandidateId", out var pCand)) continue;
+                    if (pCand.GetInt32() != candidateId) continue;
+                    postEvent = pe;
+                    break;
+                }
+                if (postEvent is null) { u.Status = "DONE"; continue; }
+
+                using var postDoc = JsonDocument.Parse(postEvent.MetadataJson);
+                if (!postDoc.RootElement.TryGetProperty("ChannelId", out var channelIdProp) ||
+                    !postDoc.RootElement.TryGetProperty("DiscordMessageId", out var messageIdProp))
+                {
+                    u.Status = "DONE";
+                    continue;
+                }
+
+                var channel = _client.GetChannel(channelIdProp.GetUInt64()) as IMessageChannel;
+                if (channel is null) { u.Status = "DONE"; continue; }
+                var msg = await channel.GetMessageAsync(messageIdProp.GetUInt64());
+                if (msg is IUserMessage userMessage)
+                {
+                    var handled = $"Handled by {handledBy} ({action}) via {source}";
+                    await userMessage.ModifyAsync(props =>
+                    {
+                        props.Components = new ComponentBuilder().Build();
+                        props.Embed = BuildHandledEmbed(userMessage.Embeds.FirstOrDefault(), handled, action);
+                    });
+                    ScheduleChannelMessageDelete(
+                        db,
+                        u.PlayerId,
+                        channelIdProp.GetUInt64(),
+                        messageIdProp.GetUInt64(),
+                        "PROMOTION_DISCORD_DELETE_SCHEDULED",
+                        new { CandidateId = candidateId, Reason = "promotion-action-handled-web" },
+                        dedupeCompletedSchedules: false);
+                }
+
+                u.Status = "DONE";
+            }
+            catch
+            {
+                u.Status = "DONE";
+            }
+        }
+
+        await db.SaveChangesAsync(ct);
+    }
+
+    private async Task PostTempleMissingActionMessages(CancellationToken ct)
+    {
+        if (_client is null) return;
+        var channel = await ResolveMessageChannelAsync(_options.ChannelId);
+        if (channel is null) return;
+
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+
+        // Self-heal: ensure every missing player has an actionable lifecycle event.
+        var missingPlayers = await db.Players
+            .Where(x => x.Status == PlayerStatus.MISSING_PENDING_REVIEW)
+            .Select(x => new { x.Id, x.Username })
+            .ToListAsync(ct);
+        var templeGroupIdForSelfHeal = configuration.GetValue<int?>("TempleOsrs:GroupId") ?? 449;
+        foreach (var mp in missingPlayers)
+        {
+            var isMissingInTemple = !await IsPlayerInTempleGroupAsync(mp.Username, templeGroupIdForSelfHeal);
+            if (!isMissingInTemple) continue;
+
+            var hasPendingAction = await db.LifecycleEvents.AnyAsync(x =>
+                x.PlayerId == mp.Id &&
+                x.EventType == "TEMPLE_MISSING_ACTION_REQUIRED" &&
+                x.Status == "OPEN", ct);
+            if (!hasPendingAction)
+            {
+                db.LifecycleEvents.Add(new LifecycleEvent
+                {
+                    PlayerId = mp.Id,
+                    EventType = "TEMPLE_MISSING_ACTION_REQUIRED",
+                    MetadataJson = JsonUtil.Serialize(new { mp.Username, MissingAt = DateTimeOffset.UtcNow, Source = "discord-self-heal" }),
+                    Status = "OPEN",
+                    CreatedAt = DateTimeOffset.UtcNow
+                });
+            }
+        }
+        if (missingPlayers.Count > 0) await db.SaveChangesAsync(ct);
+
+        var pending = await db.LifecycleEvents
+            .Where(x => x.EventType == "TEMPLE_MISSING_ACTION_REQUIRED" && x.Status == "OPEN")
+            .OrderBy(x => x.CreatedAt)
+            .ToListAsync(ct);
+        logger.LogInformation("Temple missing action scan found {PendingCount} pending lifecycle events.", pending.Count);
+        if (pending.Count == 0) return;
+
+        foreach (var ev in pending)
+        {
+            var postedEvent = await db.LifecycleEvents
+                .Where(x => x.EventType == "TEMPLE_MISSING_DISCORD_POSTED" && x.PlayerId == ev.PlayerId)
+                .OrderByDescending(x => x.CreatedAt)
+                .FirstOrDefaultAsync(ct);
+            if (postedEvent is not null)
+            {
+                var hasLiveDiscordMessage = false;
+                try
+                {
+                    using var postedDoc = JsonDocument.Parse(postedEvent.MetadataJson);
+                    if (postedDoc.RootElement.TryGetProperty("ChannelId", out var ch) &&
+                        postedDoc.RootElement.TryGetProperty("DiscordMessageId", out var postedMsgId))
+                    {
+                        var postedChannel = await ResolveMessageChannelAsync(ch.GetUInt64());
+                        if (postedChannel is not null)
+                        {
+                            var existingMessage = await postedChannel.GetMessageAsync(postedMsgId.GetUInt64());
+                            hasLiveDiscordMessage = existingMessage is not null;
+                        }
+                    }
+                }
+                catch
+                {
+                    hasLiveDiscordMessage = false;
+                }
+
+                if (hasLiveDiscordMessage)
+                {
+                    continue;
+                }
+            }
+
+            var player = await db.Players.FirstOrDefaultAsync(x => x.Id == ev.PlayerId, ct);
+            if (player is null)
+            {
+                ev.Status = "DONE";
+                continue;
+            }
+
+            var womGroupId = configuration.GetValue<int?>("WiseOldMan:GroupId") ?? 7173;
+            var womAdded = womGroupId > 0 && await IsPlayerInWiseOldManGroupAsync(player.Username, womGroupId);
+
+            var embed = new EmbedBuilder()
+                .WithTitle("Temple Membership Missing")
+                .WithColor(new Color(245, 158, 11))
+                .AddField("Player", player.Username, true)
+                .AddField("Current Rank", player.CurrentRank, true)
+                .AddField("Status", player.Status.ToString(), true)
+                .AddField("Temple", "Missing", true)
+                .AddField("WiseOldMan", womAdded ? "Added" : "Missing", true)
+                .AddField("Pets", (player.ManualPetOverride ?? player.StoredPetCount) > 0 ? (player.ManualPetOverride ?? player.StoredPetCount).ToString() : "N/A", true)
+                .AddField("Last Synced (Swedish Time)", FormatSwedishTime(player.LastSynced), false)
+                .Build();
+
+            var buttons = new ComponentBuilder()
+                .WithButton("Add back to Temple", $"missing:add:{player.Id}", ButtonStyle.Success)
+                .WithButton("Remove from DB", $"missing:remove:{player.Id}", ButtonStyle.Danger);
+
+            var msg = await channel.SendMessageAsync(embed: embed, components: buttons.Build());
+            logger.LogInformation(
+                "Posted Temple missing action message for player {Player} (playerId: {PlayerId}, discordMessageId: {MessageId}).",
+                player.Username, player.Id, msg.Id);
+            db.LifecycleEvents.Add(new LifecycleEvent
+            {
+                PlayerId = player.Id,
+                EventType = "TEMPLE_MISSING_DISCORD_POSTED",
+                MetadataJson = JsonUtil.Serialize(new { Player = player.Username, ChannelId = _options.ChannelId, DiscordMessageId = msg.Id }),
+                Status = "DONE",
+                CreatedAt = DateTimeOffset.UtcNow
+            });
+        }
+        await db.SaveChangesAsync(ct);
+    }
+
+    private async Task PostWomMissingActionMessages(CancellationToken ct)
+    {
+        if (_client is null) return;
+        var channel = await ResolveMessageChannelAsync(_options.ChannelId);
+        if (channel is null) return;
+
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+
+        // Self-heal: ensure WOM-missing players have actionable events.
+        var womGroupIdForSelfHeal = configuration.GetValue<int?>("WiseOldMan:GroupId") ?? 7173;
+        var templeGroupIdForSelfHeal = configuration.GetValue<int?>("TempleOsrs:GroupId") ?? 449;
+        var missingPlayers = await db.Players
+            .Where(x => x.Status == PlayerStatus.MISSING_PENDING_REVIEW)
+            .Select(x => new { x.Id, x.Username })
+            .ToListAsync(ct);
+        foreach (var mp in missingPlayers)
+        {
+            var inTemple = await IsPlayerInTempleGroupAsync(mp.Username, templeGroupIdForSelfHeal);
+            var inWom = womGroupIdForSelfHeal > 0 && await IsPlayerInWiseOldManGroupAsync(mp.Username, womGroupIdForSelfHeal);
+            if (!inTemple || inWom) continue;
+
+            var hasPendingAction = await db.LifecycleEvents.AnyAsync(x =>
+                x.PlayerId == mp.Id &&
+                x.EventType == "WOM_MISSING_ACTION_REQUIRED" &&
+                x.Status == "OPEN", ct);
+            if (!hasPendingAction)
+            {
+                db.LifecycleEvents.Add(new LifecycleEvent
+                {
+                    PlayerId = mp.Id,
+                    EventType = "WOM_MISSING_ACTION_REQUIRED",
+                    MetadataJson = JsonUtil.Serialize(new { mp.Username, MissingAt = DateTimeOffset.UtcNow, Source = "discord-self-heal" }),
+                    Status = "OPEN",
+                    CreatedAt = DateTimeOffset.UtcNow
+                });
+            }
+        }
+        if (missingPlayers.Count > 0) await db.SaveChangesAsync(ct);
+
+        var pending = await db.LifecycleEvents
+            .Where(x => x.EventType == "WOM_MISSING_ACTION_REQUIRED" && x.Status == "OPEN")
+            .OrderBy(x => x.CreatedAt)
+            .ToListAsync(ct);
+        if (pending.Count == 0) return;
+
+        foreach (var ev in pending)
+        {
+            var postedEvent = await db.LifecycleEvents
+                .Where(x => x.EventType == "WOM_MISSING_DISCORD_POSTED" && x.PlayerId == ev.PlayerId)
+                .OrderByDescending(x => x.CreatedAt)
+                .FirstOrDefaultAsync(ct);
+            if (postedEvent is not null)
+            {
+                var hasLiveDiscordMessage = false;
+                try
+                {
+                    using var postedDoc = JsonDocument.Parse(postedEvent.MetadataJson);
+                    if (postedDoc.RootElement.TryGetProperty("ChannelId", out var ch) &&
+                        postedDoc.RootElement.TryGetProperty("DiscordMessageId", out var postedMsgId))
+                    {
+                        var postedChannel = await ResolveMessageChannelAsync(ch.GetUInt64());
+                        if (postedChannel is not null)
+                        {
+                            var existingMessage = await postedChannel.GetMessageAsync(postedMsgId.GetUInt64());
+                            hasLiveDiscordMessage = existingMessage is not null;
+                        }
+                    }
+                }
+                catch
+                {
+                    hasLiveDiscordMessage = false;
+                }
+
+                if (hasLiveDiscordMessage)
+                {
+                    continue;
+                }
+            }
+
+            var player = await db.Players.FirstOrDefaultAsync(x => x.Id == ev.PlayerId, ct);
+            if (player is null)
+            {
+                ev.Status = "DONE";
+                continue;
+            }
+
+            var templeGroupId = configuration.GetValue<int?>("TempleOsrs:GroupId") ?? 449;
+            var templeAdded = await IsPlayerInTempleGroupAsync(player.Username, templeGroupId);
+
+            var embed = new EmbedBuilder()
+                .WithTitle("WiseOldMan Membership Missing")
+                .WithColor(new Color(249, 115, 22))
+                .AddField("Player", player.Username, true)
+                .AddField("Current Rank", player.CurrentRank, true)
+                .AddField("Status", player.Status.ToString(), true)
+                .AddField("Temple", templeAdded ? "Added" : "Missing", true)
+                .AddField("WiseOldMan", "Missing", true)
+                .AddField("Pets", (player.ManualPetOverride ?? player.StoredPetCount) > 0 ? (player.ManualPetOverride ?? player.StoredPetCount).ToString() : "N/A", true)
+                .AddField("Last Synced (Swedish Time)", FormatSwedishTime(player.LastSynced), false)
+                .Build();
+
+            var buttons = new ComponentBuilder()
+                .WithButton("Reinstate in WiseOldMan", $"wommissing:reinstate:{player.Id}", ButtonStyle.Success)
+                .WithButton("Remove from Temple + DB", $"wommissing:remove:{player.Id}", ButtonStyle.Danger);
+
+            var msg = await channel.SendMessageAsync(embed: embed, components: buttons.Build());
+            db.LifecycleEvents.Add(new LifecycleEvent
+            {
+                PlayerId = player.Id,
+                EventType = "WOM_MISSING_DISCORD_POSTED",
+                MetadataJson = JsonUtil.Serialize(new { Player = player.Username, ChannelId = _options.ChannelId, DiscordMessageId = msg.Id }),
+                Status = "DONE",
+                CreatedAt = DateTimeOffset.UtcNow
+            });
+        }
+
+        await db.SaveChangesAsync(ct);
+    }
+
+    private async Task PostWomRankMismatchMessages(CancellationToken ct)
+    {
+        if (_client is null) return;
+        var channel = await ResolveMessageChannelAsync(_options.ChannelId);
+        if (channel is null) return;
+
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+
+        var pending = await db.LifecycleEvents
+            .Where(x => x.EventType == "WOM_RANK_MISMATCH_REQUIRED" && x.Status == "OPEN")
+            .OrderBy(x => x.CreatedAt)
+            .ToListAsync(ct);
+        if (pending.Count == 0) return;
+
+        var duplicatePendingIds = pending
+            .GroupBy(x => x.PlayerId)
+            .SelectMany(x => x.OrderBy(ev => ev.CreatedAt).Skip(1))
+            .Select(x => x.Id)
+            .ToHashSet();
+        foreach (var duplicate in pending.Where(x => duplicatePendingIds.Contains(x.Id)))
+        {
+            duplicate.Status = "DONE";
+        }
+
+        foreach (var ev in pending.Where(x => !duplicatePendingIds.Contains(x.Id)))
+        {
+            var ignored = await db.LifecycleEvents.AnyAsync(x =>
+                x.PlayerId == ev.PlayerId &&
+                x.EventType == "WOM_RANK_MISMATCH_IGNORED" &&
+                x.Status == "OPEN", ct);
+            if (ignored)
+            {
+                ev.Status = "DONE";
+                continue;
+            }
+
+            if (await HasOpenWomRankMismatchDeleteForPlayerAsync(db, ev.PlayerId, ct))
+            {
+                continue;
+            }
+
+            var player = await db.Players.FirstOrDefaultAsync(x => x.Id == ev.PlayerId, ct);
+            if (player is null)
+            {
+                ev.Status = "DONE";
+                continue;
+            }
+
+            var metadata = ReadLifecycleMetadata(ev.MetadataJson);
+            var expectedRank = PickLifecycleValue(metadata, "ExpectedRank") ?? player.CurrentRank;
+            var actualWomRole = PickLifecycleValue(metadata, "ActualWomRole") ?? "Unknown";
+            var direction = GetWomRankMismatchDirection(expectedRank, actualWomRole);
+            var embed = BuildWomRankMismatchEmbed(player.Username, expectedRank, actualWomRole, direction);
+            var components = BuildWomRankMismatchComponents(player.Id, ev.Id, expectedRank, actualWomRole);
+
+            var postedEvents = await db.LifecycleEvents
+                .Where(x => x.EventType == "WOM_RANK_MISMATCH_DISCORD_POSTED" && x.PlayerId == ev.PlayerId)
+                .OrderByDescending(x => x.CreatedAt)
+                .ToListAsync(ct);
+            var postedEvent = postedEvents.FirstOrDefault();
+            if (postedEvent is not null)
+            {
+                var (liveDiscordMessage, postedChannelId, postedMessageId) = await TryGetPostedUserMessageAsync(postedEvent);
+                var postedWasHandled = await HasWomRankMismatchActionForPostedEventAsync(db, ev.PlayerId, postedEvent, ct);
+                if (liveDiscordMessage is not null)
+                {
+                    if (postedWasHandled)
+                    {
+                        ScheduleWomRankMismatchMessageDelete(
+                            db,
+                            ev.PlayerId,
+                            postedChannelId,
+                            postedMessageId,
+                            "wom-rank-mismatch-action-handled",
+                            $"WOM rank mismatch alert for {player.Username}");
+                        continue;
+                    }
+
+                    await liveDiscordMessage.ModifyAsync(props =>
+                    {
+                        props.Embed = embed;
+                        props.Components = components;
+                    });
+                    postedEvent.MetadataJson = JsonUtil.Serialize(new
+                    {
+                        Player = player.Username,
+                        ExpectedRank = expectedRank,
+                        ActualWomRole = actualWomRole,
+                        Direction = direction,
+                        RequiredEventId = ev.Id,
+                        ChannelId = liveDiscordMessage.Channel.Id,
+                        DiscordMessageId = liveDiscordMessage.Id
+                    });
+                    continue;
+                }
+
+                if (postedWasHandled && postedChannelId.HasValue && postedMessageId.HasValue)
+                {
+                    var hasOpenDeleteForPostedMessage = await db.LifecycleEvents.AnyAsync(x =>
+                        x.Status == "OPEN" &&
+                        x.EventType == "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED" &&
+                        x.MetadataJson.Contains($"\"DiscordMessageId\":{postedMessageId.Value}"), ct);
+                    if (hasOpenDeleteForPostedMessage)
+                    {
+                        continue;
+                    }
+                }
+
+                foreach (var duplicatePostedEvent in postedEvents.Skip(1))
+                {
+                    try
+                    {
+                        using var duplicateDoc = JsonDocument.Parse(duplicatePostedEvent.MetadataJson);
+                        if (!TryReadUlong(duplicateDoc.RootElement, "ChannelId", out var duplicateChannelId) ||
+                            !TryReadUlong(duplicateDoc.RootElement, "DiscordMessageId", out var duplicateMessageId))
+                        {
+                            continue;
+                        }
+
+                        await EnsureMessageDeleteScheduledOrDeletedAsync(
+                            db,
+                            duplicatePostedEvent.PlayerId,
+                            duplicateChannelId,
+                            duplicateMessageId,
+                            "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED",
+                            new { Reason = "wom-rank-mismatch-duplicate", MessageDescription = $"WOM rank mismatch alert for {player.Username}" },
+                            duplicatePostedEvent.CreatedAt,
+                            ct);
+                    }
+                    catch
+                    {
+                        // ignore malformed old metadata
+                    }
+                }
+            }
+
+            var msg = await channel.SendMessageAsync(embed: embed, components: components);
+            db.LifecycleEvents.Add(new LifecycleEvent
+            {
+                PlayerId = player.Id,
+                EventType = "WOM_RANK_MISMATCH_DISCORD_POSTED",
+                MetadataJson = JsonUtil.Serialize(new
+                {
+                    Player = player.Username,
+                    ExpectedRank = expectedRank,
+                    ActualWomRole = actualWomRole,
+                    Direction = direction,
+                    RequiredEventId = ev.Id,
+                    ChannelId = _options.ChannelId,
+                    DiscordMessageId = msg.Id
+                }),
+                Status = "DONE",
+                CreatedAt = DateTimeOffset.UtcNow
+            });
+        }
+
+        await db.SaveChangesAsync(ct);
+    }
+
+    private async Task ProcessTempleMissingActionUpdates(CancellationToken ct)
+    {
+        if (_client is null) return;
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        var updates = await db.LifecycleEvents
+            .Where(x => x.EventType == "TEMPLE_MISSING_ACTION_APPLIED" && x.Status == "OPEN")
+            .OrderBy(x => x.CreatedAt)
+            .ToListAsync(ct);
+        if (updates.Count == 0) return;
+
+        var posted = await db.LifecycleEvents
+            .Where(x => x.EventType == "TEMPLE_MISSING_DISCORD_POSTED")
+            .ToListAsync(ct);
+
+        foreach (var update in updates)
+        {
+            using var ud = JsonDocument.Parse(update.MetadataJson);
+            var action = ud.RootElement.TryGetProperty("Action", out var a) ? a.GetString() ?? "unknown" : "unknown";
+            var handledBy = ud.RootElement.TryGetProperty("HandledBy", out var h) ? h.GetString() ?? "web-admin" : "web-admin";
+            var source = ud.RootElement.TryGetProperty("Source", out var s) ? s.GetString() ?? "web" : "web";
+
+            var post = posted.FirstOrDefault(x => x.PlayerId == update.PlayerId);
+            if (post is null)
+            {
+                update.Status = "DONE";
+                continue;
+            }
+
+            using var pd = JsonDocument.Parse(post.MetadataJson);
+            if (!pd.RootElement.TryGetProperty("ChannelId", out var chProp) ||
+                !pd.RootElement.TryGetProperty("DiscordMessageId", out var msgProp))
+            {
+                update.Status = "DONE";
+                continue;
+            }
+            var channel = await ResolveMessageChannelAsync(chProp.GetUInt64());
+            if (channel is null)
+            {
+                update.Status = "DONE";
+                continue;
+            }
+            var msg = await channel.GetMessageAsync(msgProp.GetUInt64());
+            if (msg is IUserMessage userMessage)
+            {
+                var handled = $"Handled by {handledBy} ({action}) via {source}";
+                await userMessage.ModifyAsync(props =>
+                {
+                    props.Components = new ComponentBuilder().Build();
+                    props.Embed = BuildHandledEmbed(userMessage.Embeds.FirstOrDefault(), handled, action == "add" ? "approve" : "dismiss");
+                });
+                ScheduleChannelMessageDelete(
+                    db,
+                    update.PlayerId,
+                    chProp.GetUInt64(),
+                    msgProp.GetUInt64(),
+                    "TEMPLE_MISSING_DISCORD_DELETE_SCHEDULED",
+                    new { Reason = "temple-missing-action-handled-web", Action = action });
+            }
+            await CloseOpenLifecycleEventsAsync(db, update.PlayerId,
+                "NEW_PLAYER",
+                "MERGE_SUGGESTED",
+                "DISCORD_MARK_RENAME_SUSPECT",
+                "MISSING_IN_ROSTER",
+                "TEMPLE_MISSING_ACTION_REQUIRED",
+                "WOM_MISSING_ACTION_REQUIRED");
+            update.Status = "DONE";
+        }
+
+        await db.SaveChangesAsync(ct);
+    }
+
+    private async Task<IMessageChannel?> ResolveMessageChannelAsync(ulong channelId)
+    {
+        if (_client is null) return null;
+        var channel = _client.GetChannel(channelId) as IMessageChannel;
+        if (channel is not null) return channel;
+        try
+        {
+            var restChannel = await _client.Rest.GetChannelAsync(channelId);
+            return restChannel as IMessageChannel;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private async Task HandleSlashCommandAsync(SocketSlashCommand command)
+    {
+        var sw = Stopwatch.StartNew();
+        logger.LogInformation("Discord slash start: {Command} by {User}", command.Data.Name, command.User.Username);
+        try
+        {
+            var adminLocked = IsAdminLockedSlashCommand(command.Data.Name);
+            var allowed = !adminLocked || HasDiscordAdminRole(command.User);
+            await LogSlashCommandAsync(command, adminLocked, allowed);
+
+            if (!allowed)
+            {
+                await DenySlashCommandAsync(command);
+                return;
+            }
+
+            var deferEphemeral = IsEphemeralSlashCommand(command.Data.Name);
+            if (!command.HasResponded)
+            {
+                await command.DeferAsync(ephemeral: deferEphemeral);
+                logger.LogInformation("Discord slash deferred: {Command} ephemeral={Ephemeral}", command.Data.Name, deferEphemeral);
+            }
+
+            if (string.Equals(command.Data.Name, "update", StringComparison.OrdinalIgnoreCase))
+            {
+                var usernameRaw = command.Data.Options.FirstOrDefault(x => x.Name == "player")?.Value?.ToString()?.Trim();
+                if (string.IsNullOrWhiteSpace(usernameRaw))
+                {
+                    await RespondAndAutoDeleteAsync(command, "Please provide a player username.");
+                    return;
+                }
+
+                await using var updateScope = scopeFactory.CreateAsyncScope();
+                var updateDb = updateScope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+                var foundPlayer = await updateDb.Players.FirstOrDefaultAsync(x => x.Username.ToLower() == usernameRaw.ToLower());
+                if (foundPlayer is null)
+                {
+                    await RespondAndAutoDeleteAsync(command, $"No player found for `{usernameRaw}`.");
+                    return;
+                }
+
+                var templeGroupId = configuration.GetValue<int?>("TempleOsrs:GroupId") ?? 449;
+                var inTemple = await IsPlayerInTempleGroupAsync(foundPlayer.Username, templeGroupId);
+                if (!inTemple && foundPlayer.Status != PlayerStatus.REMOVED_CONFIRMED)
+                {
+                    foundPlayer.Status = PlayerStatus.MISSING_PENDING_REVIEW;
+                    var hasPendingAction = await updateDb.LifecycleEvents.AnyAsync(x =>
+                        x.PlayerId == foundPlayer.Id &&
+                        x.EventType == "TEMPLE_MISSING_ACTION_REQUIRED" &&
+                        x.Status == "OPEN");
+                    if (!hasPendingAction)
+                    {
+                        updateDb.LifecycleEvents.Add(new LifecycleEvent
+                        {
+                            PlayerId = foundPlayer.Id,
+                            EventType = "TEMPLE_MISSING_ACTION_REQUIRED",
+                            MetadataJson = JsonUtil.Serialize(new
+                            {
+                                foundPlayer.Username,
+                                MissingAt = DateTimeOffset.UtcNow,
+                                Source = "discord-slash-update"
+                            }),
+                            Status = "OPEN",
+                            CreatedAt = DateTimeOffset.UtcNow
+                        });
+                    }
+                    updateDb.LifecycleEvents.Add(new LifecycleEvent
+                    {
+                        PlayerId = foundPlayer.Id,
+                        EventType = "MISSING_IN_ROSTER",
+                        MetadataJson = JsonUtil.Serialize(new
+                        {
+                            foundPlayer.Username,
+                            MissingAt = DateTimeOffset.UtcNow,
+                            Source = "discord-slash-update"
+                        }),
+                        Status = "OPEN",
+                        CreatedAt = DateTimeOffset.UtcNow
+                    });
+                }
+
+                updateDb.LifecycleEvents.Add(new LifecycleEvent
+                {
+                    PlayerId = foundPlayer.Id,
+                    EventType = "PRIORITY_UPDATE_REQUEST",
+                    MetadataJson = JsonUtil.Serialize(new
+                    {
+                        Player = foundPlayer.Username,
+                        RequestedBy = command.User.Username,
+                        Source = "discord-slash-update"
+                    }),
+                    Status = "OPEN",
+                    CreatedAt = DateTimeOffset.UtcNow
+                });
+                await updateDb.SaveChangesAsync();
+                if (foundPlayer.Status is PlayerStatus.MISSING_PENDING_REVIEW or PlayerStatus.NEW_PENDING_REVIEW) queue.EnqueueMissingPriority(foundPlayer.Id);
+                else queue.EnqueueFront(foundPlayer.Id);
+
+                await RespondAndAutoDeleteAsync(command, foundPlayer.Status is PlayerStatus.MISSING_PENDING_REVIEW or PlayerStatus.NEW_PENDING_REVIEW
+                    ? $"`{foundPlayer.Username}` was queued as high-priority review."
+                    : $"Queued `{foundPlayer.Username}` for priority update.");
+                return;
+            }
+
+            if (string.Equals(command.Data.Name, "set-pets", StringComparison.OrdinalIgnoreCase))
+            {
+                var petsUsername = command.Data.Options.FirstOrDefault(x => x.Name == "player")?.Value?.ToString()?.Trim();
+                var countRaw = command.Data.Options.FirstOrDefault(x => x.Name == "count")?.Value;
+                if (string.IsNullOrWhiteSpace(petsUsername) || countRaw is null || !int.TryParse(countRaw.ToString(), out var petCount) || petCount < 0)
+                {
+                    await RespondAndAutoDeleteAsync(command, "Please provide a valid player and pet count (0 or higher).", ephemeral: false);
+                    return;
+                }
+
+                await using var petScope = scopeFactory.CreateAsyncScope();
+                var petDb = petScope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+                var petWom = petScope.ServiceProvider.GetRequiredService<IWiseOldManClient>();
+                var petsPlayer = await petDb.Players
+                    .Include(x => x.Snapshots)
+                    .FirstOrDefaultAsync(x => x.Username.ToLower() == petsUsername.ToLower());
+                if (petsPlayer is null)
+                {
+                    await RespondAndAutoDeleteAsync(command, $"No player found for `{petsUsername}`.", ephemeral: false);
+                    return;
+                }
+
+                petsPlayer.ManualPetOverride = petCount;
+                var isImp = await ReevaluatePlayerForManualPetsAsync(petDb, petWom, petsPlayer);
+                await petDb.SaveChangesAsync();
+
+                await RespondAndAutoDeleteAsync(command, isImp
+                    ? $"Manual pets set: `{petsPlayer.Username}` -> `{petCount}`. Player has WiseOldMan role `imp` and is excluded from rank upgrades."
+                    : $"Manual pets set: `{petsPlayer.Username}` -> `{petCount}`. Rank eligibility has been re-evaluated.", ephemeral: false);
+                return;
+            }
+
+            if (string.Equals(command.Data.Name, "temple-add", StringComparison.OrdinalIgnoreCase))
+            {
+                var players = ParsePlayers(command);
+                if (players.Count == 0)
+                {
+                    await RespondAndAutoDeleteAsync(command, "No valid player names found.", ephemeral: false);
+                    return;
+                }
+                await RespondAndAutoDeleteAsync(command, await ExecuteTempleAddAsync(players), ephemeral: false);
+                return;
+            }
+
+            if (string.Equals(command.Data.Name, "add", StringComparison.OrdinalIgnoreCase))
+            {
+                var players = ParsePlayers(command);
+                if (players.Count == 0)
+                {
+                    await RespondAndAutoDeleteAsync(command, "Please provide one or more valid player names.", ephemeral: false);
+                    return;
+                }
+
+                var templeEmbed = await ExecuteTempleAddAsync(players);
+                await RespondAndAutoDeleteAsync(command, templeEmbed, ephemeral: false);
+
+                var womEmbed = await ExecuteWomAddAsync(players);
+                await RespondAndAutoDeleteAsync(command, womEmbed, ephemeral: false);
+                return;
+            }
+
+            if (string.Equals(command.Data.Name, "remove", StringComparison.OrdinalIgnoreCase))
+            {
+                var players = ParsePlayers(command);
+                if (players.Count == 0)
+                {
+                    await RespondAndAutoDeleteAsync(command, "Please provide one or more valid player names.", ephemeral: false);
+                    return;
+                }
+
+                var templeEmbed = await ExecuteTempleRemoveAsync(players);
+                await RespondAndAutoDeleteAsync(command, templeEmbed, ephemeral: false);
+
+                var womEmbed = await ExecuteWomRemoveAsync(players);
+                await RespondAndAutoDeleteAsync(command, womEmbed, ephemeral: false);
+                return;
+            }
+
+            if (string.Equals(command.Data.Name, "temple-remove", StringComparison.OrdinalIgnoreCase))
+            {
+                var players = ParsePlayers(command);
+                if (players.Count == 0)
+                {
+                    await RespondAndAutoDeleteAsync(command, "No valid player names found.", ephemeral: false);
+                    return;
+                }
+                await RespondAndAutoDeleteAsync(command, await ExecuteTempleRemoveAsync(players), ephemeral: false);
+                return;
+            }
+
+            if (string.Equals(command.Data.Name, "wom-add", StringComparison.OrdinalIgnoreCase))
+            {
+                var players = ParsePlayers(command);
+                if (players.Count == 0)
+                {
+                    await RespondAndAutoDeleteAsync(command, BuildWomResultEmbed(
+                        title: "WiseOldMan Add Failed",
+                        success: false,
+                        groupId: configuration.GetValue<int?>("WiseOldMan:GroupId") ?? 0,
+                        players: [],
+                        details: "Please provide one or more valid player names."), ephemeral: false);
+                    return;
+                }
+
+                await RespondAndAutoDeleteAsync(command, await ExecuteWomAddAsync(players), ephemeral: false);
+                return;
+            }
+
+            if (string.Equals(command.Data.Name, "wom-remove", StringComparison.OrdinalIgnoreCase))
+            {
+                var players = ParsePlayers(command);
+                if (players.Count == 0)
+                {
+                    await RespondAndAutoDeleteAsync(command, BuildWomResultEmbed(
+                        title: "WiseOldMan Remove Failed",
+                        success: false,
+                        groupId: configuration.GetValue<int?>("WiseOldMan:GroupId") ?? 0,
+                        players: [],
+                        details: "Please provide one or more valid player names."), ephemeral: false);
+                    return;
+                }
+
+                await RespondAndAutoDeleteAsync(command, await ExecuteWomRemoveAsync(players), ephemeral: false);
+                return;
+            }
+
+            if (string.Equals(command.Data.Name, "wom-role-update", StringComparison.OrdinalIgnoreCase))
+            {
+                var playerName = command.Data.Options.FirstOrDefault(x => x.Name == "player")?.Value?.ToString()?.Trim();
+                var role = command.Data.Options.FirstOrDefault(x => x.Name == "rank")?.Value?.ToString()?.Trim();
+                if (string.IsNullOrWhiteSpace(playerName) || string.IsNullOrWhiteSpace(role) || !IsAllowedWomRole(role))
+                {
+                    await RespondAndAutoDeleteAsync(command, BuildWomRoleUpdateEmbed(
+                        title: "WiseOldMan Role Update Failed",
+                        success: false,
+                        groupId: configuration.GetValue<int?>("WiseOldMan:GroupId") ?? 0,
+                        playerName: playerName ?? "N/A",
+                        requestedRole: role ?? "N/A",
+                        updatedRole: null,
+                        womPlayerId: null,
+                        displayName: null,
+                        details: "Please provide a valid player and selectable rank."), ephemeral: false);
+                    return;
+                }
+
+                await RespondAndAutoDeleteAsync(command, await ExecuteWomRoleUpdateAsync(command, playerName, role), ephemeral: false);
+                return;
+            }
+
+            if (!string.Equals(command.Data.Name, "lookup", StringComparison.OrdinalIgnoreCase))
+                return;
+
+            var username = command.Data.Options.FirstOrDefault(x => x.Name == "player")?.Value?.ToString()?.Trim();
+            if (string.IsNullOrWhiteSpace(username))
+            {
+                await RespondAndAutoDeleteAsync(command, "Please provide a player username.");
+                return;
+            }
+
+            await using var scope = scopeFactory.CreateAsyncScope();
+            var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+
+            var player = await db.Players
+                .Where(x => x.Username.ToLower() == username.ToLower())
+                .Select(x => new
+                {
+                    x.Username,
+                    x.CurrentRank,
+                    x.EligibleRank,
+                    x.Status,
+                    Pets = x.ManualPetOverride ?? x.StoredPetCount,
+                    x.LastSynced,
+                    Latest = x.Snapshots
+                        .OrderByDescending(s => s.Timestamp)
+                        .Select(s => new
+                        {
+                            s.TotalLevel,
+                            s.Ehb,
+                            s.Ehp,
+                            s.Collections
+                        })
+                        .FirstOrDefault()
+                })
+                .FirstOrDefaultAsync();
+
+            if (player is null)
+            {
+                await RespondAndAutoDeleteAsync(command, $"No player found for `{username}`.");
+                return;
+            }
+
+            var lookupTempleGroupId = configuration.GetValue<int?>("TempleOsrs:GroupId") ?? 449;
+            var lookupWomGroupId = configuration.GetValue<int?>("WiseOldMan:GroupId") ?? 0;
+            var templeAdded = await IsPlayerInTempleGroupAsync(player.Username, lookupTempleGroupId);
+            var womAdded = lookupWomGroupId > 0 && await IsPlayerInWiseOldManGroupAsync(player.Username, lookupWomGroupId);
+
+            var embed = new EmbedBuilder()
+                .WithTitle($"Lookup: {player.Username}")
+                .WithColor(new Color(59, 130, 246))
+                .AddField("Current Rank", player.CurrentRank, true)
+                .AddField("Status", player.Status.ToString(), true)
+                .AddField("Total Level", player.Latest?.TotalLevel.ToString() ?? "N/A", true)
+                .AddField("EHB", player.Latest is null ? "N/A" : player.Latest.Ehb.ToString("0.0", CultureInfo.InvariantCulture), true)
+                .AddField("EHP", player.Latest is null ? "N/A" : player.Latest.Ehp.ToString("0.0", CultureInfo.InvariantCulture), true)
+                .AddField("Collections", player.Latest?.Collections.ToString() ?? "N/A", true)
+                .AddField("Pets", player.Pets > 0 ? player.Pets.ToString() : "N/A", true)
+                .AddField("Temple", templeAdded ? "Added" : "Missing", true)
+                .AddField("WiseOldMan", womAdded ? "Added" : "Missing", true)
+                .AddField("Last Synced (Swedish Time)", FormatSwedishTime(player.LastSynced), false)
+                .WithTimestamp(DateTimeOffset.Now)
+                .Build();
+
+            await RespondAndAutoDeleteAsync(command, embed);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed handling /lookup.");
+            await RespondAndAutoDeleteAsync(command, "Command failed.", ephemeral: true);
+        }
+        finally
+        {
+            logger.LogInformation("Discord slash end: {Command} in {ElapsedMs}ms", command.Data.Name, sw.ElapsedMilliseconds);
+        }
+    }
+
+    private async Task LogSlashCommandAsync(SocketSlashCommand command, bool adminLocked, bool allowed)
+    {
+        try
+        {
+            await using var scope = scopeFactory.CreateAsyncScope();
+            var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+            var ownerId = await ResolveLifecycleOwnerPlayerIdAsync(db, 0, CancellationToken.None);
+            if (!ownerId.HasValue)
+            {
+                logger.LogWarning("Unable to record slash command /{Command}; no valid player row exists for lifecycle ownership.", command.Data.Name);
+                return;
+            }
+
+            db.LifecycleEvents.Add(new LifecycleEvent
+            {
+                PlayerId = ownerId.Value,
+                EventType = "DISCORD_SLASH_COMMAND_USED",
+                MetadataJson = JsonUtil.Serialize(new
+                {
+                    Command = command.Data.Name,
+                    RequestedBy = command.User.Username,
+                    RequestedByDiscordUserId = command.User.Id,
+                    ChannelId = command.ChannelId,
+                    GuildId = (command.User as SocketGuildUser)?.Guild.Id,
+                    AdminLocked = adminLocked,
+                    Allowed = allowed,
+                    Options = DescribeSlashCommandOptions(command.Data.Options),
+                    Source = "discord-slash"
+                }),
+                Status = "DONE",
+                CreatedAt = DateTimeOffset.UtcNow
+            });
+            await db.SaveChangesAsync();
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to record slash command /{Command}.", command.Data.Name);
+        }
+    }
+
+    private async Task RespondAndAutoDeleteAsync(SocketSlashCommand command, string text, bool ephemeral = true)
+    {
+        var response = await command.FollowupAsync(text: text, ephemeral: ephemeral);
+        var messageDescription = BuildSlashTextCleanupDescription(command, text);
+        if (ephemeral)
+        {
+            await ScheduleInteractionResponseDeleteAsync(command, messageDescription);
+        }
+        else
+        {
+            if (command.ChannelId.HasValue)
+            {
+                await ScheduleChannelResponseDeleteAsync(command.ChannelId.Value, response.Id, $"slash-{command.CommandName}-followup", messageDescription);
+            }
+            else
+            {
+                await ScheduleInteractionResponseDeleteAsync(command, messageDescription);
+            }
+        }
+    }
+
+    private async Task RespondAndAutoDeleteAsync(SocketSlashCommand command, Embed embed, bool ephemeral = true)
+    {
+        var response = await command.FollowupAsync(embed: embed, ephemeral: ephemeral);
+        var messageDescription = BuildSlashEmbedCleanupDescription(command, embed);
+        if (ephemeral)
+        {
+            await ScheduleInteractionResponseDeleteAsync(command, messageDescription);
+        }
+        else
+        {
+            if (command.ChannelId.HasValue)
+            {
+                await ScheduleChannelResponseDeleteAsync(command.ChannelId.Value, response.Id, $"slash-{command.CommandName}-followup", messageDescription);
+            }
+            else
+            {
+                await ScheduleInteractionResponseDeleteAsync(command, messageDescription);
+            }
+        }
+    }
+
+    private static string BuildSlashTextCleanupDescription(SocketSlashCommand command, string text)
+    {
+        return BuildSlashCleanupDescription(command, text, $"slash-{command.CommandName}-followup");
+    }
+
+    private static string BuildSlashEmbedCleanupDescription(SocketSlashCommand command, IEmbed embed)
+    {
+        return BuildSlashCleanupDescription(command, BuildEmbedCleanupSummary(embed), $"slash-{command.CommandName}-followup");
+    }
+
+    private static string BuildInteractionCleanupDescription(SocketSlashCommand command, string? messageDescription = null)
+    {
+        return string.IsNullOrWhiteSpace(messageDescription)
+            ? BuildSlashCleanupDescription(command, "interaction response cleanup", $"slash-{command.CommandName}-interaction-response")
+            : NormalizeCleanupDescription(messageDescription, $"slash-{command.CommandName}-interaction-response");
+    }
+
+    private static string BuildSlashCleanupDescription(SocketSlashCommand command, string? summary, string fallback)
+    {
+        var text = string.IsNullOrWhiteSpace(summary)
+            ? fallback
+            : $"/{command.CommandName}: {summary}";
+        return NormalizeCleanupDescription(text, fallback);
+    }
+
+    private static IReadOnlyList<object> DescribeSlashCommandOptions(IReadOnlyCollection<SocketSlashCommandDataOption> options)
+    {
+        return options.Select(DescribeSlashCommandOption).ToArray();
+    }
+
+    private static object DescribeSlashCommandOption(SocketSlashCommandDataOption option)
+    {
+        object[] nested = option.Options is { Count: > 0 }
+            ? option.Options.Select(DescribeSlashCommandOption).ToArray()
+            : Array.Empty<object>();
+
+        return new
+        {
+            option.Name,
+            Value = TruncateOptionValue(option.Value?.ToString()),
+            Options = nested
+        };
+    }
+
+    private static string? TruncateOptionValue(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return value;
+        return value.Length <= 160 ? value : value[..157] + "...";
+    }
+
+    private static string? BuildEmbedCleanupSummary(IEmbed? embed)
+    {
+        if (embed is null) return null;
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(embed.Title)) parts.Add(embed.Title);
+        if (!string.IsNullOrWhiteSpace(embed.Description)) parts.Add(embed.Description);
+        return parts.Count == 0 ? null : string.Join(": ", parts);
+    }
+
+    private static string NormalizeCleanupDescription(string? value, string fallback)
+    {
+        var source = string.IsNullOrWhiteSpace(value) ? fallback : value;
+        var normalized = string.Join(" ", source.Split([' ', '\t', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries));
+        return normalized.Length <= 240 ? normalized : normalized[..237] + "...";
+    }
+
+    private static string TruncateDetails(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return "No response body.";
+        var normalized = string.Join(" ", value.Split([' ', '\t', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries));
+        return normalized.Length <= 480 ? normalized : normalized[..477] + "...";
+    }
+
+    private async Task RespondToComponentAsync(SocketMessageComponent component, string text, bool ephemeral = true)
+    {
+        try
+        {
+            await component.FollowupAsync(text: text, ephemeral: ephemeral);
+        }
+        catch
+        {
+            // no-op best effort
+        }
+    }
+
+    private bool IsEphemeralSlashCommand(string commandName)
+    {
+        return string.Equals(commandName, "lookup", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(commandName, "update", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsAdminLockedButton(string? prefix)
+    {
+        return prefix is not null &&
+            (string.Equals(prefix, "promo", StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(prefix, "missing", StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(prefix, "wommissing", StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(prefix, "womrank", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsAdminLockedSlashCommand(string commandName)
+    {
+        return string.Equals(commandName, "update", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(commandName, "set-pets", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(commandName, "add", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(commandName, "remove", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(commandName, "temple-add", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(commandName, "temple-remove", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(commandName, "wom-add", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(commandName, "wom-remove", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(commandName, "wom-role-update", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool HasDiscordAdminRole(SocketUser user)
+    {
+        if (_options.AdminRoleId <= 0)
+        {
+            logger.LogWarning("Discord admin role id is not configured; denying admin-locked interaction for {User}.", user.Username);
+            return false;
+        }
+
+        return user is SocketGuildUser guildUser &&
+            guildUser.Roles.Any(x => x.Id == _options.AdminRoleId);
+    }
+
+    private static async Task DenyComponentAsync(SocketMessageComponent component)
+    {
+        const string message = "You need the Swedes admin Discord role to use this action.";
+        if (component.HasResponded)
+        {
+            await component.FollowupAsync(text: message, ephemeral: true);
+            return;
+        }
+
+        await component.RespondAsync(text: message, ephemeral: true);
+    }
+
+    private static async Task DenySlashCommandAsync(SocketSlashCommand command)
+    {
+        const string message = "You need the Swedes admin Discord role to use this command.";
+        if (command.HasResponded)
+        {
+            await command.FollowupAsync(text: message, ephemeral: true);
+            return;
+        }
+
+        await command.RespondAsync(text: message, ephemeral: true);
+    }
+
+    private async Task SchedulePublicOriginalResponseDeleteAsync(SocketSlashCommand command, string reason)
+    {
+        try
+        {
+            if (!command.ChannelId.HasValue)
+            {
+                await ScheduleInteractionResponseDeleteAsync(command);
+                return;
+            }
+
+            var original = await command.GetOriginalResponseAsync();
+            var messageDescription = BuildSlashCleanupDescription(
+                command,
+                string.IsNullOrWhiteSpace(original.Content) ? BuildEmbedCleanupSummary(original.Embeds.FirstOrDefault()) : original.Content,
+                reason);
+            await ScheduleChannelResponseDeleteAsync(command.ChannelId.Value, original.Id, reason, messageDescription);
+        }
+        catch
+        {
+            await ScheduleInteractionResponseDeleteAsync(command);
+        }
+    }
+
+    private string FormatSwedishTime(DateTimeOffset? value)
+    {
+        if (value is null) return "N/A";
+        var local = TimeZoneInfo.ConvertTime(value.Value, _swedishTimeZone);
+        return $"{local:yyyy-MM-dd HH:mm}";
+    }
+
+    private static Embed BuildPromotionEmbed(
+        string playerName,
+        string oldRank,
+        string newRank,
+        string statsSummary,
+        string reason,
+        string lastSynced)
+    {
+        var b = new EmbedBuilder()
+            .WithTitle("Rank Candidate Detected")
+            .WithColor(new Color(59, 130, 246))
+            .AddField("Player", playerName, true)
+            .AddField("Old Rank", oldRank, true)
+            .AddField("New Eligible Rank", newRank, true)
+            .AddField("Stats Summary", statsSummary, false)
+            .AddField("Reason", reason, false)
+            .AddField("Last Synced (Swedish Time)", lastSynced, false);
+        return b.Build();
+    }
+
+    private static string BuildStatsSummary(double? ehb, double? ehp, int pets)
+    {
+        var parts = new List<string>
+        {
+            $"EHB: {(ehb.HasValue ? ehb.Value.ToString("0.0", CultureInfo.InvariantCulture) : "N/A")}",
+            $"EHP: {(ehp.HasValue ? ehp.Value.ToString("0.0", CultureInfo.InvariantCulture) : "N/A")}"
+        };
+        if (pets > 0) parts.Add($"Pets: {pets}");
+        return string.Join(" | ", parts);
+    }
+
+    private static Embed BuildHandledEmbed(IEmbed? source, string handledText, string action)
+    {
+        var color = action switch
+        {
+            "approve" => new Color(34, 197, 94),
+            "dismiss" => new Color(239, 68, 68),
+            "rename" => new Color(245, 158, 11),
+            _ => new Color(100, 116, 139)
+        };
+
+        var builder = source is not null ? source.ToEmbedBuilder() : new EmbedBuilder().WithTitle("Rank Candidate");
+        builder.WithColor(color);
+        builder.WithFooter(handledText);
+        builder.WithTimestamp(DateTimeOffset.Now);
+        return builder.Build();
+    }
+
+    private static Embed BuildWomRankMismatchEmbed(string playerName, string expectedRank, string actualWomRole, string direction)
+    {
+        var directionText = direction switch
+        {
+            "higher" => "WOM/in-game rank appears ahead of the database rank",
+            "lower" => "WOM/in-game rank appears behind the database rank",
+            _ => "WOM rank differs from the database rank"
+        };
+        var rankMismatchLabel = direction switch
+        {
+            "higher" => "higher",
+            "lower" => "lower",
+            _ => "different"
+        };
+        var description =
+            $"**Ingame (WOM)** is {rankMismatchLabel} than **database**.\n\n" +
+            $"Select \"Sync to WOM ({actualWomRole})\" to set both to {actualWomRole}, or \"Sync to database ({expectedRank})\" to set both to {expectedRank}.\n\n" +
+            "Use **Dismiss** to review later, or **Ignore** to permanently allow this mismatch for this player.";
+
+        return new EmbedBuilder()
+            .WithTitle("WiseOldMan Rank Mismatch")
+            .WithColor(direction == "higher" ? new Color(239, 68, 68) : new Color(245, 158, 11))
+            .WithDescription(description)
+            .AddField("Player", playerName, true)
+            .AddField("Database Rank", expectedRank, true)
+            .AddField("WiseOldMan Rank", actualWomRole, true)
+            .AddField("Mismatch", directionText, false)
+            .WithTimestamp(DateTimeOffset.Now)
+            .Build();
+    }
+
+    private static MessageComponent BuildWomRankMismatchComponents(int playerId, int requiredEventId, string expectedRank, string actualWomRole)
+    {
+        var womRankLabel = string.IsNullOrWhiteSpace(actualWomRole) ? "Unknown" : actualWomRole.Trim();
+        var dbRankLabel = string.IsNullOrWhiteSpace(expectedRank) ? "Unknown" : expectedRank.Trim();
+        return new ComponentBuilder()
+            .WithButton($"Sync to WOM ({womRankLabel})", $"womrank:sync_wom_to_db:{playerId}:{requiredEventId}", ButtonStyle.Primary)
+            .WithButton($"Sync to database ({dbRankLabel})", $"womrank:sync_db_to_wom:{playerId}:{requiredEventId}", ButtonStyle.Primary)
+            .WithButton("Dismiss", $"womrank:dismiss:{playerId}:{requiredEventId}", ButtonStyle.Secondary)
+            .WithButton("Ignore tracking for this player", $"womrank:ignore:{playerId}:{requiredEventId}", ButtonStyle.Danger)
+            .Build();
+    }
+
+    private sealed record WomRoleUpdateResult(
+        bool Success,
+        int HttpStatus,
+        string Details,
+        string? UpdatedRole,
+        int? WomPlayerId,
+        string? DisplayName);
+
+    private async Task<WomRoleUpdateResult> ExecuteWomRoleUpdateForPlayerAsync(string playerName, string role)
+    {
+        var womGroupId = configuration.GetValue<int?>("WiseOldMan:GroupId") ?? 0;
+        var womVerificationCode = configuration["WiseOldMan:VerificationCode"] ?? "";
+        if (womGroupId <= 0 || string.IsNullOrWhiteSpace(womVerificationCode))
+        {
+            return new WomRoleUpdateResult(false, 0, "WiseOldMan settings are missing (`WiseOldMan:GroupId` or `WiseOldMan:VerificationCode`).", null, null, null);
+        }
+
+        var client = httpClientFactory.CreateClient();
+        var updateBody = JsonSerializer.Serialize(new
+        {
+            verificationCode = womVerificationCode,
+            username = playerName,
+            role = role.ToLowerInvariant()
+        });
+        var updateReq = new HttpRequestMessage(HttpMethod.Put, $"https://api.wiseoldman.net/v2/groups/{womGroupId}/role")
+        {
+            Content = new StringContent(updateBody, Encoding.UTF8, "application/json")
+        };
+        var response = await client.SendAsync(updateReq);
+        var responseText = await response.Content.ReadAsStringAsync();
+
+        var details = response.IsSuccessStatusCode
+            ? "Role update accepted by WiseOldMan."
+            : $"HTTP {(int)response.StatusCode}: {TruncateDetails(responseText)}";
+        var updatedRole = role;
+        int? womPlayerId = null;
+        string? displayName = null;
+        if (response.IsSuccessStatusCode &&
+            TryReadWomRoleUpdateResponse(responseText, out var parsedUpdatedRole, out womPlayerId, out displayName))
+        {
+            updatedRole = parsedUpdatedRole;
+        }
+
+        return new WomRoleUpdateResult(
+            response.IsSuccessStatusCode,
+            (int)response.StatusCode,
+            response.IsSuccessStatusCode ? details : TruncateDetails(responseText),
+            response.IsSuccessStatusCode ? updatedRole : null,
+            womPlayerId,
+            displayName);
+    }
+
+    private static string GetWomRankMismatchDirection(string expectedRank, string actualWomRole)
+    {
+        var expected = RankOrder(expectedRank);
+        var actual = RankOrder(actualWomRole);
+        if (actual > expected) return "higher";
+        if (actual < expected) return "lower";
+        return "different";
+    }
+
+    private static TimeZoneInfo ResolveSwedishTimeZone()
+    {
+        try { return TimeZoneInfo.FindSystemTimeZoneById("Europe/Stockholm"); } catch { }
+        try { return TimeZoneInfo.FindSystemTimeZoneById("W. Europe Standard Time"); } catch { }
+        return TimeZoneInfo.Local;
+    }
+
+    private static bool TryParseTempleMembershipResponse(string json, out int processed, out int oldCount, out int newCount)
+    {
+        processed = 0;
+        oldCount = 0;
+        newCount = 0;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("data", out var data)) return false;
+
+            if (data.TryGetProperty("added_names", out var added))
+            {
+                processed = added.GetInt32();
+            }
+            else if (data.TryGetProperty("removed_names", out var removed))
+            {
+                processed = removed.GetInt32();
+            }
+            else
+            {
+                return false;
+            }
+
+            if (!data.TryGetProperty("old_member_count", out var oldProp)) return false;
+            if (!data.TryGetProperty("new_member_count", out var newProp)) return false;
+            oldCount = oldProp.GetInt32();
+            newCount = newProp.GetInt32();
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private async Task<Embed> ExecuteTempleAddAsync(List<string> players)
+    {
+        var templeGroupId = configuration.GetValue<int?>("TempleOsrs:GroupId") ?? 0;
+        var templeApiKey = configuration["TempleOsrs:ApiKey"] ?? "";
+        if (templeGroupId <= 0 || string.IsNullOrWhiteSpace(templeApiKey))
+        {
+            return BuildTempleResultEmbed(
+                title: "TempleOSRS Add Failed",
+                success: false,
+                groupId: templeGroupId,
+                players: players,
+                details: "TempleOSRS settings are missing (`TempleOsrs:GroupId` or `TempleOsrs:ApiKey`).");
+        }
+
+        var client = httpClientFactory.CreateClient();
+        var body = new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["id"] = templeGroupId.ToString(CultureInfo.InvariantCulture),
+            ["key"] = templeApiKey,
+            ["players"] = string.Join(",", players)
+        });
+        var response = await client.PostAsync("https://templeosrs.com/api/add_group_member.php", body);
+        var responseText = await response.Content.ReadAsStringAsync();
+        if (!response.IsSuccessStatusCode)
+        {
+            return BuildTempleResultEmbed(
+                title: "TempleOSRS Add Failed",
+                success: false,
+                groupId: templeGroupId,
+                players: players,
+                details: $"HTTP {(int)response.StatusCode}: {responseText}");
+        }
+
+        var details = "Request accepted by TempleOSRS.";
+        if (TryParseTempleMembershipResponse(responseText, out var processed, out var oldCount, out var newCount))
+        {
+            details = $"Processed by Temple: {processed}\nMembers: {oldCount} -> {newCount}";
+        }
+
+        return BuildTempleResultEmbed(
+            title: "TempleOSRS Add Completed",
+            success: true,
+            groupId: templeGroupId,
+            players: players,
+            details: details);
+    }
+
+    private async Task<Embed> ExecuteWomAddAsync(List<string> players)
+    {
+        var womGroupId = configuration.GetValue<int?>("WiseOldMan:GroupId") ?? 0;
+        var womVerificationCode = configuration["WiseOldMan:VerificationCode"] ?? "";
+        if (womGroupId <= 0 || string.IsNullOrWhiteSpace(womVerificationCode))
+        {
+            return BuildWomResultEmbed(
+                title: "WiseOldMan Add Failed",
+                success: false,
+                groupId: womGroupId,
+                players: players,
+                details: "WiseOldMan settings are missing (`WiseOldMan:GroupId` or `WiseOldMan:VerificationCode`).");
+        }
+
+        var client = httpClientFactory.CreateClient();
+        var addBody = JsonSerializer.Serialize(new
+        {
+            verificationCode = womVerificationCode,
+            members = players.Select(p => new { username = p, role = "member" }).ToArray()
+        });
+        var addReq = new HttpRequestMessage(HttpMethod.Post, $"https://api.wiseoldman.net/v2/groups/{womGroupId}/members")
+        {
+            Content = new StringContent(addBody, Encoding.UTF8, "application/json")
+        };
+        var response = await client.SendAsync(addReq);
+        var responseText = await response.Content.ReadAsStringAsync();
+        if (!response.IsSuccessStatusCode)
+        {
+            return BuildWomResultEmbed(
+                title: "WiseOldMan Add Failed",
+                success: false,
+                groupId: womGroupId,
+                players: players,
+                details: $"HTTP {(int)response.StatusCode}: {responseText}");
+        }
+
+        return BuildWomResultEmbed(
+            title: "WiseOldMan Add Completed",
+            success: true,
+            groupId: womGroupId,
+            players: players,
+            details: "Request accepted by WiseOldMan.");
+    }
+
+    private async Task<Embed> ExecuteTempleRemoveAsync(List<string> players)
+    {
+        var templeGroupId = configuration.GetValue<int?>("TempleOsrs:GroupId") ?? 0;
+        var templeApiKey = configuration["TempleOsrs:ApiKey"] ?? "";
+        if (templeGroupId <= 0 || string.IsNullOrWhiteSpace(templeApiKey))
+        {
+            return BuildTempleResultEmbed(
+                title: "TempleOSRS Remove Failed",
+                success: false,
+                groupId: templeGroupId,
+                players: players,
+                details: "TempleOSRS settings are missing (`TempleOsrs:GroupId` or `TempleOsrs:ApiKey`).");
+        }
+
+        var client = httpClientFactory.CreateClient();
+        var body = new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["id"] = templeGroupId.ToString(CultureInfo.InvariantCulture),
+            ["key"] = templeApiKey,
+            ["players"] = string.Join(",", players)
+        });
+        var response = await client.PostAsync("https://templeosrs.com/api/remove_group_member.php", body);
+        var responseText = await response.Content.ReadAsStringAsync();
+        if (!response.IsSuccessStatusCode)
+        {
+            return BuildTempleResultEmbed(
+                title: "TempleOSRS Remove Failed",
+                success: false,
+                groupId: templeGroupId,
+                players: players,
+                details: $"HTTP {(int)response.StatusCode}: {responseText}");
+        }
+
+        var details = "Request accepted by TempleOSRS.";
+        if (TryParseTempleMembershipResponse(responseText, out var processed, out var oldCount, out var newCount))
+        {
+            details = $"Processed by Temple: {processed}\nMembers: {oldCount} -> {newCount}";
+        }
+
+        return BuildTempleResultEmbed(
+            title: "TempleOSRS Remove Completed",
+            success: true,
+            groupId: templeGroupId,
+            players: players,
+            details: details);
+    }
+
+    private async Task<Embed> ExecuteWomRemoveAsync(List<string> players)
+    {
+        var womGroupId = configuration.GetValue<int?>("WiseOldMan:GroupId") ?? 0;
+        var womVerificationCode = configuration["WiseOldMan:VerificationCode"] ?? "";
+        if (womGroupId <= 0 || string.IsNullOrWhiteSpace(womVerificationCode))
+        {
+            return BuildWomResultEmbed(
+                title: "WiseOldMan Remove Failed",
+                success: false,
+                groupId: womGroupId,
+                players: players,
+                details: "WiseOldMan settings are missing (`WiseOldMan:GroupId` or `WiseOldMan:VerificationCode`).");
+        }
+
+        var client = httpClientFactory.CreateClient();
+        var removeBody = JsonSerializer.Serialize(new
+        {
+            verificationCode = womVerificationCode,
+            members = players.ToArray()
+        });
+        var removeReq = new HttpRequestMessage(HttpMethod.Delete, $"https://api.wiseoldman.net/v2/groups/{womGroupId}/members")
+        {
+            Content = new StringContent(removeBody, Encoding.UTF8, "application/json")
+        };
+        var response = await client.SendAsync(removeReq);
+        var responseText = await response.Content.ReadAsStringAsync();
+        if (!response.IsSuccessStatusCode)
+        {
+            return BuildWomResultEmbed(
+                title: "WiseOldMan Remove Failed",
+                success: false,
+                groupId: womGroupId,
+                players: players,
+                details: $"HTTP {(int)response.StatusCode}: {responseText}");
+        }
+
+        return BuildWomResultEmbed(
+            title: "WiseOldMan Remove Completed",
+            success: true,
+            groupId: womGroupId,
+            players: players,
+            details: "Request accepted by WiseOldMan.");
+    }
+
+    private async Task<Embed> ExecuteWomRoleUpdateAsync(SocketSlashCommand command, string playerName, string role)
+    {
+        var womGroupId = configuration.GetValue<int?>("WiseOldMan:GroupId") ?? 0;
+        var womVerificationCode = configuration["WiseOldMan:VerificationCode"] ?? "";
+        if (womGroupId <= 0 || string.IsNullOrWhiteSpace(womVerificationCode))
+        {
+            await LogWomRoleUpdateAppliedAsync(command, playerName, role, false, null, null, null, null, "WiseOldMan settings are missing.");
+            return BuildWomRoleUpdateEmbed(
+                title: "WiseOldMan Role Update Failed",
+                success: false,
+                groupId: womGroupId,
+                playerName: playerName,
+                requestedRole: role,
+                updatedRole: null,
+                womPlayerId: null,
+                displayName: null,
+                details: "WiseOldMan settings are missing (`WiseOldMan:GroupId` or `WiseOldMan:VerificationCode`).");
+        }
+
+        var client = httpClientFactory.CreateClient();
+        var updateBody = JsonSerializer.Serialize(new
+        {
+            verificationCode = womVerificationCode,
+            username = playerName,
+            role = role.ToLowerInvariant()
+        });
+        var updateReq = new HttpRequestMessage(HttpMethod.Put, $"https://api.wiseoldman.net/v2/groups/{womGroupId}/role")
+        {
+            Content = new StringContent(updateBody, Encoding.UTF8, "application/json")
+        };
+        var response = await client.SendAsync(updateReq);
+        var responseText = await response.Content.ReadAsStringAsync();
+        var responseDetails = response.IsSuccessStatusCode
+            ? "Role update accepted by WiseOldMan."
+            : $"HTTP {(int)response.StatusCode}: {TruncateDetails(responseText)}";
+
+        var updatedRole = role;
+        int? womPlayerId = null;
+        string? displayName = null;
+        if (response.IsSuccessStatusCode)
+        {
+            if (TryReadWomRoleUpdateResponse(responseText, out var parsedUpdatedRole, out womPlayerId, out displayName))
+            {
+                updatedRole = parsedUpdatedRole;
+            }
+        }
+
+        await LogWomRoleUpdateAppliedAsync(
+            command,
+            playerName,
+            role,
+            response.IsSuccessStatusCode,
+            (int)response.StatusCode,
+            updatedRole,
+            womPlayerId,
+            displayName,
+            response.IsSuccessStatusCode ? "Role update accepted by WiseOldMan." : TruncateDetails(responseText));
+
+        return BuildWomRoleUpdateEmbed(
+            title: response.IsSuccessStatusCode ? "WiseOldMan Role Update Completed" : "WiseOldMan Role Update Failed",
+            success: response.IsSuccessStatusCode,
+            groupId: womGroupId,
+            playerName: playerName,
+            requestedRole: role,
+            updatedRole: response.IsSuccessStatusCode ? updatedRole : null,
+            womPlayerId: womPlayerId,
+            displayName: displayName,
+            details: responseDetails);
+    }
+
+    private async Task LogWomRoleUpdateAppliedAsync(
+        SocketSlashCommand command,
+        string playerName,
+        string requestedRole,
+        bool success,
+        int? httpStatus,
+        string? updatedRole,
+        int? womPlayerId,
+        string? displayName,
+        string? details)
+    {
+        try
+        {
+            await using var scope = scopeFactory.CreateAsyncScope();
+            var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+            var playerId = await db.Players
+                .Where(x => x.Username.ToLower() == playerName.ToLower())
+                .Select(x => (int?)x.Id)
+                .FirstOrDefaultAsync();
+            playerId ??= await ResolveLifecycleOwnerPlayerIdAsync(db, 0, CancellationToken.None);
+            if (!playerId.HasValue) return;
+
+            db.LifecycleEvents.Add(new LifecycleEvent
+            {
+                PlayerId = playerId.Value,
+                EventType = "WOM_ROLE_UPDATE_APPLIED",
+                MetadataJson = JsonUtil.Serialize(new
+                {
+                    Player = playerName,
+                    RequestedRole = requestedRole,
+                    UpdatedRole = updatedRole,
+                    Success = success,
+                    HttpStatus = httpStatus,
+                    RequestedBy = command.User.Username,
+                    RequestedByDiscordUserId = command.User.Id,
+                    ChannelId = command.ChannelId,
+                    GuildId = (command.User as SocketGuildUser)?.Guild.Id,
+                    WiseOldManPlayerId = womPlayerId,
+                    WiseOldManDisplayName = displayName,
+                    Details = details,
+                    Source = "discord-slash-wom-role-update"
+                }),
+                Status = "DONE",
+                CreatedAt = DateTimeOffset.UtcNow
+            });
+            await db.SaveChangesAsync();
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to record WiseOldMan role update for {Player}.", playerName);
+        }
+    }
+
+    private static bool TryReadWomRoleUpdateResponse(string json, out string updatedRole, out int? womPlayerId, out string? displayName)
+    {
+        updatedRole = "";
+        womPlayerId = null;
+        displayName = null;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.TryGetProperty("role", out var roleProp))
+            {
+                updatedRole = roleProp.GetString() ?? "";
+            }
+            if (doc.RootElement.TryGetProperty("playerId", out var playerIdProp) && playerIdProp.TryGetInt32(out var parsedPlayerId))
+            {
+                womPlayerId = parsedPlayerId;
+            }
+            if (doc.RootElement.TryGetProperty("player", out var playerProp) && playerProp.ValueKind == JsonValueKind.Object)
+            {
+                if (playerProp.TryGetProperty("displayName", out var displayNameProp))
+                {
+                    displayName = displayNameProp.GetString();
+                }
+                if (string.IsNullOrWhiteSpace(displayName) && playerProp.TryGetProperty("username", out var usernameProp))
+                {
+                    displayName = usernameProp.GetString();
+                }
+            }
+            return !string.IsNullOrWhiteSpace(updatedRole);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private async Task<bool> IsPlayerInTempleGroupAsync(string username, int groupId)
+    {
+        try
+        {
+            var client = httpClientFactory.CreateClient();
+            var json = await client.GetStringAsync($"https://templeosrs.com/api/groupmembers.php?id={groupId}");
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Array) return false;
+            foreach (var el in doc.RootElement.EnumerateArray())
+            {
+                if (string.Equals(el.GetString(), username, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+        }
+        catch { }
+        return false;
+    }
+
+    private async Task<bool> IsPlayerInWiseOldManGroupAsync(string username, int groupId)
+    {
+        try
+        {
+            var client = httpClientFactory.CreateClient();
+            var csv = await client.GetStringAsync($"https://api.wiseoldman.net/v2/groups/{groupId}/csv");
+            var lines = csv.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (lines.Length <= 1) return false;
+            var normalizedUsername = NormalizeUsername(username);
+            for (var i = 1; i < lines.Length; i++)
+            {
+                var firstField = NormalizeUsername(lines[i].Split(',', 2)[0].Trim().Trim('"'));
+                if (string.Equals(firstField, normalizedUsername, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+        }
+        catch { }
+        return false;
+    }
+
+    private static Embed BuildTempleResultEmbed(string title, bool success, int groupId, List<string> players, string details)
+    {
+        var groupName = groupId == 449 ? "Swedes" : $"Group {groupId}";
+        var color = success ? new Color(34, 197, 94) : new Color(239, 68, 68);
+        return new EmbedBuilder()
+            .WithTitle(title)
+            .WithColor(color)
+            .AddField("Group", $"{groupName} ({groupId})", true)
+            .AddField("Players", string.Join(", ", players.Select(p => $"`{p}`")), false)
+            .AddField("Details", details, false)
+            .WithTimestamp(DateTimeOffset.Now)
+            .Build();
+    }
+
+    private static Embed BuildWomResultEmbed(string title, bool success, int groupId, List<string> players, string details)
+    {
+        var groupName = groupId == 7173 ? "Swedes" : $"Group {groupId}";
+        var color = success ? new Color(34, 197, 94) : new Color(239, 68, 68);
+        return new EmbedBuilder()
+            .WithTitle(title)
+            .WithColor(color)
+            .AddField("Group", $"{groupName} ({groupId})", true)
+            .AddField("Players", players.Count > 0 ? string.Join(", ", players.Select(p => $"`{p}`")) : "N/A", false)
+            .AddField("Details", details, false)
+            .WithTimestamp(DateTimeOffset.Now)
+            .Build();
+    }
+
+    private static Embed BuildWomRoleUpdateEmbed(
+        string title,
+        bool success,
+        int groupId,
+        string playerName,
+        string requestedRole,
+        string? updatedRole,
+        int? womPlayerId,
+        string? displayName,
+        string details)
+    {
+        var groupName = groupId == 7173 ? "Swedes" : $"Group {groupId}";
+        var builder = new EmbedBuilder()
+            .WithTitle(title)
+            .WithColor(success ? new Color(34, 197, 94) : new Color(239, 68, 68))
+            .AddField("Group", $"{groupName} ({groupId})", true)
+            .AddField("Player", string.IsNullOrWhiteSpace(playerName) ? "N/A" : $"`{playerName}`", true)
+            .AddField("Requested Role", FormatWomRoleLabel(requestedRole), true)
+            .AddField("Updated Role", string.IsNullOrWhiteSpace(updatedRole) ? "N/A" : FormatWomRoleLabel(updatedRole), true)
+            .AddField("WiseOldMan Player", BuildWomPlayerSummary(womPlayerId, displayName), true)
+            .AddField("Details", details, false)
+            .WithTimestamp(DateTimeOffset.Now);
+
+        return builder.Build();
+    }
+
+    private static string BuildWomPlayerSummary(int? womPlayerId, string? displayName)
+    {
+        if (womPlayerId.HasValue && !string.IsNullOrWhiteSpace(displayName))
+        {
+            return $"{displayName} (#{womPlayerId.Value})";
+        }
+        if (womPlayerId.HasValue) return $"#{womPlayerId.Value}";
+        return string.IsNullOrWhiteSpace(displayName) ? "N/A" : displayName;
+    }
+
+    private static bool IsAllowedWomRole(string role) =>
+        WomRoleChoices.Any(x => string.Equals(x.Value, role, StringComparison.OrdinalIgnoreCase));
+
+    private static string FormatWomRoleLabel(string role)
+    {
+        var choice = WomRoleChoices.FirstOrDefault(x => string.Equals(x.Value, role, StringComparison.OrdinalIgnoreCase));
+        return choice?.Label ?? CultureInfo.InvariantCulture.TextInfo.ToTitleCase(role.Replace('_', ' ').ToLowerInvariant());
+    }
+
+    private static List<string> ParsePlayers(SocketSlashCommand command)
+    {
+        var rawPlayers = command.Data.Options.FirstOrDefault(x => x.Name == "players")?.Value?.ToString()?.Trim();
+        if (string.IsNullOrWhiteSpace(rawPlayers)) return [];
+        return rawPlayers.Split(',')
+            .Select(x => x.Trim())
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static string NormalizeUsername(string input) =>
+        input.Replace('_', ' ').Trim();
+
+    private async Task<bool> AddPlayerToTempleAsync(string username)
+    {
+        try
+        {
+            var groupId = configuration.GetValue<int?>("TempleOsrs:GroupId") ?? 449;
+            var apiKey = configuration["TempleOsrs:ApiKey"] ?? "";
+            if (string.IsNullOrWhiteSpace(apiKey)) return false;
+            var client = httpClientFactory.CreateClient();
+            var body = new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["id"] = groupId.ToString(CultureInfo.InvariantCulture),
+                ["key"] = apiKey,
+                ["players"] = username
+            });
+            var response = await client.PostAsync("https://templeosrs.com/api/add_group_member.php", body);
+            return response.IsSuccessStatusCode;
+        }
+        catch { return false; }
+    }
+
+    private async Task<bool> AddPlayerToWomAsync(string username)
+    {
+        try
+        {
+            var groupId = configuration.GetValue<int?>("WiseOldMan:GroupId") ?? 0;
+            var verificationCode = configuration["WiseOldMan:VerificationCode"] ?? "";
+            if (groupId <= 0 || string.IsNullOrWhiteSpace(verificationCode)) return false;
+            var client = httpClientFactory.CreateClient();
+            var addBody = JsonSerializer.Serialize(new
+            {
+                verificationCode,
+                members = new[] { new { username, role = "member" } }
+            });
+            var req = new HttpRequestMessage(HttpMethod.Post, $"https://api.wiseoldman.net/v2/groups/{groupId}/members")
+            {
+                Content = new StringContent(addBody, Encoding.UTF8, "application/json")
+            };
+            var response = await client.SendAsync(req);
+            return response.IsSuccessStatusCode;
+        }
+        catch { return false; }
+    }
+
+    private async Task<bool> RemovePlayerFromWomAsync(string username)
+    {
+        try
+        {
+            var groupId = configuration.GetValue<int?>("WiseOldMan:GroupId") ?? 0;
+            var verificationCode = configuration["WiseOldMan:VerificationCode"] ?? "";
+            if (groupId <= 0 || string.IsNullOrWhiteSpace(verificationCode)) return true;
+            var client = httpClientFactory.CreateClient();
+            var removeBody = JsonSerializer.Serialize(new
+            {
+                verificationCode,
+                members = new[] { username }
+            });
+            var req = new HttpRequestMessage(HttpMethod.Delete, $"https://api.wiseoldman.net/v2/groups/{groupId}/members")
+            {
+                Content = new StringContent(removeBody, Encoding.UTF8, "application/json")
+            };
+            var response = await client.SendAsync(req);
+            return response.IsSuccessStatusCode;
+        }
+        catch { return false; }
+    }
+
+    private async Task<bool> RemovePlayerFromTempleAsync(string username)
+    {
+        try
+        {
+            var groupId = configuration.GetValue<int?>("TempleOsrs:GroupId") ?? 449;
+            var apiKey = configuration["TempleOsrs:ApiKey"] ?? "";
+            if (string.IsNullOrWhiteSpace(apiKey)) return false;
+            var client = httpClientFactory.CreateClient();
+            var body = new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["id"] = groupId.ToString(CultureInfo.InvariantCulture),
+                ["key"] = apiKey,
+                ["players"] = username
+            });
+            var response = await client.PostAsync("https://templeosrs.com/api/remove_group_member.php", body);
+            return response.IsSuccessStatusCode;
+        }
+        catch { return false; }
+    }
+
+    private async Task<bool> ReevaluatePlayerForManualPetsAsync(TrackerDbContext db, IWiseOldManClient wiseOldManClient, Player player)
+    {
+        var latest = player.Snapshots
+            .OrderByDescending(x => x.Timestamp)
+            .FirstOrDefault();
+
+        if (latest is null)
+        {
+            return false;
+        }
+
+        var snapshot = new PlayerSnapshot
+        {
+            PlayerId = player.Id,
+            Timestamp = DateTimeOffset.UtcNow,
+            TotalLevel = latest.TotalLevel,
+            Ehb = latest.Ehb,
+            Ehp = latest.Ehp,
+            Collections = latest.Collections,
+            PetCount = player.ManualPetOverride ?? player.StoredPetCount
+        };
+        if (!snapshot.HasSameStats(latest))
+        {
+            db.PlayerSnapshots.Add(snapshot);
+        }
+
+        var rankResult = RankEvaluator.Evaluate(snapshot);
+        player.EligibleRank = rankResult.Rank;
+
+        var isImpAccount = await wiseOldManClient.IsImpAccountAsync(player.Username, CancellationToken.None);
+        if (isImpAccount)
+        {
+            var pendingForImp = await db.PromotionCandidates
+                .Where(x => x.PlayerId == player.Id && x.Status == PromotionStatus.PENDING)
+                .ToListAsync();
+            if (pendingForImp.Count > 0)
+            {
+                db.PromotionCandidates.RemoveRange(pendingForImp);
+            }
+            return true;
+        }
+
+        if (RankOrder(player.EligibleRank) <= RankOrder(player.CurrentRank))
+        {
+            return false;
+        }
+
+        var exists = await db.PromotionCandidates.AnyAsync(x =>
+            x.PlayerId == player.Id &&
+            x.Status == PromotionStatus.PENDING &&
+            x.NewRank == player.EligibleRank);
+        if (exists) return false;
+
+        db.PromotionCandidates.Add(new PromotionCandidate
+        {
+            PlayerId = player.Id,
+            OldRank = player.CurrentRank,
+            NewRank = player.EligibleRank,
+            Reason = rankResult.Explanation,
+            Status = PromotionStatus.PENDING,
+            CreatedAt = DateTimeOffset.UtcNow
+        });
+        return false;
+    }
+
+    private static int RankOrder(string rank)
+    {
+        var normalized = NormalizeRankName(rank);
+        string[] order = ["Recruit", "Officer", "Commander", "Lieutenant", "Captain", "Astral", "General", "Brigadier", "Admiral", "Marshal", "Beast"];
+        for (var i = 0; i < order.Length; i++)
+        {
+            if (string.Equals(order[i], normalized, StringComparison.OrdinalIgnoreCase)) return i;
+        }
+        return 0;
+    }
+
+    private static string NormalizeRankName(string rank) => rank.Replace('_', ' ').Trim();
+}
+
+public class DiscordBotOptions
+{
+    public bool Enabled { get; set; }
+    public string Token { get; set; } = "";
+    public ulong GuildId { get; set; }
+    public ulong ChannelId { get; set; }
+    public ulong PetHiscoresChannelId { get; set; }
+    public ulong AdminRoleId { get; set; }
+}
+
+public record WomRoleChoice(string Label, string Value);
