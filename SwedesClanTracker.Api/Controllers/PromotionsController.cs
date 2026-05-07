@@ -9,7 +9,7 @@ namespace SwedesClanTracker.Api.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/promotions")]
-public class PromotionsController(TrackerDbContext db) : ControllerBase
+public class PromotionsController(TrackerDbContext db, IWiseOldManClient wiseOldManClient) : ControllerBase
 {
     [HttpGet]
     public async Task<IActionResult> Get(CancellationToken ct)
@@ -19,7 +19,26 @@ public class PromotionsController(TrackerDbContext db) : ControllerBase
             .OrderByDescending(x => x.CreatedAt)
             .Select(x => new { x.Id, x.PlayerId, Username = x.Player.Username, x.OldRank, x.NewRank, x.Reason, x.CreatedAt })
             .ToListAsync(ct);
-        return Ok(rows);
+
+        var enriched = new List<object>(rows.Count);
+        foreach (var row in rows)
+        {
+            var womRole = await wiseOldManClient.GetMemberRoleAsync(row.Username, ct);
+            var candidateType = RankRules.ClassifyPromotionCandidate(row.NewRank, womRole);
+            enriched.Add(new
+            {
+                row.Id,
+                row.PlayerId,
+                row.Username,
+                row.OldRank,
+                row.NewRank,
+                row.Reason,
+                row.CreatedAt,
+                CandidateType = candidateType
+            });
+        }
+
+        return Ok(enriched);
     }
 
     [HttpPost("{id:int}/approve")]

@@ -189,6 +189,7 @@ public class DiscordPromotionBotWorker(
 
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        var wiseOldManClient = scope.ServiceProvider.GetRequiredService<IWiseOldManClient>();
 
         var pending = await db.PromotionCandidates
             .Where(x => x.Status == PromotionStatus.PENDING)
@@ -223,10 +224,15 @@ public class DiscordPromotionBotWorker(
                 x.MetadataJson.Contains(marker), ct);
             if (alreadyPosted) continue;
 
+            var womRole = await wiseOldManClient.GetMemberRoleAsync(c.PlayerName, ct);
+            var candidateType = RankRules.ClassifyPromotionCandidate(c.NewRank, womRole);
+
             var embed = BuildPromotionEmbed(
                 c.PlayerName,
                 c.OldRank,
                 c.NewRank,
+                string.IsNullOrWhiteSpace(womRole) ? "Unknown" : RankRules.NormalizeRankName(womRole),
+                ToPromotionUpdateTargetLabel(candidateType),
                 BuildStatsSummary(c.Latest?.Ehb, c.Latest?.Ehp, c.ManualPetOverride ?? c.StoredPetCount),
                 c.Reason,
                 FormatSwedishTime(c.LastSynced));
@@ -3186,6 +3192,8 @@ public class DiscordPromotionBotWorker(
         string playerName,
         string oldRank,
         string newRank,
+        string womRank,
+        string updateTarget,
         string statsSummary,
         string reason,
         string lastSynced)
@@ -3196,10 +3204,22 @@ public class DiscordPromotionBotWorker(
             .AddField("Player", playerName, true)
             .AddField("Old Rank", oldRank, true)
             .AddField("New Eligible Rank", newRank, true)
+            .AddField("WOM Rank", womRank, true)
+            .AddField("Update Target", updateTarget, true)
             .AddField("Stats Summary", statsSummary, false)
             .AddField("Reason", reason, false)
             .AddField("Last Synced (Swedish Time)", lastSynced, false);
         return b.Build();
+    }
+
+    private static string ToPromotionUpdateTargetLabel(PromotionCandidateType candidateType)
+    {
+        return candidateType switch
+        {
+            PromotionCandidateType.wom_already_at_new_rank => "Database only",
+            PromotionCandidateType.needs_wom_rank_update => "Ingame + database",
+            _ => "Review needed"
+        };
     }
 
     private static string BuildStatsSummary(double? ehb, double? ehp, int pets)

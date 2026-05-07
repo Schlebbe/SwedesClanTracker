@@ -398,11 +398,19 @@ function PlayersTable({ rows }) {
 
 function PromotionsTable({ rows, action, busy }) {
   const [sort, setSort] = useState({ field: "createdAt", dir: "desc" });
+  const candidateTypeLabel = (candidateType) => {
+    switch (candidateType) {
+      case "wom_already_at_new_rank": return "Already correct in WOM";
+      case "needs_wom_rank_update": return "Needs WOM rank update";
+      default: return "WOM role unknown";
+    }
+  };
   const sorted = useMemo(() => [...rows].sort((a, b) => {
     switch (sort.field) {
       case "username": return cmp(a.username, b.username, sort.dir);
       case "oldRank": return cmp(a.oldRank, b.oldRank, sort.dir);
       case "newRank": return cmp(a.newRank, b.newRank, sort.dir);
+      case "candidateType": return cmp(candidateTypeLabel(a.candidateType), candidateTypeLabel(b.candidateType), sort.dir);
       case "reason": return cmp(a.reason, b.reason, sort.dir);
       case "createdAt": return cmp(new Date(a.createdAt).getTime(), new Date(b.createdAt).getTime(), sort.dir);
       default: return 0;
@@ -421,13 +429,14 @@ function PromotionsTable({ rows, action, busy }) {
             <th className="p-2"><SortHeader label="Username" field="username" sort={sort} setSort={setSort} /></th>
             <th className="p-2"><SortHeader label="From" field="oldRank" sort={sort} setSort={setSort} /></th>
             <th className="p-2"><SortHeader label="To" field="newRank" sort={sort} setSort={setSort} /></th>
+            <th className="p-2"><SortHeader label="Type" field="candidateType" sort={sort} setSort={setSort} /></th>
             <th className="p-2"><SortHeader label="Reason" field="reason" sort={sort} setSort={setSort} /></th>
             <th className="p-2"><SortHeader label="Created" field="createdAt" sort={sort} setSort={setSort} /></th>
             <th className="p-2">Actions</th>
           </tr>
         </thead>
         <tbody>
-          {sorted.map((r) => <tr key={r.id} className="border-b align-top"><td className="p-2 font-medium">{r.username}</td><td className="p-2">{r.oldRank}</td><td className="p-2">{r.newRank}</td><td className="p-2 max-w-xl">{r.reason}</td><td className="p-2">{fmt(r.createdAt)}</td><td className="p-2"><div className="flex gap-2"><button disabled={busy} className="px-3 py-1.5 rounded-md bg-emerald-600 text-white disabled:bg-slate-400" onClick={() => action(() => call(`/promotions/${r.id}/approve`, { method: "POST" }))}>Approve</button><button disabled={busy} className="px-3 py-1.5 rounded-md bg-rose-700 text-white disabled:bg-slate-400" onClick={() => action(() => call(`/promotions/${r.id}/dismiss`, { method: "POST" }))}>Dismiss</button></div></td></tr>)}
+          {sorted.map((r) => <tr key={r.id} className="border-b align-top"><td className="p-2 font-medium">{r.username}</td><td className="p-2">{r.oldRank}</td><td className="p-2">{r.newRank}</td><td className="p-2">{candidateTypeLabel(r.candidateType)}</td><td className="p-2 max-w-xl">{r.reason}</td><td className="p-2">{fmt(r.createdAt)}</td><td className="p-2"><div className="flex gap-2"><button disabled={busy} className="px-3 py-1.5 rounded-md bg-emerald-600 text-white disabled:bg-slate-400" onClick={() => action(() => call(`/promotions/${r.id}/approve`, { method: "POST" }))}>Approve</button><button disabled={busy} className="px-3 py-1.5 rounded-md bg-rose-700 text-white disabled:bg-slate-400" onClick={() => action(() => call(`/promotions/${r.id}/dismiss`, { method: "POST" }))}>Dismiss</button></div></td></tr>)}
         </tbody>
       </Table>
     </>

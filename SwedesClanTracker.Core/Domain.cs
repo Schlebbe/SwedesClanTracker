@@ -4,6 +4,7 @@ namespace SwedesClanTracker.Core;
 
 public enum PlayerStatus { ACTIVE, NEW_PENDING_REVIEW, MISSING_PENDING_REVIEW, MERGE_SUGGESTED, REMOVED_CONFIRMED }
 public enum PromotionStatus { PENDING, APPROVED, DISMISSED }
+public enum PromotionCandidateType { wom_already_at_new_rank, needs_wom_rank_update, unknown_wom_role }
 
 public class Player
 {
@@ -96,6 +97,54 @@ public static class RankEvaluator
             why = rule.Why;
         }
         return new RankResult { Rank = best, Explanation = $"{best} via: {why}" };
+    }
+}
+
+public static class RankRules
+{
+    private static readonly string[] OrderedRanks =
+    [
+        "Recruit", "Officer", "Commander", "Lieutenant", "Captain", "Astral", "General", "Brigadier", "Admiral", "Marshal", "Beast"
+    ];
+
+    private static readonly string[] SpecialWomRoles =
+    [
+        "imp", "Kitten", "Administrator", "Deputy Owner", "Owner", "short green guy", "member", "recruit", "apothecary"
+    ];
+
+    public static string NormalizeRankName(string rank) => (rank ?? "").Replace('_', ' ').Trim();
+
+    public static int RankOrder(string rank)
+    {
+        var normalized = NormalizeRankName(rank);
+        for (var i = 0; i < OrderedRanks.Length; i++)
+        {
+            if (string.Equals(OrderedRanks[i], normalized, StringComparison.OrdinalIgnoreCase)) return i;
+        }
+        return 0;
+    }
+
+    public static bool IsKnownClanRank(string rank)
+    {
+        var normalized = NormalizeRankName(rank);
+        return OrderedRanks.Any(x => string.Equals(x, normalized, StringComparison.OrdinalIgnoreCase));
+    }
+
+    public static bool IsSpecialWomRole(string role)
+    {
+        var normalized = NormalizeRankName(role);
+        return SpecialWomRoles.Any(x => string.Equals(x, normalized, StringComparison.OrdinalIgnoreCase));
+    }
+
+    public static PromotionCandidateType ClassifyPromotionCandidate(string newRank, string? womRole)
+    {
+        if (string.IsNullOrWhiteSpace(womRole)) return PromotionCandidateType.unknown_wom_role;
+        if (IsSpecialWomRole(womRole)) return PromotionCandidateType.unknown_wom_role;
+        if (!IsKnownClanRank(womRole)) return PromotionCandidateType.unknown_wom_role;
+
+        return string.Equals(NormalizeRankName(newRank), NormalizeRankName(womRole), StringComparison.OrdinalIgnoreCase)
+            ? PromotionCandidateType.wom_already_at_new_rank
+            : PromotionCandidateType.needs_wom_rank_update;
     }
 }
 
