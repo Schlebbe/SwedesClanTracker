@@ -206,6 +206,15 @@ public class ActivityController(TrackerDbContext db) : ControllerBase
                 title = "Wise Old Man review posted to Discord";
                 description = $"{playerName} missing-player review card was posted.";
                 break;
+            case "DISCORD_POSTED_MESSAGE_MISSING":
+                title = "Discord review card missing";
+                var cardType = Pick(metadata, "CardType") ?? "review";
+                description = $"{playerName} {cardType} card could not be found and will be reconciled.";
+                break;
+            case "DISCORD_REVIEW_REQUEUE_REQUESTED":
+                title = "Review card requeue requested";
+                description = $"{playerName} review card requeue was requested{ByActor(actor)}.";
+                break;
             case "WOM_RANK_MISMATCH_REQUIRED":
                 title = "Wise Old Man rank mismatch";
                 description = $"{mismatchDescription} Officers need to update the rank in game/WiseOldMan or explicitly allow it.";

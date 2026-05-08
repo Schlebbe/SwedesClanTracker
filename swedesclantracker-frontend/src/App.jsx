@@ -464,11 +464,12 @@ function ReviewTable({ rows, action, busy }) {
           <th className="p-2"><SortHeader label="Current" field="currentRank" sort={sort} setSort={setSort} /></th>
           <th className="p-2"><SortHeader label="Eligible" field="eligibleRank" sort={sort} setSort={setSort} /></th>
           <th className="p-2"><SortHeader label="Last Seen" field="lastSeen" sort={sort} setSort={setSort} /></th>
+          <th className="p-2">Discord Card</th>
           <th className="p-2">Review Actions</th>
         </tr>
       </thead>
       <tbody>
-        {sorted.map((r) => <tr key={r.id} className="border-b"><td className="p-2 font-medium">{r.username}</td><td className="p-2">{r.status}</td><td className="p-2">{r.currentRank}</td><td className="p-2">{r.eligibleRank}</td><td className="p-2">{fmt(r.lastSeen)}</td><td className="p-2">{(r.status === "MISSING_PENDING_REVIEW" || r.status === "NEW_PENDING_REVIEW") ? <div className="flex gap-2"><button disabled={busy} className="px-3 py-1.5 rounded-md bg-emerald-600 text-white disabled:bg-slate-400" onClick={() => action(() => call(`/review/players/${r.id}/temple-missing/add`, { method: "POST" }))}>Add to Temple</button><button disabled={busy} className="px-3 py-1.5 rounded-md bg-rose-700 text-white disabled:bg-slate-400" onClick={() => action(() => call(`/review/players/${r.id}/temple-missing/remove-db`, { method: "POST" }))}>Remove from DB</button></div> : "-"}</td></tr>)}
+        {sorted.map((r) => <tr key={r.id} className="border-b"><td className="p-2 font-medium">{r.username}</td><td className="p-2">{r.status}</td><td className="p-2">{r.currentRank}</td><td className="p-2">{r.eligibleRank}</td><td className="p-2">{fmt(r.lastSeen)}</td><td className="p-2">{r.discordCardState ?? "-"}</td><td className="p-2">{(r.status === "MISSING_PENDING_REVIEW" || r.status === "NEW_PENDING_REVIEW") ? <div className="flex gap-2"><button disabled={busy} className="px-3 py-1.5 rounded-md bg-emerald-600 text-white disabled:bg-slate-400" onClick={() => action(() => call(`/review/players/${r.id}/temple-missing/add`, { method: "POST" }))}>Add to Temple</button><button disabled={busy} className="px-3 py-1.5 rounded-md bg-rose-700 text-white disabled:bg-slate-400" onClick={() => action(() => call(`/review/players/${r.id}/temple-missing/remove-db`, { method: "POST" }))}>Remove from DB</button><button disabled={busy} className="px-3 py-1.5 rounded-md bg-slate-700 text-white disabled:bg-slate-400" onClick={() => action(() => call(`/review/players/${r.id}/requeue-discord-card`, { method: "POST" }))}>Requeue Card</button></div> : "-"}</td></tr>)}
       </tbody>
     </Table>
   );

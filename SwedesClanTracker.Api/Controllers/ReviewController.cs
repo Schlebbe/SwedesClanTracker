@@ -20,7 +20,53 @@ public class ReviewController(TrackerDbContext db, IConfiguration config, IHttpC
             .Where(x => x.Status == PlayerStatus.NEW_PENDING_REVIEW || x.Status == PlayerStatus.MISSING_PENDING_REVIEW || x.Status == PlayerStatus.MERGE_SUGGESTED)
             .OrderBy(x => x.Username)
             .ToListAsync(ct);
-        return Ok(players);
+
+        var playerIds = players.Select(x => x.Id).ToList();
+        var lifecycle = playerIds.Count == 0
+            ? []
+            : await db.LifecycleEvents
+                .Where(x => playerIds.Contains(x.PlayerId))
+                .OrderByDescending(x => x.CreatedAt)
+                .ThenByDescending(x => x.Id)
+                .ToListAsync(ct);
+
+        var rows = players.Select(player =>
+        {
+            string cardState = "Handled";
+            if (player.Status is PlayerStatus.NEW_PENDING_REVIEW or PlayerStatus.MISSING_PENDING_REVIEW)
+            {
+                var eventsForPlayer = lifecycle.Where(x => x.PlayerId == player.Id).ToList();
+                var hasOpenRequirement =
+                    eventsForPlayer.Any(x => x.Status == "OPEN" &&
+                        (x.EventType == "TEMPLE_MISSING_ACTION_REQUIRED" ||
+                         x.EventType == "WOM_MISSING_ACTION_REQUIRED" ||
+                         x.EventType == "WOM_ONLY_ACTION_REQUIRED"));
+                var latestPosted = eventsForPlayer.FirstOrDefault(x =>
+                    x.EventType == "TEMPLE_MISSING_DISCORD_POSTED" ||
+                    x.EventType == "WOM_MISSING_DISCORD_POSTED" ||
+                    x.EventType == "WOM_ONLY_DISCORD_POSTED");
+                var latestMissingSignal = eventsForPlayer.FirstOrDefault(x => x.EventType == "DISCORD_POSTED_MESSAGE_MISSING");
+
+                cardState = hasOpenRequirement
+                    ? latestPosted is null
+                        ? "Card missing (reposting)"
+                        : latestMissingSignal is not null && latestMissingSignal.CreatedAt > latestPosted.CreatedAt
+                            ? "Card missing (reposting)"
+                            : "Card live"
+                    : "Handled";
+            }
+
+            return new ReviewQueueRowDto(
+                player.Id,
+                player.Username,
+                player.Status.ToString(),
+                player.CurrentRank,
+                player.EligibleRank,
+                player.LastSeen,
+                cardState);
+        });
+
+        return Ok(rows);
     }
 
     [HttpPost("players/{id:int}/status")]
@@ -157,6 +203,30 @@ public class ReviewController(TrackerDbContext db, IConfiguration config, IHttpC
         return Ok(new { player = p.Username, action = "removed_from_db_and_wom" });
     }
 
+    [HttpPost("players/{id:int}/requeue-discord-card")]
+    public async Task<IActionResult> RequeueDiscordCard(int id, CancellationToken ct)
+    {
+        var p = await db.Players.FirstOrDefaultAsync(x => x.Id == id, ct);
+        if (p is null) return NotFound();
+
+        var handledBy = User.FindFirstValue(ClaimTypes.Name) ?? "web-admin";
+        db.LifecycleEvents.Add(new LifecycleEvent
+        {
+            PlayerId = p.Id,
+            EventType = "DISCORD_REVIEW_REQUEUE_REQUESTED",
+            MetadataJson = JsonUtil.Serialize(new
+            {
+                Player = p.Username,
+                HandledBy = handledBy,
+                Source = "web"
+            }),
+            Status = "OPEN",
+            CreatedAt = DateTimeOffset.UtcNow
+        });
+        await db.SaveChangesAsync(ct);
+        return Ok(new { player = p.Username, action = "requeue_discord_card" });
+    }
+
     private static async Task<bool> IsPlayerInWiseOldManGroupAsync(HttpClient client, string username, int groupId, CancellationToken ct)
     {
         try
@@ -282,3 +352,11 @@ public class ReviewController(TrackerDbContext db, IConfiguration config, IHttpC
 }
 
 public record SetStatusRequest(PlayerStatus Status);
+public record ReviewQueueRowDto(
+    int Id,
+    string Username,
+    string Status,
+    string CurrentRank,
+    string EligibleRank,
+    DateTimeOffset LastSeen,
+    string DiscordCardState);

@@ -148,6 +148,11 @@ public static class RankRules
     }
 }
 
+public static class UsernameRules
+{
+    public static string NormalizeUsername(string input) => (input ?? "").Replace('_', ' ').Trim();
+}
+
 public static class JsonUtil
 {
     public static string Serialize(object input) => JsonSerializer.Serialize(input);

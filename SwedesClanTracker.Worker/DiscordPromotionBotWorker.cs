@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Net.Http;
 using System.Text.Json;
 using System.Text;
+using System.Collections.Concurrent;
 using Discord;
 using Discord.WebSocket;
 using Microsoft.EntityFrameworkCore;
@@ -43,6 +44,14 @@ public class DiscordPromotionBotWorker(
         Missing,
         Unknown
     }
+    private enum PostedMessageLookupState
+    {
+        Found,
+        Missing,
+        Malformed,
+        Unknown
+    }
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _lookupBackoffUntilByKey = new(StringComparer.OrdinalIgnoreCase);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -91,6 +100,7 @@ public class DiscordPromotionBotWorker(
             await RunDiscordStep("PostWomRankMismatchMessages", () => PostWomRankMismatchMessages(stoppingToken), stoppingToken);
             await RunDiscordStep("ProcessMessageActionUpdates", () => ProcessMessageActionUpdates(stoppingToken), stoppingToken);
             await RunDiscordStep("ProcessTempleMissingActionUpdates", () => ProcessTempleMissingActionUpdates(stoppingToken), stoppingToken);
+            await RunDiscordStep("ProcessReviewCardRequeueRequests", () => ProcessReviewCardRequeueRequests(stoppingToken), stoppingToken);
             await RunDiscordStep("UpdatePetHiscoresMessages", () => UpdatePetHiscoresMessages(stoppingToken), stoppingToken);
             await RunDiscordStep("ReconcileCompletedMessageDeletes", () => ReconcileCompletedMessageDeletes(stoppingToken), stoppingToken);
             await RunDiscordStep("ProcessScheduledDeletes", () => ProcessScheduledDeletes(stoppingToken), stoppingToken);
@@ -176,6 +186,7 @@ public class DiscordPromotionBotWorker(
             "PostWomRankMismatchMessages" => "Checking Wise Old Man rank mismatch alerts.",
             "ProcessMessageActionUpdates" => "Applying Discord promotion button actions.",
             "ProcessTempleMissingActionUpdates" => "Applying Temple missing-player actions.",
+            "ProcessReviewCardRequeueRequests" => "Processing manual review-card repost requests.",
             "UpdatePetHiscoresMessages" => "Updating pet hiscore Discord messages.",
             "ReconcileCompletedMessageDeletes" => "Reconciling completed Discord cleanup.",
             "ProcessScheduledDeletes" => "Processing scheduled Discord message deletes.",
@@ -245,8 +256,35 @@ public class DiscordPromotionBotWorker(
                 .FirstOrDefaultAsync(ct);
             if (postedEvent is not null)
             {
-                var (liveDiscordMessage, _, _) = await TryGetPostedUserMessageAsync(postedEvent);
-                if (liveDiscordMessage is not null)
+                var lookupKey = $"promotion:{c.Id}";
+                if (IsLookupBackoffActive(lookupKey)) continue;
+
+                var (lookupState, liveDiscordMessage, channelId, messageId) = await TryGetPostedUserMessageAsync(postedEvent, lookupKey);
+                if (lookupState == PostedMessageLookupState.Unknown)
+                {
+                    SetLookupBackoff(lookupKey);
+                    continue;
+                }
+                if (lookupState == PostedMessageLookupState.Malformed)
+                {
+                    postedEvent.Status = "DONE";
+                    continue;
+                }
+                if (lookupState == PostedMessageLookupState.Missing)
+                {
+                    await RecordMissingTrackedMessageEventAsync(
+                        db,
+                        c.PlayerId,
+                        "promotion",
+                        postedEvent.Id,
+                        null,
+                        channelId,
+                        messageId,
+                        "post-promotion",
+                        ct);
+                }
+
+                if (lookupState == PostedMessageLookupState.Found && liveDiscordMessage is not null)
                 {
                     await liveDiscordMessage.ModifyAsync(props =>
                     {
@@ -263,6 +301,13 @@ public class DiscordPromotionBotWorker(
                 }
             }
 
+            var lease = await TryAcquirePostLeaseAsync(db, c.PlayerId, $"promotion:{c.Id}", ct);
+            if (lease is null) continue;
+            try
+            {
+                var stillPending = await db.PromotionCandidates.AnyAsync(x => x.Id == c.Id && x.Status == PromotionStatus.PENDING, ct);
+                if (!stillPending) continue;
+
             var msg = await channel.SendMessageAsync(embed: embed, components: builder.Build());
             db.LifecycleEvents.Add(new LifecycleEvent
             {
@@ -273,6 +318,12 @@ public class DiscordPromotionBotWorker(
                 CreatedAt = DateTimeOffset.UtcNow
             });
             await db.SaveChangesAsync(ct);
+            }
+            finally
+            {
+                lease.Status = "DONE";
+                await db.SaveChangesAsync(ct);
+            }
         }
     }
 
@@ -331,9 +382,16 @@ public class DiscordPromotionBotWorker(
                 .WithDescription("Update a player's WiseOldMan group role.")
                 .AddOption("player", ApplicationCommandOptionType.String, "Player username", isRequired: true)
                 .AddOption(BuildWomRoleOption());
-            var womUnignore = new SlashCommandBuilder()
-                .WithName("wom-unignore")
+            var unignore = new SlashCommandBuilder()
+                .WithName("unignore")
                 .WithDescription("Remove ignore flags for WiseOldMan-only and WOM rank mismatch tracking.")
+                .AddOption("player", ApplicationCommandOptionType.String, "Player username", isRequired: true);
+            var showIgnored = new SlashCommandBuilder()
+                .WithName("show-ignored")
+                .WithDescription("Show all currently ignored players for WOM-only and WOM rank mismatch.");
+            var requeueReviewCard = new SlashCommandBuilder()
+                .WithName("requeue-review-card")
+                .WithDescription("Force requeue of review Discord card(s) for a player.")
                 .AddOption("player", ApplicationCommandOptionType.String, "Player username", isRequired: true);
             var setPets = new SlashCommandBuilder()
                 .WithName("set-pets")
@@ -350,8 +408,20 @@ public class DiscordPromotionBotWorker(
             await socketGuild.CreateApplicationCommandAsync(womAdd.Build());
             await socketGuild.CreateApplicationCommandAsync(womRemove.Build());
             await socketGuild.CreateApplicationCommandAsync(womRoleUpdate.Build());
-            await socketGuild.CreateApplicationCommandAsync(womUnignore.Build());
+            await socketGuild.CreateApplicationCommandAsync(unignore.Build());
+            await socketGuild.CreateApplicationCommandAsync(showIgnored.Build());
+            await socketGuild.CreateApplicationCommandAsync(requeueReviewCard.Build());
             await socketGuild.CreateApplicationCommandAsync(setPets.Build());
+
+            // Remove legacy command after rename to avoid stale command lists in Discord.
+            var existingCommands = await socketGuild.GetApplicationCommandsAsync();
+            var legacy = existingCommands.FirstOrDefault(x =>
+                string.Equals(x.Name, "wom-unignore", StringComparison.OrdinalIgnoreCase));
+            if (legacy is not null)
+            {
+                await legacy.DeleteAsync();
+                logger.LogInformation("Deleted legacy slash command /wom-unignore.");
+            }
             logger.LogInformation("Registered /lookup slash command in guild {GuildId}.", _options.GuildId);
         }
         catch (Exception ex)
@@ -1229,20 +1299,9 @@ public class DiscordPromotionBotWorker(
             hardDeleteAfterUtc);
     }
 
-    private static async Task<bool> HasOpenWomRankMismatchDeleteForPlayerAsync(
-        TrackerDbContext db,
-        int playerId,
-        CancellationToken ct)
-    {
-        return await db.LifecycleEvents.AnyAsync(x =>
-            x.PlayerId == playerId &&
-            x.EventType == "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED" &&
-            x.Status == "OPEN" &&
-            (x.MetadataJson.Contains("wom-rank-mismatch") ||
-             x.MetadataJson.Contains("WOM rank mismatch")), ct);
-    }
-
-    private async Task<(IUserMessage? Message, ulong? ChannelId, ulong? MessageId)> TryGetPostedUserMessageAsync(LifecycleEvent postedEvent)
+    private async Task<(PostedMessageLookupState State, IUserMessage? Message, ulong? ChannelId, ulong? MessageId)> TryGetPostedUserMessageAsync(
+        LifecycleEvent postedEvent,
+        string context)
     {
         ulong? channelId = null;
         ulong? messageId = null;
@@ -1252,7 +1311,7 @@ public class DiscordPromotionBotWorker(
             if (!TryReadUlong(postedDoc.RootElement, "ChannelId", out var parsedChannelId) ||
                 !TryReadUlong(postedDoc.RootElement, "DiscordMessageId", out var parsedMessageId))
             {
-                return (null, channelId, messageId);
+                return (PostedMessageLookupState.Malformed, null, channelId, messageId);
             }
 
             channelId = parsedChannelId;
@@ -1260,16 +1319,142 @@ public class DiscordPromotionBotWorker(
             var postedChannel = await ResolveMessageChannelAsync(parsedChannelId);
             if (postedChannel is null)
             {
-                return (null, channelId, messageId);
+                return (PostedMessageLookupState.Unknown, null, channelId, messageId);
             }
 
             var existingMessage = await postedChannel.GetMessageAsync(parsedMessageId);
-            return (existingMessage as IUserMessage, channelId, messageId);
+            if (existingMessage is IUserMessage userMessage)
+            {
+                return (PostedMessageLookupState.Found, userMessage, channelId, messageId);
+            }
+            return (PostedMessageLookupState.Missing, null, channelId, messageId);
+        }
+        catch (Discord.Net.HttpException ex) when (ex.HttpCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return (PostedMessageLookupState.Missing, null, channelId, messageId);
         }
         catch
         {
-            return (null, channelId, messageId);
+            logger.LogWarning("Unable to resolve posted Discord message for context {Context}. LifecycleEventId={LifecycleEventId}.", context, postedEvent.Id);
+            return (PostedMessageLookupState.Unknown, null, channelId, messageId);
         }
+    }
+
+    private bool IsLookupBackoffActive(string key)
+    {
+        if (!_lookupBackoffUntilByKey.TryGetValue(key, out var until)) return false;
+        if (until > DateTimeOffset.UtcNow) return true;
+        _lookupBackoffUntilByKey.TryRemove(key, out _);
+        return false;
+    }
+
+    private void SetLookupBackoff(string key)
+    {
+        _lookupBackoffUntilByKey[key] = DateTimeOffset.UtcNow.AddSeconds(45);
+    }
+
+    private async Task RecordMissingTrackedMessageEventAsync(
+        TrackerDbContext db,
+        int playerId,
+        string cardType,
+        int? postedEventId,
+        int? requiredEventId,
+        ulong? channelId,
+        ulong? messageId,
+        string sourceContext,
+        CancellationToken ct)
+    {
+        var hasRecent = await db.LifecycleEvents.AnyAsync(x =>
+            x.PlayerId == playerId &&
+            x.EventType == "DISCORD_POSTED_MESSAGE_MISSING" &&
+            x.CreatedAt >= DateTimeOffset.UtcNow.AddMinutes(-5) &&
+            x.MetadataJson.Contains($"\"CardType\":\"{cardType}\""), ct);
+        if (hasRecent) return;
+
+        db.LifecycleEvents.Add(new LifecycleEvent
+        {
+            PlayerId = playerId,
+            EventType = "DISCORD_POSTED_MESSAGE_MISSING",
+            MetadataJson = JsonUtil.Serialize(new
+            {
+                CardType = cardType,
+                PostedEventId = postedEventId,
+                RequiredEventId = requiredEventId,
+                ChannelId = channelId,
+                DiscordMessageId = messageId,
+                Source = sourceContext
+            }),
+            Status = "DONE",
+            CreatedAt = DateTimeOffset.UtcNow
+        });
+    }
+
+    private async Task<LifecycleEvent?> TryAcquirePostLeaseAsync(
+        TrackerDbContext db,
+        int ownerPlayerId,
+        string leaseKey,
+        CancellationToken ct)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var openLeases = await db.LifecycleEvents
+            .Where(x => x.EventType == "DISCORD_POST_LEASE" && x.Status == "OPEN")
+            .ToListAsync(ct);
+        foreach (var openLease in openLeases)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(openLease.MetadataJson);
+                var key = doc.RootElement.TryGetProperty("Key", out var keyProp) ? keyProp.GetString() ?? "" : "";
+                var hasLeaseUntil = TryReadDateTimeOffset(doc.RootElement, "LeaseUntilUtc", out var leaseUntilUtc);
+                if (string.Equals(key, leaseKey, StringComparison.OrdinalIgnoreCase) && hasLeaseUntil && leaseUntilUtc <= now)
+                {
+                    openLease.Status = "DONE";
+                }
+            }
+            catch
+            {
+                openLease.Status = "DONE";
+            }
+        }
+        await db.SaveChangesAsync(ct);
+
+        var hasOpenLease = await db.LifecycleEvents.AnyAsync(x =>
+            x.EventType == "DISCORD_POST_LEASE" &&
+            x.Status == "OPEN" &&
+            x.MetadataJson.Contains($"\"Key\":\"{leaseKey}\""), ct);
+        if (hasOpenLease) return null;
+
+        var leaseEvent = new LifecycleEvent
+        {
+            PlayerId = ownerPlayerId,
+            EventType = "DISCORD_POST_LEASE",
+            MetadataJson = JsonUtil.Serialize(new
+            {
+                Key = leaseKey,
+                LeaseUntilUtc = now.AddSeconds(45)
+            }),
+            Status = "OPEN",
+            CreatedAt = now
+        };
+        db.LifecycleEvents.Add(leaseEvent);
+        await db.SaveChangesAsync(ct);
+
+        var contenders = await db.LifecycleEvents
+            .Where(x =>
+                x.EventType == "DISCORD_POST_LEASE" &&
+                x.Status == "OPEN" &&
+                x.MetadataJson.Contains($"\"Key\":\"{leaseKey}\""))
+            .OrderBy(x => x.CreatedAt)
+            .ThenBy(x => x.Id)
+            .ToListAsync(ct);
+        if (contenders.Count == 0 || contenders[0].Id != leaseEvent.Id)
+        {
+            leaseEvent.Status = "DONE";
+            await db.SaveChangesAsync(ct);
+            return null;
+        }
+
+        return leaseEvent;
     }
 
     private static async Task<bool> HasWomRankMismatchActionForPostedEventAsync(
@@ -2527,6 +2712,9 @@ public class DiscordPromotionBotWorker(
 
         foreach (var ev in pending)
         {
+            await db.Entry(ev).ReloadAsync(ct);
+            if (ev.Status != "OPEN") continue;
+
             var player = await db.Players.FirstOrDefaultAsync(x => x.Id == ev.PlayerId, ct);
             if (player is null)
             {
@@ -2559,8 +2747,33 @@ public class DiscordPromotionBotWorker(
                 .FirstOrDefaultAsync(ct);
             if (postedEvent is not null)
             {
-                var (liveDiscordMessage, _, _) = await TryGetPostedUserMessageAsync(postedEvent);
-                if (liveDiscordMessage is not null)
+                var lookupKey = $"temple-missing:{ev.Id}";
+                if (IsLookupBackoffActive(lookupKey)) continue;
+                var (lookupState, liveDiscordMessage, channelId, messageId) = await TryGetPostedUserMessageAsync(postedEvent, lookupKey);
+                if (lookupState == PostedMessageLookupState.Unknown)
+                {
+                    SetLookupBackoff(lookupKey);
+                    continue;
+                }
+                if (lookupState == PostedMessageLookupState.Malformed)
+                {
+                    postedEvent.Status = "DONE";
+                    continue;
+                }
+                if (lookupState == PostedMessageLookupState.Missing)
+                {
+                    await RecordMissingTrackedMessageEventAsync(
+                        db,
+                        ev.PlayerId,
+                        "temple-missing",
+                        postedEvent.Id,
+                        ev.Id,
+                        channelId,
+                        messageId,
+                        "post-temple-missing",
+                        ct);
+                }
+                if (lookupState == PostedMessageLookupState.Found && liveDiscordMessage is not null)
                 {
                     await liveDiscordMessage.ModifyAsync(props =>
                     {
@@ -2577,7 +2790,14 @@ public class DiscordPromotionBotWorker(
                 }
             }
 
-            var msg = await channel.SendMessageAsync(embed: embed, components: buttons.Build());
+            var lease = await TryAcquirePostLeaseAsync(db, ev.PlayerId, $"temple-missing:{ev.Id}", ct);
+            if (lease is null) continue;
+            try
+            {
+                await db.Entry(ev).ReloadAsync(ct);
+                if (ev.Status != "OPEN") continue;
+
+                var msg = await channel.SendMessageAsync(embed: embed, components: buttons.Build());
             logger.LogInformation(
                 "Posted Temple missing action message for player {Player} (playerId: {PlayerId}, discordMessageId: {MessageId}).",
                 player.Username, player.Id, msg.Id);
@@ -2589,6 +2809,12 @@ public class DiscordPromotionBotWorker(
                 Status = "DONE",
                 CreatedAt = DateTimeOffset.UtcNow
             });
+            }
+            finally
+            {
+                lease.Status = "DONE";
+                await db.SaveChangesAsync(ct);
+            }
         }
         await db.SaveChangesAsync(ct);
     }
@@ -2641,6 +2867,9 @@ public class DiscordPromotionBotWorker(
 
         foreach (var ev in pending)
         {
+            await db.Entry(ev).ReloadAsync(ct);
+            if (ev.Status != "OPEN") continue;
+
             var player = await db.Players.FirstOrDefaultAsync(x => x.Id == ev.PlayerId, ct);
             if (player is null)
             {
@@ -2673,8 +2902,33 @@ public class DiscordPromotionBotWorker(
                 .FirstOrDefaultAsync(ct);
             if (postedEvent is not null)
             {
-                var (liveDiscordMessage, _, _) = await TryGetPostedUserMessageAsync(postedEvent);
-                if (liveDiscordMessage is not null)
+                var lookupKey = $"wom-missing:{ev.Id}";
+                if (IsLookupBackoffActive(lookupKey)) continue;
+                var (lookupState, liveDiscordMessage, channelId, messageId) = await TryGetPostedUserMessageAsync(postedEvent, lookupKey);
+                if (lookupState == PostedMessageLookupState.Unknown)
+                {
+                    SetLookupBackoff(lookupKey);
+                    continue;
+                }
+                if (lookupState == PostedMessageLookupState.Malformed)
+                {
+                    postedEvent.Status = "DONE";
+                    continue;
+                }
+                if (lookupState == PostedMessageLookupState.Missing)
+                {
+                    await RecordMissingTrackedMessageEventAsync(
+                        db,
+                        ev.PlayerId,
+                        "wom-missing",
+                        postedEvent.Id,
+                        ev.Id,
+                        channelId,
+                        messageId,
+                        "post-wom-missing",
+                        ct);
+                }
+                if (lookupState == PostedMessageLookupState.Found && liveDiscordMessage is not null)
                 {
                     await liveDiscordMessage.ModifyAsync(props =>
                     {
@@ -2691,7 +2945,14 @@ public class DiscordPromotionBotWorker(
                 }
             }
 
-            var msg = await channel.SendMessageAsync(embed: embed, components: buttons.Build());
+            var lease = await TryAcquirePostLeaseAsync(db, ev.PlayerId, $"wom-missing:{ev.Id}", ct);
+            if (lease is null) continue;
+            try
+            {
+                await db.Entry(ev).ReloadAsync(ct);
+                if (ev.Status != "OPEN") continue;
+
+                var msg = await channel.SendMessageAsync(embed: embed, components: buttons.Build());
             db.LifecycleEvents.Add(new LifecycleEvent
             {
                 PlayerId = player.Id,
@@ -2700,6 +2961,12 @@ public class DiscordPromotionBotWorker(
                 Status = "DONE",
                 CreatedAt = DateTimeOffset.UtcNow
             });
+            }
+            finally
+            {
+                lease.Status = "DONE";
+                await db.SaveChangesAsync(ct);
+            }
         }
 
         await db.SaveChangesAsync(ct);
@@ -2777,6 +3044,9 @@ public class DiscordPromotionBotWorker(
 
         foreach (var ev in pending)
         {
+            await db.Entry(ev).ReloadAsync(ct);
+            if (ev.Status != "OPEN") continue;
+
             var metadata = ReadLifecycleMetadata(ev.MetadataJson);
             var username = PickLifecycleValue(metadata, "Username", "Player");
             var womRole = PickLifecycleValue(metadata, "ActualWomRole") ?? "Unknown";
@@ -2805,8 +3075,33 @@ public class DiscordPromotionBotWorker(
             var latestPostedEvent = postedEventsForRequirement.FirstOrDefault();
             if (latestPostedEvent is not null)
             {
-                var (liveDiscordMessage, _, _) = await TryGetPostedUserMessageAsync(latestPostedEvent);
-                if (liveDiscordMessage is not null)
+                var lookupKey = $"wom-only:{ev.Id}";
+                if (IsLookupBackoffActive(lookupKey)) continue;
+                var (lookupState, liveDiscordMessage, channelId, messageId) = await TryGetPostedUserMessageAsync(latestPostedEvent, lookupKey);
+                if (lookupState == PostedMessageLookupState.Unknown)
+                {
+                    SetLookupBackoff(lookupKey);
+                    continue;
+                }
+                if (lookupState == PostedMessageLookupState.Malformed)
+                {
+                    latestPostedEvent.Status = "DONE";
+                    continue;
+                }
+                if (lookupState == PostedMessageLookupState.Missing)
+                {
+                    await RecordMissingTrackedMessageEventAsync(
+                        db,
+                        ev.PlayerId,
+                        "wom-only",
+                        latestPostedEvent.Id,
+                        ev.Id,
+                        channelId,
+                        messageId,
+                        "post-wom-only",
+                        ct);
+                }
+                if (lookupState == PostedMessageLookupState.Found && liveDiscordMessage is not null)
                 {
                     await liveDiscordMessage.ModifyAsync(props =>
                     {
@@ -2825,25 +3120,38 @@ public class DiscordPromotionBotWorker(
                 }
             }
 
-            var msg = await channel.SendMessageAsync(
-                embed: BuildWomOnlyRequiredEmbed(normalizedUsername, womRole),
-                components: BuildWomOnlyRequiredComponents(ev.Id));
-
-            db.LifecycleEvents.Add(new LifecycleEvent
+            var lease = await TryAcquirePostLeaseAsync(db, ev.PlayerId, $"wom-only:{ev.Id}", ct);
+            if (lease is null) continue;
+            try
             {
-                PlayerId = ev.PlayerId,
-                EventType = "WOM_ONLY_DISCORD_POSTED",
-                MetadataJson = JsonUtil.Serialize(new
+                await db.Entry(ev).ReloadAsync(ct);
+                if (ev.Status != "OPEN") continue;
+
+                var msg = await channel.SendMessageAsync(
+                    embed: BuildWomOnlyRequiredEmbed(normalizedUsername, womRole),
+                    components: BuildWomOnlyRequiredComponents(ev.Id));
+
+                db.LifecycleEvents.Add(new LifecycleEvent
                 {
-                    Username = normalizedUsername,
-                    ActualWomRole = womRole,
-                    RequiredEventId = ev.Id,
-                    ChannelId = _options.ChannelId,
-                    DiscordMessageId = msg.Id
-                }),
-                Status = "DONE",
-                CreatedAt = DateTimeOffset.UtcNow
-            });
+                    PlayerId = ev.PlayerId,
+                    EventType = "WOM_ONLY_DISCORD_POSTED",
+                    MetadataJson = JsonUtil.Serialize(new
+                    {
+                        Username = normalizedUsername,
+                        ActualWomRole = womRole,
+                        RequiredEventId = ev.Id,
+                        ChannelId = _options.ChannelId,
+                        DiscordMessageId = msg.Id
+                    }),
+                    Status = "DONE",
+                    CreatedAt = DateTimeOffset.UtcNow
+                });
+            }
+            finally
+            {
+                lease.Status = "DONE";
+                await db.SaveChangesAsync(ct);
+            }
         }
 
         await db.SaveChangesAsync(ct);
@@ -2886,11 +3194,6 @@ public class DiscordPromotionBotWorker(
                 continue;
             }
 
-            if (await HasOpenWomRankMismatchDeleteForPlayerAsync(db, ev.PlayerId, ct))
-            {
-                continue;
-            }
-
             var player = await db.Players.FirstOrDefaultAsync(x => x.Id == ev.PlayerId, ct);
             if (player is null)
             {
@@ -2912,9 +3215,34 @@ public class DiscordPromotionBotWorker(
             var postedEvent = postedEvents.FirstOrDefault();
             if (postedEvent is not null)
             {
-                var (liveDiscordMessage, postedChannelId, postedMessageId) = await TryGetPostedUserMessageAsync(postedEvent);
+                var lookupKey = $"wom-rank-mismatch:{ev.Id}";
+                if (IsLookupBackoffActive(lookupKey)) continue;
+                var (lookupState, liveDiscordMessage, postedChannelId, postedMessageId) = await TryGetPostedUserMessageAsync(postedEvent, lookupKey);
+                if (lookupState == PostedMessageLookupState.Unknown)
+                {
+                    SetLookupBackoff(lookupKey);
+                    continue;
+                }
+                if (lookupState == PostedMessageLookupState.Malformed)
+                {
+                    postedEvent.Status = "DONE";
+                    continue;
+                }
+                if (lookupState == PostedMessageLookupState.Missing)
+                {
+                    await RecordMissingTrackedMessageEventAsync(
+                        db,
+                        ev.PlayerId,
+                        "wom-rank-mismatch",
+                        postedEvent.Id,
+                        ev.Id,
+                        postedChannelId,
+                        postedMessageId,
+                        "post-wom-rank-mismatch",
+                        ct);
+                }
                 var postedWasHandled = await HasWomRankMismatchActionForPostedEventAsync(db, ev.PlayerId, postedEvent, ct);
-                if (liveDiscordMessage is not null)
+                if (lookupState == PostedMessageLookupState.Found && liveDiscordMessage is not null)
                 {
                     if (postedWasHandled)
                     {
@@ -2986,24 +3314,37 @@ public class DiscordPromotionBotWorker(
                 }
             }
 
-            var msg = await channel.SendMessageAsync(embed: embed, components: components);
-            db.LifecycleEvents.Add(new LifecycleEvent
+            var lease = await TryAcquirePostLeaseAsync(db, ev.PlayerId, $"wom-rank-mismatch:{ev.Id}", ct);
+            if (lease is null) continue;
+            try
             {
-                PlayerId = player.Id,
-                EventType = "WOM_RANK_MISMATCH_DISCORD_POSTED",
-                MetadataJson = JsonUtil.Serialize(new
+                await db.Entry(ev).ReloadAsync(ct);
+                if (ev.Status != "OPEN") continue;
+
+                var msg = await channel.SendMessageAsync(embed: embed, components: components);
+                db.LifecycleEvents.Add(new LifecycleEvent
                 {
-                    Player = player.Username,
-                    ExpectedRank = expectedRank,
-                    ActualWomRole = actualWomRole,
-                    Direction = direction,
-                    RequiredEventId = ev.Id,
-                    ChannelId = _options.ChannelId,
-                    DiscordMessageId = msg.Id
-                }),
-                Status = "DONE",
-                CreatedAt = DateTimeOffset.UtcNow
-            });
+                    PlayerId = player.Id,
+                    EventType = "WOM_RANK_MISMATCH_DISCORD_POSTED",
+                    MetadataJson = JsonUtil.Serialize(new
+                    {
+                        Player = player.Username,
+                        ExpectedRank = expectedRank,
+                        ActualWomRole = actualWomRole,
+                        Direction = direction,
+                        RequiredEventId = ev.Id,
+                        ChannelId = _options.ChannelId,
+                        DiscordMessageId = msg.Id
+                    }),
+                    Status = "DONE",
+                    CreatedAt = DateTimeOffset.UtcNow
+                });
+            }
+            finally
+            {
+                lease.Status = "DONE";
+                await db.SaveChangesAsync(ct);
+            }
         }
 
         await db.SaveChangesAsync(ct);
@@ -3081,6 +3422,66 @@ public class DiscordPromotionBotWorker(
         await db.SaveChangesAsync(ct);
     }
 
+    private async Task ProcessReviewCardRequeueRequests(CancellationToken ct)
+    {
+        if (_client is null) return;
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+
+        var requests = await db.LifecycleEvents
+            .Where(x => x.EventType == "DISCORD_REVIEW_REQUEUE_REQUESTED" && x.Status == "OPEN")
+            .OrderBy(x => x.CreatedAt)
+            .ToListAsync(ct);
+        if (requests.Count == 0) return;
+
+        foreach (var request in requests)
+        {
+            var postedEvents = await db.LifecycleEvents
+                .Where(x =>
+                    x.PlayerId == request.PlayerId &&
+                    (x.EventType == "TEMPLE_MISSING_DISCORD_POSTED" ||
+                     x.EventType == "WOM_MISSING_DISCORD_POSTED" ||
+                     x.EventType == "WOM_ONLY_DISCORD_POSTED" ||
+                     x.EventType == "WOM_RANK_MISMATCH_DISCORD_POSTED"))
+                .OrderByDescending(x => x.CreatedAt)
+                .ToListAsync(ct);
+
+            foreach (var postedEvent in postedEvents)
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(postedEvent.MetadataJson);
+                    if (!TryReadUlong(doc.RootElement, "ChannelId", out var channelId) ||
+                        !TryReadUlong(doc.RootElement, "DiscordMessageId", out var messageId))
+                    {
+                        postedEvent.Status = "DONE";
+                        continue;
+                    }
+
+                    await DeletePostedMessageIfFoundAsync(channelId, messageId);
+                    await RecordMissingTrackedMessageEventAsync(
+                        db,
+                        request.PlayerId,
+                        "manual-requeue",
+                        postedEvent.Id,
+                        ExtractInt(postedEvent.MetadataJson, "RequiredEventId"),
+                        channelId,
+                        messageId,
+                        "manual-requeue-request",
+                        ct);
+                }
+                catch
+                {
+                    postedEvent.Status = "DONE";
+                }
+            }
+
+            request.Status = "DONE";
+        }
+
+        await db.SaveChangesAsync(ct);
+    }
+
     private async Task<IMessageChannel?> ResolveMessageChannelAsync(ulong channelId)
     {
         if (_client is null) return null;
@@ -3113,7 +3514,7 @@ public class DiscordPromotionBotWorker(
                 return;
             }
 
-            var deferEphemeral = IsEphemeralSlashCommand(command.Data.Name);
+            var deferEphemeral = true;
             if (!command.HasResponded)
             {
                 await command.DeferAsync(ephemeral: deferEphemeral);
@@ -3350,9 +3751,21 @@ public class DiscordPromotionBotWorker(
                 return;
             }
 
-            if (string.Equals(command.Data.Name, "wom-unignore", StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(command.Data.Name, "unignore", StringComparison.OrdinalIgnoreCase))
             {
                 await HandleWomUnignoreSlashCommandAsync(command);
+                return;
+            }
+
+            if (string.Equals(command.Data.Name, "show-ignored", StringComparison.OrdinalIgnoreCase))
+            {
+                await HandleShowIgnoredSlashCommandAsync(command);
+                return;
+            }
+
+            if (string.Equals(command.Data.Name, "requeue-review-card", StringComparison.OrdinalIgnoreCase))
+            {
+                await HandleRequeueReviewCardSlashCommandAsync(command);
                 return;
             }
 
@@ -3516,6 +3929,101 @@ public class DiscordPromotionBotWorker(
             ephemeral: false);
     }
 
+    private async Task HandleRequeueReviewCardSlashCommandAsync(SocketSlashCommand command)
+    {
+        var playerRaw = command.Data.Options.FirstOrDefault(x => x.Name == "player")?.Value?.ToString()?.Trim();
+        if (string.IsNullOrWhiteSpace(playerRaw))
+        {
+            await RespondAndAutoDeleteAsync(command, "Please provide a player username.", ephemeral: false);
+            return;
+        }
+
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        var player = await db.Players.FirstOrDefaultAsync(x => x.Username.ToLower() == playerRaw.ToLower());
+        if (player is null)
+        {
+            await RespondAndAutoDeleteAsync(command, $"No player found for `{playerRaw}`.", ephemeral: false);
+            return;
+        }
+
+        db.LifecycleEvents.Add(new LifecycleEvent
+        {
+            PlayerId = player.Id,
+            EventType = "DISCORD_REVIEW_REQUEUE_REQUESTED",
+            MetadataJson = JsonUtil.Serialize(new
+            {
+                Player = player.Username,
+                HandledBy = command.User.Username,
+                HandledByDiscordUserId = command.User.Id,
+                Source = "discord-slash"
+            }),
+            Status = "OPEN",
+            CreatedAt = DateTimeOffset.UtcNow
+        });
+        await db.SaveChangesAsync();
+
+        await RespondAndAutoDeleteAsync(command, $"Queued review-card requeue for `{player.Username}`.", ephemeral: false);
+    }
+
+    private async Task HandleShowIgnoredSlashCommandAsync(SocketSlashCommand command)
+    {
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+
+        var womOnlyIgnoredEvents = await db.LifecycleEvents
+            .Where(x => x.EventType == "WOM_ONLY_IGNORED" && x.Status == "OPEN")
+            .OrderBy(x => x.CreatedAt)
+            .ToListAsync();
+        var womOnlyIgnored = womOnlyIgnoredEvents
+            .Select(x =>
+            {
+                var metadata = ReadLifecycleMetadata(x.MetadataJson);
+                return NormalizeUsername(PickLifecycleValue(metadata, "Username", "Player") ?? "");
+            })
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var womRankMismatchIgnoredPlayerIds = await db.LifecycleEvents
+            .Where(x => x.EventType == "WOM_RANK_MISMATCH_IGNORED" && x.Status == "OPEN")
+            .Select(x => x.PlayerId)
+            .Distinct()
+            .ToListAsync();
+        var womRankMismatchIgnored = womRankMismatchIgnoredPlayerIds.Count == 0
+            ? new List<string>()
+            : await db.Players
+                .Where(x => womRankMismatchIgnoredPlayerIds.Contains(x.Id))
+                .OrderBy(x => x.Username)
+                .Select(x => x.Username)
+                .ToListAsync();
+
+        string ToDisplay(IReadOnlyList<string> names)
+        {
+            if (names.Count == 0) return "None";
+            const int maxNames = 40;
+            var shown = names.Take(maxNames).Select(x => $"• {x}");
+            var text = string.Join("\n", shown);
+            if (names.Count > maxNames)
+            {
+                text += $"\n...and {names.Count - maxNames} more";
+            }
+            return text;
+        }
+
+        var embed = new EmbedBuilder()
+            .WithTitle("Ignored Players")
+            .WithColor(new Color(59, 130, 246))
+            .WithDescription("Currently open ignore flags by category.")
+            .AddField($"WOM-only ignored ({womOnlyIgnored.Count})", ToDisplay(womOnlyIgnored), false)
+            .AddField($"WOM rank mismatch ignored ({womRankMismatchIgnored.Count})", ToDisplay(womRankMismatchIgnored), false)
+            .WithTimestamp(DateTimeOffset.Now)
+            .Build();
+
+        await RespondAndAutoDeleteAsync(command, embed, ephemeral: false);
+    }
+
     private async Task LogSlashCommandAsync(SocketSlashCommand command, bool adminLocked, bool allowed)
     {
         try
@@ -3558,9 +4066,10 @@ public class DiscordPromotionBotWorker(
 
     private async Task RespondAndAutoDeleteAsync(SocketSlashCommand command, string text, bool ephemeral = true)
     {
-        var response = await command.FollowupAsync(text: text, ephemeral: ephemeral);
+        var effectiveEphemeral = true;
+        var response = await command.FollowupAsync(text: text, ephemeral: effectiveEphemeral);
         var messageDescription = BuildSlashTextCleanupDescription(command, text);
-        if (ephemeral)
+        if (effectiveEphemeral)
         {
             await ScheduleInteractionResponseDeleteAsync(command, messageDescription);
         }
@@ -3579,9 +4088,10 @@ public class DiscordPromotionBotWorker(
 
     private async Task RespondAndAutoDeleteAsync(SocketSlashCommand command, Embed embed, bool ephemeral = true)
     {
-        var response = await command.FollowupAsync(embed: embed, ephemeral: ephemeral);
+        var effectiveEphemeral = true;
+        var response = await command.FollowupAsync(embed: embed, ephemeral: effectiveEphemeral);
         var messageDescription = BuildSlashEmbedCleanupDescription(command, embed);
-        if (ephemeral)
+        if (effectiveEphemeral)
         {
             await ScheduleInteractionResponseDeleteAsync(command, messageDescription);
         }
@@ -3710,7 +4220,9 @@ public class DiscordPromotionBotWorker(
             string.Equals(commandName, "wom-add", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(commandName, "wom-remove", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(commandName, "wom-role-update", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(commandName, "wom-unignore", StringComparison.OrdinalIgnoreCase);
+            string.Equals(commandName, "unignore", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(commandName, "show-ignored", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(commandName, "requeue-review-card", StringComparison.OrdinalIgnoreCase);
     }
 
     private bool HasDiscordAdminRole(SocketUser user)
@@ -4475,7 +4987,7 @@ public class DiscordPromotionBotWorker(
     }
 
     private static string NormalizeUsername(string input) =>
-        input.Replace('_', ' ').Trim();
+        UsernameRules.NormalizeUsername(input);
 
     private async Task<bool> AddPlayerToTempleAsync(string username)
     {
@@ -4639,7 +5151,7 @@ public class DiscordPromotionBotWorker(
         return 0;
     }
 
-    private static string NormalizeRankName(string rank) => rank.Replace('_', ' ').Trim();
+    private static string NormalizeRankName(string rank) => RankRules.NormalizeRankName(rank);
 }
 
 public class DiscordBotOptions

@@ -134,5 +134,5 @@ public class WiseOldManClient(HttpClient httpClient, IConfiguration configuratio
     }
 
     private static string NormalizeUsername(string input) =>
-        input.Replace('_', ' ').Trim();
+        UsernameRules.NormalizeUsername(input);
 }

@@ -598,6 +598,6 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
         return ignoredRoles.Any(x => string.Equals(x, normalized, StringComparison.OrdinalIgnoreCase));
     }
 
-    private static string NormalizeRankName(string rank) => rank.Replace('_', ' ').Trim();
-    private static string NormalizeUsername(string input) => input.Replace('_', ' ').Trim();
+    private static string NormalizeRankName(string rank) => RankRules.NormalizeRankName(rank);
+    private static string NormalizeUsername(string input) => UsernameRules.NormalizeUsername(input);
 }
