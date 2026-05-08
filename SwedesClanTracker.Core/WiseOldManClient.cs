@@ -6,6 +6,7 @@ namespace SwedesClanTracker.Core;
 public interface IWiseOldManClient
 {
     Task<string?> GetMemberRoleAsync(string username, CancellationToken ct);
+    Task<IReadOnlyDictionary<string, string>> GetMemberRolesAsync(CancellationToken ct);
     Task<bool> IsImpAccountAsync(string username, CancellationToken ct);
     Task InvalidateCacheAsync(CancellationToken ct);
 }
@@ -24,6 +25,12 @@ public class WiseOldManClient(HttpClient httpClient, IConfiguration configuratio
         var roles = await GetRolesAsync(ct);
         var normalized = NormalizeUsername(username);
         return roles.TryGetValue(normalized, out var role) ? role : null;
+    }
+
+    public async Task<IReadOnlyDictionary<string, string>> GetMemberRolesAsync(CancellationToken ct)
+    {
+        var roles = await GetRolesAsync(ct);
+        return new Dictionary<string, string>(roles, StringComparer.OrdinalIgnoreCase);
     }
 
     public async Task<bool> IsImpAccountAsync(string username, CancellationToken ct)

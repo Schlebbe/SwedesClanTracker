@@ -98,7 +98,10 @@ public class ActivityController(TrackerDbContext db) : ControllerBase
         string status,
         DateTimeOffset createdAt)
     {
-        var playerName = candidate?.Player ?? player ?? Pick(metadata, "Username", "Player", "NewPlayer") ?? "Player";
+        var metadataPlayerName = Pick(metadata, "Username", "Player", "NewPlayer");
+        var playerName = eventType.StartsWith("WOM_ONLY_", StringComparison.OrdinalIgnoreCase)
+            ? metadataPlayerName ?? player ?? "Player"
+            : candidate?.Player ?? player ?? metadataPlayerName ?? "Player";
         var title = HumanizeEventType(eventType);
         var description = playerName == "Player"
             ? "Lifecycle event recorded by the app."
@@ -121,6 +124,7 @@ public class ActivityController(TrackerDbContext db) : ControllerBase
         }
         var requestedRole = Pick(metadata, "RequestedRole");
         var updatedRole = Pick(metadata, "UpdatedRole");
+        var womOnlyRole = Pick(metadata, "ActualWomRole");
         var mismatchDescription = expectedRank is null || actualWomRole is null
             ? $"{playerName} has a Wise Old Man rank mismatch."
             : mismatchDirection switch
@@ -176,6 +180,12 @@ public class ActivityController(TrackerDbContext db) : ControllerBase
                 title = "Wise Old Man review required";
                 description = $"{playerName} needs a Wise Old Man add/remove decision.";
                 break;
+            case "WOM_ONLY_ACTION_REQUIRED":
+                title = "Wise Old Man only player review required";
+                description = string.IsNullOrWhiteSpace(womOnlyRole)
+                    ? $"{playerName} exists in Wise Old Man but is missing from Temple and tracker."
+                    : $"{playerName} exists in Wise Old Man with role {womOnlyRole} but is missing from Temple and tracker.";
+                break;
             case "TEMPLE_MISSING_ACTION_APPLIED":
                 title = action == "add" ? "Player added back to Temple" :
                     action == "remove" ? "Player removed from review" :
@@ -185,6 +195,12 @@ public class ActivityController(TrackerDbContext db) : ControllerBase
             case "TEMPLE_MISSING_DISCORD_POSTED":
                 title = "Temple review posted to Discord";
                 description = $"{playerName} missing-player review card was posted.";
+                break;
+            case "WOM_ONLY_DISCORD_POSTED":
+                title = "Wise Old Man only review posted to Discord";
+                description = string.IsNullOrWhiteSpace(womOnlyRole)
+                    ? $"{playerName} action-required review card was posted."
+                    : $"{playerName} action-required review card was posted with Wise Old Man role {womOnlyRole}.";
                 break;
             case "WOM_MISSING_DISCORD_POSTED":
                 title = "Wise Old Man review posted to Discord";
@@ -217,6 +233,26 @@ public class ActivityController(TrackerDbContext db) : ControllerBase
             case "WOM_RANK_MISMATCH_IGNORED":
                 title = "Wise Old Man rank mismatch allowed";
                 description = $"{playerName} is ignored for Wise Old Man rank mismatch alerts{ByActor(actor)}.";
+                break;
+            case "WOM_ONLY_ACTION_APPLIED":
+                title = action switch
+                {
+                    "add" => "Player added to Temple from Wise Old Man only review",
+                    "ignore" => "Wise Old Man only tracking ignored",
+                    "unignore" => "Wise Old Man only ignore removed",
+                    _ => "Wise Old Man only review action applied"
+                };
+                description = action switch
+                {
+                    "add" => $"{playerName} was added to Temple from the Wise Old Man only review queue{ByActor(actor)}.",
+                    "ignore" => $"{playerName} was excluded from Wise Old Man only tracking alerts{ByActor(actor)}.",
+                    "unignore" => $"{playerName} was removed from Wise Old Man only ignore tracking{ByActor(actor)}.",
+                    _ => $"{playerName} Wise Old Man only review action was handled{ByActor(actor)}."
+                };
+                break;
+            case "WOM_ONLY_IGNORED":
+                title = "Wise Old Man only player ignored";
+                description = $"{playerName} is ignored for Wise Old Man only tracking alerts{ByActor(actor)}.";
                 break;
             case "PROMOTION_CANDIDATE_CREATED":
                 title = "Promotion candidate created";
@@ -359,6 +395,7 @@ public class ActivityController(TrackerDbContext db) : ControllerBase
         if (eventType.Contains("DISCORD", StringComparison.OrdinalIgnoreCase) ||
             eventType.Contains("PET_HISCORES", StringComparison.OrdinalIgnoreCase)) return "Discord";
         if (eventType.Contains("RANK_MISMATCH", StringComparison.OrdinalIgnoreCase)) return "Player";
+        if (eventType.StartsWith("WOM_", StringComparison.OrdinalIgnoreCase)) return "Player";
         if (eventType.Contains("MISSING", StringComparison.OrdinalIgnoreCase) ||
             eventType is "NEW_PLAYER" or "STATUS_UPDATED" or "MERGE_SUGGESTED") return "Player";
         return "System";

@@ -87,6 +87,7 @@ public class DiscordPromotionBotWorker(
             await RunDiscordStep("PostPendingPromotionCandidates", () => PostPendingPromotionCandidates(stoppingToken), stoppingToken);
             await RunDiscordStep("PostTempleMissingActionMessages", () => PostTempleMissingActionMessages(stoppingToken), stoppingToken);
             await RunDiscordStep("PostWomMissingActionMessages", () => PostWomMissingActionMessages(stoppingToken), stoppingToken);
+            await RunDiscordStep("PostWomOnlyActionMessages", () => PostWomOnlyActionMessages(stoppingToken), stoppingToken);
             await RunDiscordStep("PostWomRankMismatchMessages", () => PostWomRankMismatchMessages(stoppingToken), stoppingToken);
             await RunDiscordStep("ProcessMessageActionUpdates", () => ProcessMessageActionUpdates(stoppingToken), stoppingToken);
             await RunDiscordStep("ProcessTempleMissingActionUpdates", () => ProcessTempleMissingActionUpdates(stoppingToken), stoppingToken);
@@ -171,6 +172,7 @@ public class DiscordPromotionBotWorker(
             "PostPendingPromotionCandidates" => "Checking pending promotions for Discord posts.",
             "PostTempleMissingActionMessages" => "Checking Temple missing-player review messages.",
             "PostWomMissingActionMessages" => "Checking Wise Old Man missing-player review messages.",
+            "PostWomOnlyActionMessages" => "Checking Wise Old Man only-player review messages.",
             "PostWomRankMismatchMessages" => "Checking Wise Old Man rank mismatch alerts.",
             "ProcessMessageActionUpdates" => "Applying Discord promotion button actions.",
             "ProcessTempleMissingActionUpdates" => "Applying Temple missing-player actions.",
@@ -310,6 +312,10 @@ public class DiscordPromotionBotWorker(
                 .WithDescription("Update a player's WiseOldMan group role.")
                 .AddOption("player", ApplicationCommandOptionType.String, "Player username", isRequired: true)
                 .AddOption(BuildWomRoleOption());
+            var womUnignore = new SlashCommandBuilder()
+                .WithName("wom-unignore")
+                .WithDescription("Remove ignore flags for WiseOldMan-only and WOM rank mismatch tracking.")
+                .AddOption("player", ApplicationCommandOptionType.String, "Player username", isRequired: true);
             var setPets = new SlashCommandBuilder()
                 .WithName("set-pets")
                 .WithDescription("Manually set a player's pet count override.")
@@ -325,6 +331,7 @@ public class DiscordPromotionBotWorker(
             await socketGuild.CreateApplicationCommandAsync(womAdd.Build());
             await socketGuild.CreateApplicationCommandAsync(womRemove.Build());
             await socketGuild.CreateApplicationCommandAsync(womRoleUpdate.Build());
+            await socketGuild.CreateApplicationCommandAsync(womUnignore.Build());
             await socketGuild.CreateApplicationCommandAsync(setPets.Build());
             logger.LogInformation("Registered /lookup slash command in guild {GuildId}.", _options.GuildId);
         }
@@ -401,6 +408,16 @@ public class DiscordPromotionBotWorker(
                     return;
                 }
                 await HandleWomRankMismatchButtonAsync(component, parts);
+                return;
+            }
+            if (parts[0] == "womonly")
+            {
+                if (parts.Length != 3)
+                {
+                    await RespondToComponentAsync(component, "Unknown action.", ephemeral: true);
+                    return;
+                }
+                await HandleWomOnlyButtonAsync(component, parts);
                 return;
             }
             if (parts[0] != "promo" || parts.Length != 3) return;
@@ -736,6 +753,121 @@ public class DiscordPromotionBotWorker(
         {
             try { await component.Message.DeleteAsync(); } catch { }
         }
+    }
+
+    private async Task HandleWomOnlyButtonAsync(SocketMessageComponent component, string[] parts)
+    {
+        var action = parts[1];
+        if (action is not ("add" or "ignore"))
+        {
+            await RespondToComponentAsync(component, "Unknown action.", ephemeral: true);
+            return;
+        }
+
+        if (!int.TryParse(parts[2], out var requiredEventId))
+        {
+            await RespondToComponentAsync(component, "Unknown action.", ephemeral: true);
+            return;
+        }
+
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+
+        var requiredEvent = await db.LifecycleEvents
+            .FirstOrDefaultAsync(x => x.Id == requiredEventId && x.EventType == "WOM_ONLY_ACTION_REQUIRED");
+        if (requiredEvent is null)
+        {
+            await RespondToComponentAsync(component, "This alert is no longer valid.", ephemeral: true);
+            return;
+        }
+
+        var metadata = ReadLifecycleMetadata(requiredEvent.MetadataJson);
+        var username = PickLifecycleValue(metadata, "Username", "Player");
+        var actualWomRole = PickLifecycleValue(metadata, "ActualWomRole") ?? "Unknown";
+        if (string.IsNullOrWhiteSpace(username))
+        {
+            requiredEvent.Status = "DONE";
+            await db.SaveChangesAsync();
+            await RespondToComponentAsync(component, "This alert is malformed and was closed.", ephemeral: true);
+            return;
+        }
+
+        var normalizedUsername = NormalizeUsername(username);
+        if (requiredEvent.Status != "OPEN")
+        {
+            await RespondToComponentAsync(component, "This alert was already handled.", ephemeral: true);
+            return;
+        }
+
+        if (action == "add")
+        {
+            var templeRequestAccepted = await AddPlayerToTempleAsync(normalizedUsername);
+            var templeGroupId = configuration.GetValue<int?>("TempleOsrs:GroupId") ?? 449;
+            var templeAdded = await IsPlayerInTempleGroupAsync(normalizedUsername, templeGroupId);
+
+            if (!templeAdded)
+            {
+                var failureText = templeRequestAccepted
+                    ? "Temple add request was accepted, but membership could not be confirmed yet. Try again shortly."
+                    : "Failed to add player to Temple and membership could not be confirmed.";
+                await RespondToComponentAsync(component, failureText, ephemeral: true);
+                return;
+            }
+        }
+
+        requiredEvent.Status = "DONE";
+        await CloseOpenWomOnlyRequiredEventsAsync(db, normalizedUsername);
+
+        if (action == "ignore")
+        {
+            await EnsureOpenWomOnlyIgnoredEventAsync(db, requiredEvent.PlayerId, normalizedUsername, actualWomRole);
+        }
+
+        db.LifecycleEvents.Add(new LifecycleEvent
+        {
+            PlayerId = requiredEvent.PlayerId,
+            EventType = "WOM_ONLY_ACTION_APPLIED",
+            MetadataJson = JsonUtil.Serialize(new
+            {
+                Username = normalizedUsername,
+                ActualWomRole = actualWomRole,
+                Action = action,
+                RequiredEventId = requiredEvent.Id,
+                HandledBy = component.User.Username,
+                HandledByDiscordUserId = component.User.Id,
+                Source = "discord",
+                ChannelId = component.Channel.Id,
+                DiscordMessageId = component.Message.Id
+            }),
+            Status = "DONE",
+            CreatedAt = DateTimeOffset.UtcNow
+        });
+
+        var handledText = action switch
+        {
+            "add" => $"Added to Temple by {component.User.Username}",
+            "ignore" => $"Ignored by {component.User.Username}",
+            _ => $"Handled by {component.User.Username}"
+        };
+
+        await UpdateComponentMessageAsync(
+            component,
+            BuildHandledEmbed(component.Message.Embeds.FirstOrDefault(), handledText, action == "add" ? "approve" : "dismiss"));
+
+        ScheduleChannelMessageDelete(
+            db,
+            requiredEvent.PlayerId,
+            component.Channel.Id,
+            component.Message.Id,
+            "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED",
+            new
+            {
+                Reason = "wom-only-action-handled",
+                Action = action,
+                MessageDescription = $"WOM-only review card for {normalizedUsername}"
+            });
+
+        await db.SaveChangesAsync();
     }
 
     private async Task HandleWomRankMismatchButtonAsync(SocketMessageComponent component, string[] parts)
@@ -1160,6 +1292,43 @@ public class DiscordPromotionBotWorker(
         return false;
     }
 
+    private static async Task<bool> HasWomOnlyActionForPostedEventAsync(
+        TrackerDbContext db,
+        LifecycleEvent postedEvent,
+        CancellationToken ct)
+    {
+        var postedMessageId = ExtractUlong(postedEvent.MetadataJson, "DiscordMessageId");
+        var postedRequiredEventId = ExtractInt(postedEvent.MetadataJson, "RequiredEventId");
+
+        var actions = await db.LifecycleEvents
+            .Where(x =>
+                x.PlayerId == postedEvent.PlayerId &&
+                x.EventType == "WOM_ONLY_ACTION_APPLIED" &&
+                x.CreatedAt >= postedEvent.CreatedAt)
+            .OrderByDescending(x => x.CreatedAt)
+            .ToListAsync(ct);
+
+        foreach (var action in actions)
+        {
+            var actionMetadata = ReadLifecycleMetadata(action.MetadataJson);
+            var actionMessageIdText = PickLifecycleValue(actionMetadata, "DiscordMessageId", "ClickedDiscordMessageId");
+            if (postedMessageId.HasValue && ulong.TryParse(actionMessageIdText, out var actionMessageId))
+            {
+                if (actionMessageId == postedMessageId.Value) return true;
+                continue;
+            }
+
+            var actionRequiredEventIdText = PickLifecycleValue(actionMetadata, "RequiredEventId");
+            if (postedRequiredEventId.HasValue && int.TryParse(actionRequiredEventIdText, out var actionRequiredEventId))
+            {
+                if (actionRequiredEventId == postedRequiredEventId.Value) return true;
+                continue;
+            }
+        }
+
+        return false;
+    }
+
     private async Task EnsureMessageDeleteScheduledOrDeletedAsync(
         TrackerDbContext db,
         int preferredPlayerId,
@@ -1390,6 +1559,18 @@ public class DiscordPromotionBotWorker(
                 continue;
             }
 
+            if (s.EventType == "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED" &&
+                IsWomOnlyCleanup(sd.RootElement) &&
+                !await HasWomOnlyActionForScheduledDeleteAsync(db, s, ct))
+            {
+                logger.LogWarning(
+                    "Skipping WOM-only delete schedule {LifecycleEventId} for message {MessageId} because no WOM_ONLY_ACTION_APPLIED event was found.",
+                    s.Id,
+                    messageId);
+                s.Status = "DONE";
+                continue;
+            }
+
             var channel = await ResolveMessageChannelAsync(channelId);
             if (channel is null)
             {
@@ -1488,6 +1669,58 @@ public class DiscordPromotionBotWorker(
                     msgId,
                     "TEMPLE_MISSING_DISCORD_DELETE_SCHEDULED",
                     new { Reason = "reconcile-completed-temple-missing" },
+                    ev.CreatedAt,
+                    ct);
+            }
+            catch
+            {
+                // ignore malformed old metadata
+            }
+        }
+
+        var womOnlyPosted = await db.LifecycleEvents
+            .Where(x => x.EventType == "WOM_ONLY_DISCORD_POSTED")
+            .OrderByDescending(x => x.CreatedAt)
+            .ToListAsync(ct);
+        var latestWomOnlyPostIds = womOnlyPosted
+            .Select(x => new { EventId = x.Id, RequiredEventId = ExtractInt(x.MetadataJson, "RequiredEventId") })
+            .Where(x => x.RequiredEventId.HasValue)
+            .GroupBy(x => x.RequiredEventId!.Value)
+            .ToDictionary(
+                g => g.Key,
+                g => g.OrderByDescending(x => x.EventId).First().EventId);
+        foreach (var ev in womOnlyPosted)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(ev.MetadataJson);
+                if (!TryReadUlong(doc.RootElement, "ChannelId", out var chId) ||
+                    !TryReadUlong(doc.RootElement, "DiscordMessageId", out var msgId))
+                {
+                    continue;
+                }
+
+                var requiredEventId = ExtractInt(ev.MetadataJson, "RequiredEventId");
+                var isLatestForRequirement = requiredEventId.HasValue &&
+                    latestWomOnlyPostIds.TryGetValue(requiredEventId.Value, out var latestPostedId) &&
+                    latestPostedId == ev.Id;
+                var hasActionApplied = await HasWomOnlyActionForPostedEventAsync(db, ev, ct);
+                if (!hasActionApplied)
+                {
+                    continue;
+                }
+
+                var postedMetadata = ReadLifecycleMetadata(ev.MetadataJson);
+                var username = PickLifecycleValue(postedMetadata, "Username", "Player") ?? "player";
+                var reason = isLatestForRequirement ? "wom-only-action-handled" : "wom-only-action-handled-duplicate";
+
+                await EnsureMessageDeleteScheduledOrDeletedAsync(
+                    db,
+                    ev.PlayerId,
+                    chId,
+                    msgId,
+                    "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED",
+                    new { Reason = reason, MessageDescription = $"WOM-only review card for {username}" },
                     ev.CreatedAt,
                     ct);
             }
@@ -2031,6 +2264,91 @@ public class DiscordPromotionBotWorker(
         return false;
     }
 
+    private async Task<HashSet<string>> ReadOpenWomOnlyIgnoredUsernamesAsync(TrackerDbContext db, CancellationToken ct)
+    {
+        var openIgnores = await db.LifecycleEvents
+            .Where(x => x.EventType == "WOM_ONLY_IGNORED" && x.Status == "OPEN")
+            .OrderBy(x => x.CreatedAt)
+            .ToListAsync(ct);
+
+        var usernames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var ignoreEvent in openIgnores)
+        {
+            var metadata = ReadLifecycleMetadata(ignoreEvent.MetadataJson);
+            var username = PickLifecycleValue(metadata, "Username", "Player");
+            if (string.IsNullOrWhiteSpace(username))
+            {
+                ignoreEvent.Status = "DONE";
+                continue;
+            }
+
+            var normalized = NormalizeUsername(username);
+            if (!usernames.Add(normalized))
+            {
+                ignoreEvent.Status = "DONE";
+            }
+        }
+
+        return usernames;
+    }
+
+    private static async Task CloseOpenWomOnlyRequiredEventsAsync(TrackerDbContext db, string normalizedUsername)
+    {
+        var openRequired = await db.LifecycleEvents
+            .Where(x => x.EventType == "WOM_ONLY_ACTION_REQUIRED" && x.Status == "OPEN")
+            .ToListAsync();
+        foreach (var requiredEvent in openRequired)
+        {
+            var metadata = ReadLifecycleMetadata(requiredEvent.MetadataJson);
+            var username = PickLifecycleValue(metadata, "Username", "Player");
+            if (string.IsNullOrWhiteSpace(username)) continue;
+            if (!string.Equals(NormalizeUsername(username), normalizedUsername, StringComparison.OrdinalIgnoreCase)) continue;
+            requiredEvent.Status = "DONE";
+        }
+    }
+
+    private static async Task EnsureOpenWomOnlyIgnoredEventAsync(
+        TrackerDbContext db,
+        int playerId,
+        string normalizedUsername,
+        string actualWomRole)
+    {
+        var openIgnores = await db.LifecycleEvents
+            .Where(x => x.EventType == "WOM_ONLY_IGNORED" && x.Status == "OPEN")
+            .ToListAsync();
+
+        foreach (var existingIgnore in openIgnores)
+        {
+            var existingMetadata = ReadLifecycleMetadata(existingIgnore.MetadataJson);
+            var existingUsername = PickLifecycleValue(existingMetadata, "Username", "Player");
+            if (string.IsNullOrWhiteSpace(existingUsername)) continue;
+            if (!string.Equals(NormalizeUsername(existingUsername), normalizedUsername, StringComparison.OrdinalIgnoreCase)) continue;
+
+            existingIgnore.PlayerId = playerId;
+            existingIgnore.MetadataJson = JsonUtil.Serialize(new
+            {
+                Username = normalizedUsername,
+                ActualWomRole = actualWomRole,
+                Source = "discord"
+            });
+            return;
+        }
+
+        db.LifecycleEvents.Add(new LifecycleEvent
+        {
+            PlayerId = playerId,
+            EventType = "WOM_ONLY_IGNORED",
+            MetadataJson = JsonUtil.Serialize(new
+            {
+                Username = normalizedUsername,
+                ActualWomRole = actualWomRole,
+                Source = "discord"
+            }),
+            Status = "OPEN",
+            CreatedAt = DateTimeOffset.UtcNow
+        });
+    }
+
     private async Task ProcessMessageActionUpdates(CancellationToken ct)
     {
         if (_client is null) return;
@@ -2342,6 +2660,150 @@ public class DiscordPromotionBotWorker(
                 PlayerId = player.Id,
                 EventType = "WOM_MISSING_DISCORD_POSTED",
                 MetadataJson = JsonUtil.Serialize(new { Player = player.Username, ChannelId = _options.ChannelId, DiscordMessageId = msg.Id }),
+                Status = "DONE",
+                CreatedAt = DateTimeOffset.UtcNow
+            });
+        }
+
+        await db.SaveChangesAsync(ct);
+    }
+
+    private static bool IsWomOnlyCleanup(JsonElement root)
+    {
+        if (!root.TryGetProperty("Extra", out var extra) || extra.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        if (!extra.TryGetProperty("Reason", out var reasonProperty) || reasonProperty.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        var reason = reasonProperty.GetString() ?? "";
+        return reason.Contains("wom-only", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static async Task<bool> HasWomOnlyActionForScheduledDeleteAsync(
+        TrackerDbContext db,
+        LifecycleEvent scheduledDeleteEvent,
+        CancellationToken ct)
+    {
+        var scheduledMessageId = ExtractUlong(scheduledDeleteEvent.MetadataJson, "DiscordMessageId");
+        if (!scheduledMessageId.HasValue)
+        {
+            return false;
+        }
+
+        var actionEvents = await db.LifecycleEvents
+            .Where(x =>
+                x.PlayerId == scheduledDeleteEvent.PlayerId &&
+                x.EventType == "WOM_ONLY_ACTION_APPLIED")
+            .OrderByDescending(x => x.CreatedAt)
+            .ToListAsync(ct);
+
+        foreach (var actionEvent in actionEvents)
+        {
+            var metadata = ReadLifecycleMetadata(actionEvent.MetadataJson);
+            var actionMessageIdText = PickLifecycleValue(metadata, "DiscordMessageId", "ClickedDiscordMessageId");
+            if (ulong.TryParse(actionMessageIdText, out var actionMessageId) &&
+                actionMessageId == scheduledMessageId.Value)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private async Task PostWomOnlyActionMessages(CancellationToken ct)
+    {
+        if (_client is null) return;
+        var channel = await ResolveMessageChannelAsync(_options.ChannelId);
+        if (channel is null) return;
+
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+
+        var pending = await db.LifecycleEvents
+            .Where(x => x.EventType == "WOM_ONLY_ACTION_REQUIRED" && x.Status == "OPEN")
+            .OrderBy(x => x.CreatedAt)
+            .ToListAsync(ct);
+        if (pending.Count == 0) return;
+
+        var ignoredUsernames = await ReadOpenWomOnlyIgnoredUsernamesAsync(db, ct);
+        var posted = await db.LifecycleEvents
+            .Where(x => x.EventType == "WOM_ONLY_DISCORD_POSTED")
+            .OrderByDescending(x => x.CreatedAt)
+            .ToListAsync(ct);
+        var seenUsernames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var ev in pending)
+        {
+            var metadata = ReadLifecycleMetadata(ev.MetadataJson);
+            var username = PickLifecycleValue(metadata, "Username", "Player");
+            var womRole = PickLifecycleValue(metadata, "ActualWomRole") ?? "Unknown";
+            if (string.IsNullOrWhiteSpace(username))
+            {
+                ev.Status = "DONE";
+                continue;
+            }
+
+            var normalizedUsername = NormalizeUsername(username);
+            if (!seenUsernames.Add(normalizedUsername))
+            {
+                ev.Status = "DONE";
+                continue;
+            }
+
+            if (ignoredUsernames.Contains(normalizedUsername))
+            {
+                ev.Status = "DONE";
+                continue;
+            }
+
+            var postedEventsForRequirement = posted
+                .Where(x => ExtractInt(x.MetadataJson, "RequiredEventId") == ev.Id)
+                .ToList();
+            var latestPostedEvent = postedEventsForRequirement.FirstOrDefault();
+            if (latestPostedEvent is not null)
+            {
+                var (liveDiscordMessage, _, _) = await TryGetPostedUserMessageAsync(latestPostedEvent);
+                if (liveDiscordMessage is not null)
+                {
+                    await liveDiscordMessage.ModifyAsync(props =>
+                    {
+                        props.Embed = BuildWomOnlyRequiredEmbed(normalizedUsername, womRole);
+                        props.Components = BuildWomOnlyRequiredComponents(ev.Id);
+                    });
+                    latestPostedEvent.MetadataJson = JsonUtil.Serialize(new
+                    {
+                        Username = normalizedUsername,
+                        ActualWomRole = womRole,
+                        RequiredEventId = ev.Id,
+                        ChannelId = liveDiscordMessage.Channel.Id,
+                        DiscordMessageId = liveDiscordMessage.Id
+                    });
+                    continue;
+                }
+            }
+
+            var msg = await channel.SendMessageAsync(
+                embed: BuildWomOnlyRequiredEmbed(normalizedUsername, womRole),
+                components: BuildWomOnlyRequiredComponents(ev.Id));
+
+            db.LifecycleEvents.Add(new LifecycleEvent
+            {
+                PlayerId = ev.PlayerId,
+                EventType = "WOM_ONLY_DISCORD_POSTED",
+                MetadataJson = JsonUtil.Serialize(new
+                {
+                    Username = normalizedUsername,
+                    ActualWomRole = womRole,
+                    RequiredEventId = ev.Id,
+                    ChannelId = _options.ChannelId,
+                    DiscordMessageId = msg.Id
+                }),
                 Status = "DONE",
                 CreatedAt = DateTimeOffset.UtcNow
             });
@@ -2851,6 +3313,12 @@ public class DiscordPromotionBotWorker(
                 return;
             }
 
+            if (string.Equals(command.Data.Name, "wom-unignore", StringComparison.OrdinalIgnoreCase))
+            {
+                await HandleWomUnignoreSlashCommandAsync(command);
+                return;
+            }
+
             if (!string.Equals(command.Data.Name, "lookup", StringComparison.OrdinalIgnoreCase))
                 return;
 
@@ -2925,6 +3393,90 @@ public class DiscordPromotionBotWorker(
         {
             logger.LogInformation("Discord slash end: {Command} in {ElapsedMs}ms", command.Data.Name, sw.ElapsedMilliseconds);
         }
+    }
+
+    private async Task HandleWomUnignoreSlashCommandAsync(SocketSlashCommand command)
+    {
+        var playerRaw = command.Data.Options.FirstOrDefault(x => x.Name == "player")?.Value?.ToString()?.Trim();
+        if (string.IsNullOrWhiteSpace(playerRaw))
+        {
+            await RespondAndAutoDeleteAsync(command, "Please provide a player username.", ephemeral: false);
+            return;
+        }
+
+        var normalizedUsername = NormalizeUsername(playerRaw);
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+
+        var openWomOnlyIgnores = await db.LifecycleEvents
+            .Where(x => x.EventType == "WOM_ONLY_IGNORED" && x.Status == "OPEN")
+            .OrderBy(x => x.CreatedAt)
+            .ToListAsync();
+        var clearedWomOnlyIgnores = 0;
+        foreach (var ignoreEvent in openWomOnlyIgnores)
+        {
+            var metadata = ReadLifecycleMetadata(ignoreEvent.MetadataJson);
+            var ignoredUsername = PickLifecycleValue(metadata, "Username", "Player");
+            if (!string.Equals(NormalizeUsername(ignoredUsername ?? ""), normalizedUsername, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            ignoreEvent.Status = "DONE";
+            clearedWomOnlyIgnores++;
+        }
+
+        var matchingPlayer = await db.Players
+            .OrderBy(x => x.Id)
+            .FirstOrDefaultAsync(x => x.Username.ToLower() == normalizedUsername.ToLower());
+
+        var clearedWomRankMismatchIgnores = 0;
+        if (matchingPlayer is not null)
+        {
+            var openMismatchIgnores = await db.LifecycleEvents
+                .Where(x =>
+                    x.PlayerId == matchingPlayer.Id &&
+                    x.EventType == "WOM_RANK_MISMATCH_IGNORED" &&
+                    x.Status == "OPEN")
+                .ToListAsync();
+            foreach (var mismatchIgnore in openMismatchIgnores)
+            {
+                mismatchIgnore.Status = "DONE";
+                clearedWomRankMismatchIgnores++;
+            }
+        }
+
+        if (clearedWomOnlyIgnores > 0 || clearedWomRankMismatchIgnores > 0)
+        {
+            var ownerId = matchingPlayer?.Id ?? await ResolveLifecycleOwnerPlayerIdAsync(db, 0, CancellationToken.None);
+            if (ownerId.HasValue)
+            {
+                db.LifecycleEvents.Add(new LifecycleEvent
+                {
+                    PlayerId = ownerId.Value,
+                    EventType = "WOM_ONLY_ACTION_APPLIED",
+                    MetadataJson = JsonUtil.Serialize(new
+                    {
+                        Username = normalizedUsername,
+                        Action = "unignore",
+                        ClearedWomOnlyIgnores = clearedWomOnlyIgnores,
+                        ClearedWomRankMismatchIgnores = clearedWomRankMismatchIgnores,
+                        HandledBy = command.User.Username,
+                        HandledByDiscordUserId = command.User.Id,
+                        Source = "discord-slash"
+                    }),
+                    Status = "DONE",
+                    CreatedAt = DateTimeOffset.UtcNow
+                });
+            }
+        }
+
+        await db.SaveChangesAsync();
+
+        await RespondAndAutoDeleteAsync(
+            command,
+            $"Cleared ignore flags for `{normalizedUsername}`. WOM-only ignores: {clearedWomOnlyIgnores}. WOM rank mismatch ignores: {clearedWomRankMismatchIgnores}. Changes take effect on the next sync cycle.",
+            ephemeral: false);
     }
 
     private async Task LogSlashCommandAsync(SocketSlashCommand command, bool adminLocked, bool allowed)
@@ -3106,6 +3658,7 @@ public class DiscordPromotionBotWorker(
             (string.Equals(prefix, "promo", StringComparison.OrdinalIgnoreCase) ||
              string.Equals(prefix, "missing", StringComparison.OrdinalIgnoreCase) ||
              string.Equals(prefix, "wommissing", StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(prefix, "womonly", StringComparison.OrdinalIgnoreCase) ||
              string.Equals(prefix, "womrank", StringComparison.OrdinalIgnoreCase));
     }
 
@@ -3119,7 +3672,8 @@ public class DiscordPromotionBotWorker(
             string.Equals(commandName, "temple-remove", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(commandName, "wom-add", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(commandName, "wom-remove", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(commandName, "wom-role-update", StringComparison.OrdinalIgnoreCase);
+            string.Equals(commandName, "wom-role-update", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(commandName, "wom-unignore", StringComparison.OrdinalIgnoreCase);
     }
 
     private bool HasDiscordAdminRole(SocketUser user)
@@ -3248,6 +3802,31 @@ public class DiscordPromotionBotWorker(
         builder.WithFooter(handledText);
         builder.WithTimestamp(DateTimeOffset.Now);
         return builder.Build();
+    }
+
+    private static Embed BuildWomOnlyRequiredEmbed(string username, string womRole)
+    {
+        var role = string.IsNullOrWhiteSpace(womRole) ? "Unknown" : womRole.Trim();
+        var description =
+            "This player exists in WiseOldMan but is missing from both Temple and the tracker database.\n\n" +
+            "Use **Add player to Temple** to start normal tracking, or **Ignore tracking this player** to suppress future alerts until unignored.";
+
+        return new EmbedBuilder()
+            .WithTitle("WiseOldMan Only Player Detected")
+            .WithColor(new Color(234, 88, 12))
+            .WithDescription(description)
+            .AddField("Player", username, true)
+            .AddField("WiseOldMan Rank", role, true)
+            .WithTimestamp(DateTimeOffset.Now)
+            .Build();
+    }
+
+    private static MessageComponent BuildWomOnlyRequiredComponents(int requiredEventId)
+    {
+        return new ComponentBuilder()
+            .WithButton("Add player to Temple", $"womonly:add:{requiredEventId}", ButtonStyle.Success)
+            .WithButton("Ignore tracking this player", $"womonly:ignore:{requiredEventId}", ButtonStyle.Danger)
+            .Build();
     }
 
     private static Embed BuildWomRankMismatchEmbed(string playerName, string expectedRank, string actualWomRole, string direction)

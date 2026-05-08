@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 
 namespace SwedesClanTracker.Core;
@@ -14,23 +15,31 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
     {
         var now = DateTimeOffset.UtcNow;
         var roster = await templeClient.GetRosterAsync(ct);
-        var rosterSet = roster.Select(x => x.Trim()).Where(x => !string.IsNullOrWhiteSpace(x)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var rosterSet = roster
+            .Select(NormalizeUsername)
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var womRoles = await wiseOldManClient.GetMemberRolesAsync(ct);
         var existing = await db.Players
             .OrderBy(x => x.LastSynced == null ? 0 : 1)
             .ThenBy(x => x.LastSynced)
             .ThenBy(x => x.ManualPetOverride == null && x.StoredPetCount == 0 ? 0 : 1)
             .ThenBy(x => x.Username)
             .ToListAsync(ct);
+        var trackedDbUsernames = existing
+            .Select(x => NormalizeUsername(x.Username))
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var queue = new List<int>();
 
         foreach (var player in existing)
         {
             await CloseReviewLifecycleEventsResolvedByStatusAsync(player, ct);
 
-            var womRole = await wiseOldManClient.GetMemberRoleAsync(player.Username, ct);
+            womRoles.TryGetValue(NormalizeUsername(player.Username), out var womRole);
             var missingInWom = string.IsNullOrWhiteSpace(womRole);
 
-            if (rosterSet.Contains(player.Username))
+            if (rosterSet.Contains(NormalizeUsername(player.Username)))
             {
                 player.LastSeen = now;
                 if (missingInWom && player.Status != PlayerStatus.REMOVED_CONFIRMED)
@@ -106,9 +115,7 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
             }
         }
 
-        foreach (var username in rosterSet
-                     .Where(u => existing.All(e => !string.Equals(e.Username, u, StringComparison.OrdinalIgnoreCase)))
-                     .OrderBy(x => x))
+        foreach (var username in rosterSet.Where(trackedDbUsernames.Add).OrderBy(x => x))
         {
             var p = new Player
             {
@@ -129,8 +136,173 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
             queue.Add(p.Id);
         }
 
+        await EnsureWomOnlyActionRequiredLifecycleAsync(
+            now,
+            rosterSet,
+            trackedDbUsernames,
+            womRoles,
+            ct);
+
         await db.SaveChangesAsync(ct);
         return queue;
+    }
+
+    private async Task EnsureWomOnlyActionRequiredLifecycleAsync(
+        DateTimeOffset now,
+        HashSet<string> rosterUsernames,
+        HashSet<string> dbUsernames,
+        IReadOnlyDictionary<string, string> womRoles,
+        CancellationToken ct)
+    {
+        var anchorPlayerId = await db.Players
+            .OrderBy(x => x.Id)
+            .Select(x => (int?)x.Id)
+            .FirstOrDefaultAsync(ct);
+        if (!anchorPlayerId.HasValue) return;
+
+        var openIgnored = await db.LifecycleEvents
+            .Where(x => x.EventType == "WOM_ONLY_IGNORED" && x.Status == "OPEN")
+            .ToListAsync(ct);
+        var ignoredByUsername = openIgnored
+            .Select(x => (Event: x, Username: ReadLifecycleUsername(x.MetadataJson)))
+            .Where(x => !string.IsNullOrWhiteSpace(x.Username))
+            .GroupBy(x => NormalizeUsername(x.Username!), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(
+                g => g.Key,
+                g => g.OrderBy(x => x.Event.CreatedAt).Select(x => x.Event).ToList(),
+                StringComparer.OrdinalIgnoreCase);
+
+        foreach (var ignoredGroup in ignoredByUsername.Values)
+        {
+            ignoredGroup[0].PlayerId = anchorPlayerId.Value;
+            foreach (var duplicateIgnored in ignoredGroup.Skip(1))
+            {
+                duplicateIgnored.Status = "DONE";
+            }
+        }
+
+        var ignoredSet = ignoredByUsername.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var openRequired = await db.LifecycleEvents
+            .Where(x => x.EventType == "WOM_ONLY_ACTION_REQUIRED" && x.Status == "OPEN")
+            .ToListAsync(ct);
+        var requiredByUsername = openRequired
+            .Select(x => (Event: x, Username: ReadLifecycleUsername(x.MetadataJson)))
+            .Where(x => !string.IsNullOrWhiteSpace(x.Username))
+            .GroupBy(x => NormalizeUsername(x.Username!), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(
+                g => g.Key,
+                g => g.OrderBy(x => x.Event.CreatedAt).Select(x => x.Event).ToList(),
+                StringComparer.OrdinalIgnoreCase);
+
+        foreach (var requiredGroup in requiredByUsername.Values)
+        {
+            foreach (var duplicateRequired in requiredGroup.Skip(1))
+            {
+                duplicateRequired.Status = "DONE";
+            }
+        }
+
+        foreach (var openEventWithoutUsername in openRequired.Where(x => string.IsNullOrWhiteSpace(ReadLifecycleUsername(x.MetadataJson))))
+        {
+            openEventWithoutUsername.Status = "DONE";
+        }
+
+        foreach (var (womUsername, womRoleRaw) in womRoles)
+        {
+            var normalizedUsername = NormalizeUsername(womUsername);
+            var womRole = womRoleRaw?.Trim() ?? "";
+            if (!ShouldRequireWomOnlyAction(normalizedUsername, womRole, rosterUsernames, dbUsernames, ignoredSet))
+            {
+                continue;
+            }
+
+            if (requiredByUsername.TryGetValue(normalizedUsername, out var existingRequired) && existingRequired.Count > 0)
+            {
+                var requiredEvent = existingRequired[0];
+                requiredEvent.PlayerId = anchorPlayerId.Value;
+                requiredEvent.MetadataJson = JsonUtil.Serialize(new
+                {
+                    Username = normalizedUsername,
+                    ActualWomRole = womRole,
+                    Source = "roster-sync",
+                    DetectedAt = now
+                });
+                continue;
+            }
+
+            db.LifecycleEvents.Add(new LifecycleEvent
+            {
+                PlayerId = anchorPlayerId.Value,
+                EventType = "WOM_ONLY_ACTION_REQUIRED",
+                MetadataJson = JsonUtil.Serialize(new
+                {
+                    Username = normalizedUsername,
+                    ActualWomRole = womRole,
+                    Source = "roster-sync",
+                    DetectedAt = now
+                }),
+                Status = "OPEN",
+                CreatedAt = now
+            });
+        }
+
+        foreach (var (username, requiredEvents) in requiredByUsername)
+        {
+            if (requiredEvents.Count == 0) continue;
+            if (!womRoles.TryGetValue(username, out var womRoleRaw))
+            {
+                requiredEvents[0].Status = "DONE";
+                continue;
+            }
+
+            var womRole = womRoleRaw?.Trim() ?? "";
+            if (!ShouldRequireWomOnlyAction(username, womRole, rosterUsernames, dbUsernames, ignoredSet))
+            {
+                requiredEvents[0].Status = "DONE";
+                continue;
+            }
+
+            requiredEvents[0].PlayerId = anchorPlayerId.Value;
+            requiredEvents[0].MetadataJson = JsonUtil.Serialize(new
+            {
+                Username = username,
+                ActualWomRole = womRole,
+                Source = "roster-sync",
+                DetectedAt = now
+            });
+        }
+    }
+
+    private static bool ShouldRequireWomOnlyAction(
+        string normalizedUsername,
+        string womRole,
+        HashSet<string> rosterUsernames,
+        HashSet<string> dbUsernames,
+        HashSet<string> ignoredUsernames)
+    {
+        if (string.IsNullOrWhiteSpace(normalizedUsername)) return false;
+        if (string.IsNullOrWhiteSpace(womRole)) return false;
+        if (dbUsernames.Contains(normalizedUsername)) return false;
+        if (rosterUsernames.Contains(normalizedUsername)) return false;
+        if (ignoredUsernames.Contains(normalizedUsername)) return false;
+        return !IsWomOnlyIgnoredRole(womRole);
+    }
+
+    private static string? ReadLifecycleUsername(string metadataJson)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(metadataJson);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return null;
+            if (!doc.RootElement.TryGetProperty("Username", out var usernameProperty)) return null;
+            if (usernameProperty.ValueKind != JsonValueKind.String) return null;
+            return NormalizeUsername(usernameProperty.GetString() ?? "");
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private async Task EnsureWomRankMismatchLifecycleAsync(Player player, string womRole, DateTimeOffset now, CancellationToken ct)
@@ -419,5 +591,13 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
         return specialRoles.Any(x => string.Equals(x, normalized, StringComparison.OrdinalIgnoreCase));
     }
 
+    private static bool IsWomOnlyIgnoredRole(string role)
+    {
+        string[] ignoredRoles = ["imp", "kitten", "administrator", "deputy owner"];
+        var normalized = NormalizeRankName(role);
+        return ignoredRoles.Any(x => string.Equals(x, normalized, StringComparison.OrdinalIgnoreCase));
+    }
+
     private static string NormalizeRankName(string rank) => rank.Replace('_', ' ').Trim();
+    private static string NormalizeUsername(string input) => input.Replace('_', ' ').Trim();
 }
