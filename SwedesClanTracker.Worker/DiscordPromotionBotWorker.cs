@@ -220,12 +220,6 @@ public class DiscordPromotionBotWorker(
 
         foreach (var c in pending)
         {
-            var marker = $"\"CandidateId\":{c.Id}";
-            var alreadyPosted = await db.LifecycleEvents.AnyAsync(x =>
-                x.EventType == "PROMOTION_DISCORD_POSTED" &&
-                x.MetadataJson.Contains(marker), ct);
-            if (alreadyPosted) continue;
-
             var womRole = await wiseOldManClient.GetMemberRoleAsync(c.PlayerName, ct);
             var candidateType = RankRules.ClassifyPromotionCandidate(c.NewRank, womRole);
 
@@ -243,6 +237,31 @@ public class DiscordPromotionBotWorker(
                 .WithButton("Approve", $"promo:approve:{c.Id}", ButtonStyle.Success)
                 .WithButton("Dismiss", $"promo:dismiss:{c.Id}", ButtonStyle.Danger)
                 .WithButton("Mark Rename Suspect", $"promo:rename:{c.Id}", ButtonStyle.Secondary);
+
+            var marker = $"\"CandidateId\":{c.Id}";
+            var postedEvent = await db.LifecycleEvents
+                .Where(x => x.EventType == "PROMOTION_DISCORD_POSTED" && x.MetadataJson.Contains(marker))
+                .OrderByDescending(x => x.CreatedAt)
+                .FirstOrDefaultAsync(ct);
+            if (postedEvent is not null)
+            {
+                var (liveDiscordMessage, _, _) = await TryGetPostedUserMessageAsync(postedEvent);
+                if (liveDiscordMessage is not null)
+                {
+                    await liveDiscordMessage.ModifyAsync(props =>
+                    {
+                        props.Embed = embed;
+                        props.Components = builder.Build();
+                    });
+                    postedEvent.MetadataJson = JsonUtil.Serialize(new
+                    {
+                        CandidateId = c.Id,
+                        DiscordMessageId = liveDiscordMessage.Id,
+                        ChannelId = liveDiscordMessage.Channel.Id
+                    });
+                    continue;
+                }
+            }
 
             var msg = await channel.SendMessageAsync(embed: embed, components: builder.Build());
             db.LifecycleEvents.Add(new LifecycleEvent
@@ -1678,6 +1697,40 @@ public class DiscordPromotionBotWorker(
             }
         }
 
+        var womMissingPosted = await db.LifecycleEvents
+            .Where(x => x.EventType == "WOM_MISSING_DISCORD_POSTED")
+            .OrderByDescending(x => x.CreatedAt)
+            .ToListAsync(ct);
+        foreach (var ev in womMissingPosted)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(ev.MetadataJson);
+                if (!TryReadUlong(doc.RootElement, "ChannelId", out var chId) ||
+                    !TryReadUlong(doc.RootElement, "DiscordMessageId", out var msgId)) continue;
+
+                var hasOpenRequired = await db.LifecycleEvents.AnyAsync(x =>
+                    x.PlayerId == ev.PlayerId &&
+                    x.EventType == "WOM_MISSING_ACTION_REQUIRED" &&
+                    x.Status == "OPEN", ct);
+                if (hasOpenRequired) continue;
+
+                await EnsureMessageDeleteScheduledOrDeletedAsync(
+                    db,
+                    ev.PlayerId,
+                    chId,
+                    msgId,
+                    "WOM_MISSING_DISCORD_DELETE_SCHEDULED",
+                    new { Reason = "reconcile-completed-wom-missing" },
+                    ev.CreatedAt,
+                    ct);
+            }
+            catch
+            {
+                // ignore malformed old metadata
+            }
+        }
+
         var womOnlyPosted = await db.LifecycleEvents
             .Where(x => x.EventType == "WOM_ONLY_DISCORD_POSTED")
             .OrderByDescending(x => x.CreatedAt)
@@ -2474,38 +2527,6 @@ public class DiscordPromotionBotWorker(
 
         foreach (var ev in pending)
         {
-            var postedEvent = await db.LifecycleEvents
-                .Where(x => x.EventType == "TEMPLE_MISSING_DISCORD_POSTED" && x.PlayerId == ev.PlayerId)
-                .OrderByDescending(x => x.CreatedAt)
-                .FirstOrDefaultAsync(ct);
-            if (postedEvent is not null)
-            {
-                var hasLiveDiscordMessage = false;
-                try
-                {
-                    using var postedDoc = JsonDocument.Parse(postedEvent.MetadataJson);
-                    if (postedDoc.RootElement.TryGetProperty("ChannelId", out var ch) &&
-                        postedDoc.RootElement.TryGetProperty("DiscordMessageId", out var postedMsgId))
-                    {
-                        var postedChannel = await ResolveMessageChannelAsync(ch.GetUInt64());
-                        if (postedChannel is not null)
-                        {
-                            var existingMessage = await postedChannel.GetMessageAsync(postedMsgId.GetUInt64());
-                            hasLiveDiscordMessage = existingMessage is not null;
-                        }
-                    }
-                }
-                catch
-                {
-                    hasLiveDiscordMessage = false;
-                }
-
-                if (hasLiveDiscordMessage)
-                {
-                    continue;
-                }
-            }
-
             var player = await db.Players.FirstOrDefaultAsync(x => x.Id == ev.PlayerId, ct);
             if (player is null)
             {
@@ -2531,6 +2552,30 @@ public class DiscordPromotionBotWorker(
             var buttons = new ComponentBuilder()
                 .WithButton("Add back to Temple", $"missing:add:{player.Id}", ButtonStyle.Success)
                 .WithButton("Remove from DB", $"missing:remove:{player.Id}", ButtonStyle.Danger);
+
+            var postedEvent = await db.LifecycleEvents
+                .Where(x => x.EventType == "TEMPLE_MISSING_DISCORD_POSTED" && x.PlayerId == ev.PlayerId)
+                .OrderByDescending(x => x.CreatedAt)
+                .FirstOrDefaultAsync(ct);
+            if (postedEvent is not null)
+            {
+                var (liveDiscordMessage, _, _) = await TryGetPostedUserMessageAsync(postedEvent);
+                if (liveDiscordMessage is not null)
+                {
+                    await liveDiscordMessage.ModifyAsync(props =>
+                    {
+                        props.Embed = embed;
+                        props.Components = buttons.Build();
+                    });
+                    postedEvent.MetadataJson = JsonUtil.Serialize(new
+                    {
+                        Player = player.Username,
+                        ChannelId = liveDiscordMessage.Channel.Id,
+                        DiscordMessageId = liveDiscordMessage.Id
+                    });
+                    continue;
+                }
+            }
 
             var msg = await channel.SendMessageAsync(embed: embed, components: buttons.Build());
             logger.LogInformation(
@@ -2596,38 +2641,6 @@ public class DiscordPromotionBotWorker(
 
         foreach (var ev in pending)
         {
-            var postedEvent = await db.LifecycleEvents
-                .Where(x => x.EventType == "WOM_MISSING_DISCORD_POSTED" && x.PlayerId == ev.PlayerId)
-                .OrderByDescending(x => x.CreatedAt)
-                .FirstOrDefaultAsync(ct);
-            if (postedEvent is not null)
-            {
-                var hasLiveDiscordMessage = false;
-                try
-                {
-                    using var postedDoc = JsonDocument.Parse(postedEvent.MetadataJson);
-                    if (postedDoc.RootElement.TryGetProperty("ChannelId", out var ch) &&
-                        postedDoc.RootElement.TryGetProperty("DiscordMessageId", out var postedMsgId))
-                    {
-                        var postedChannel = await ResolveMessageChannelAsync(ch.GetUInt64());
-                        if (postedChannel is not null)
-                        {
-                            var existingMessage = await postedChannel.GetMessageAsync(postedMsgId.GetUInt64());
-                            hasLiveDiscordMessage = existingMessage is not null;
-                        }
-                    }
-                }
-                catch
-                {
-                    hasLiveDiscordMessage = false;
-                }
-
-                if (hasLiveDiscordMessage)
-                {
-                    continue;
-                }
-            }
-
             var player = await db.Players.FirstOrDefaultAsync(x => x.Id == ev.PlayerId, ct);
             if (player is null)
             {
@@ -2653,6 +2666,30 @@ public class DiscordPromotionBotWorker(
             var buttons = new ComponentBuilder()
                 .WithButton("Reinstate in WiseOldMan", $"wommissing:reinstate:{player.Id}", ButtonStyle.Success)
                 .WithButton("Remove from Temple + DB", $"wommissing:remove:{player.Id}", ButtonStyle.Danger);
+
+            var postedEvent = await db.LifecycleEvents
+                .Where(x => x.EventType == "WOM_MISSING_DISCORD_POSTED" && x.PlayerId == ev.PlayerId)
+                .OrderByDescending(x => x.CreatedAt)
+                .FirstOrDefaultAsync(ct);
+            if (postedEvent is not null)
+            {
+                var (liveDiscordMessage, _, _) = await TryGetPostedUserMessageAsync(postedEvent);
+                if (liveDiscordMessage is not null)
+                {
+                    await liveDiscordMessage.ModifyAsync(props =>
+                    {
+                        props.Embed = embed;
+                        props.Components = buttons.Build();
+                    });
+                    postedEvent.MetadataJson = JsonUtil.Serialize(new
+                    {
+                        Player = player.Username,
+                        ChannelId = liveDiscordMessage.Channel.Id,
+                        DiscordMessageId = liveDiscordMessage.Id
+                    });
+                    continue;
+                }
+            }
 
             var msg = await channel.SendMessageAsync(embed: embed, components: buttons.Build());
             db.LifecycleEvents.Add(new LifecycleEvent
