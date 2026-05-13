@@ -11,7 +11,7 @@ namespace SwedesClanTracker.Api.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/review")]
-public class ReviewController(TrackerDbContext db, IConfiguration config, IHttpClientFactory httpClientFactory) : ControllerBase
+public class ReviewController(TrackerDbContext db, IConfiguration config, IHttpClientFactory httpClientFactory, IMergeReviewService mergeReviewService) : ControllerBase
 {
     [HttpGet("queue")]
     public async Task<IActionResult> Queue(CancellationToken ct)
@@ -33,18 +33,20 @@ public class ReviewController(TrackerDbContext db, IConfiguration config, IHttpC
         var rows = players.Select(player =>
         {
             string cardState = "Handled";
-            if (player.Status is PlayerStatus.NEW_PENDING_REVIEW or PlayerStatus.MISSING_PENDING_REVIEW)
+            if (player.Status is PlayerStatus.NEW_PENDING_REVIEW or PlayerStatus.MISSING_PENDING_REVIEW or PlayerStatus.MERGE_SUGGESTED)
             {
                 var eventsForPlayer = lifecycle.Where(x => x.PlayerId == player.Id).ToList();
                 var hasOpenRequirement =
                     eventsForPlayer.Any(x => x.Status == "OPEN" &&
                         (x.EventType == "TEMPLE_MISSING_ACTION_REQUIRED" ||
                          x.EventType == "WOM_MISSING_ACTION_REQUIRED" ||
-                         x.EventType == "WOM_ONLY_ACTION_REQUIRED"));
+                         x.EventType == "WOM_ONLY_ACTION_REQUIRED" ||
+                         x.EventType == "MERGE_ACTION_REQUIRED"));
                 var latestPosted = eventsForPlayer.FirstOrDefault(x =>
                     x.EventType == "TEMPLE_MISSING_DISCORD_POSTED" ||
                     x.EventType == "WOM_MISSING_DISCORD_POSTED" ||
-                    x.EventType == "WOM_ONLY_DISCORD_POSTED");
+                    x.EventType == "WOM_ONLY_DISCORD_POSTED" ||
+                    x.EventType == "MERGE_DISCORD_POSTED");
                 var latestMissingSignal = eventsForPlayer.FirstOrDefault(x => x.EventType == "DISCORD_POSTED_MESSAGE_MISSING");
 
                 cardState = hasOpenRequirement
@@ -56,6 +58,11 @@ public class ReviewController(TrackerDbContext db, IConfiguration config, IHttpC
                     : "Handled";
             }
 
+            var mergeMeta = lifecycle
+                .Where(x => x.PlayerId == player.Id && x.EventType == "MERGE_SUGGESTED")
+                .OrderByDescending(x => x.CreatedAt)
+                .Select(x => x.MetadataJson)
+                .FirstOrDefault();
             return new ReviewQueueRowDto(
                 player.Id,
                 player.Username,
@@ -63,7 +70,8 @@ public class ReviewController(TrackerDbContext db, IConfiguration config, IHttpC
                 player.CurrentRank,
                 player.EligibleRank,
                 player.LastSeen,
-                cardState);
+                cardState,
+                mergeMeta);
         });
 
         return Ok(rows);
@@ -227,6 +235,42 @@ public class ReviewController(TrackerDbContext db, IConfiguration config, IHttpC
         return Ok(new { player = p.Username, action = "requeue_discord_card" });
     }
 
+    [HttpPost("players/{id:int}/merge/confirm")]
+    public async Task<IActionResult> ConfirmMergeSuggested(int id, CancellationToken ct)
+    {
+        var handledBy = User.FindFirstValue(ClaimTypes.Name) ?? "web-admin";
+        var result = await mergeReviewService.ConfirmSuggestedAsync(id, handledBy, "web", ct);
+        if (!result.Success) return BadRequest(result.Message);
+        return Ok(new { message = result.Message });
+    }
+
+    [HttpPost("players/{id:int}/merge/reassign")]
+    public async Task<IActionResult> ReassignMerge(int id, [FromBody] MergeReassignRequest req, CancellationToken ct)
+    {
+        var handledBy = User.FindFirstValue(ClaimTypes.Name) ?? "web-admin";
+        var result = await mergeReviewService.ReassignAsync(id, req.PreviousUsername ?? "", handledBy, "web", ct);
+        if (!result.Success) return BadRequest(result.Message);
+        return Ok(new { message = result.Message });
+    }
+
+    [HttpPost("players/{id:int}/merge/manual")]
+    public async Task<IActionResult> ManualMerge(int id, [FromBody] MergeReassignRequest req, CancellationToken ct)
+    {
+        var handledBy = User.FindFirstValue(ClaimTypes.Name) ?? "web-admin";
+        var result = await mergeReviewService.ReassignAsync(id, req.PreviousUsername ?? "", handledBy, "web", ct);
+        if (!result.Success) return BadRequest(result.Message);
+        return Ok(new { message = result.Message });
+    }
+
+    [HttpPost("players/{id:int}/merge/abort")]
+    public async Task<IActionResult> AbortMerge(int id, CancellationToken ct)
+    {
+        var handledBy = User.FindFirstValue(ClaimTypes.Name) ?? "web-admin";
+        var result = await mergeReviewService.AbortAsync(id, handledBy, "web", ct);
+        if (!result.Success) return BadRequest(result.Message);
+        return Ok(new { message = result.Message });
+    }
+
     private static async Task<bool> IsPlayerInWiseOldManGroupAsync(HttpClient client, string username, int groupId, CancellationToken ct)
     {
         try
@@ -359,4 +403,6 @@ public record ReviewQueueRowDto(
     string CurrentRank,
     string EligibleRank,
     DateTimeOffset LastSeen,
-    string DiscordCardState);
+    string DiscordCardState,
+    string? MergeMetadataJson);
+public record MergeReassignRequest(string? PreviousUsername);

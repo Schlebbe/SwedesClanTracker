@@ -155,6 +155,22 @@ public class ActivityController(TrackerDbContext db) : ControllerBase
                 title = "Possible rename detected";
                 description = $"{Pick(metadata, "NewPlayer") ?? playerName} may be {Pick(metadata, "SuggestedPrevious") ?? "a previous player"}.";
                 break;
+            case "MERGE_ACTION_REQUIRED":
+                title = "Rename review required";
+                description = $"{Pick(metadata, "NewPlayer") ?? playerName} needs a rename decision.";
+                break;
+            case "MERGE_DISCORD_POSTED":
+                title = "Rename review posted to Discord";
+                description = $"{Pick(metadata, "NewPlayer") ?? playerName} rename review card was posted.";
+                break;
+            case "MERGE_ACTION_APPLIED":
+                title = "Rename review handled";
+                description = $"{Pick(metadata, "NewPlayer") ?? playerName} rename review was handled{ByActor(actor)}.";
+                break;
+            case "MERGE_SUPERSEDED_TEMPLE_MISSING":
+                title = "Temple missing review superseded";
+                description = $"{Pick(metadata, "PreviousPlayer") ?? playerName} Temple-missing review was suppressed while rename review is pending.";
+                break;
             case "PRIORITY_UPDATE_REQUEST":
                 title = "Priority update requested";
                 description = $"{playerName} was queued for an immediate sync.";

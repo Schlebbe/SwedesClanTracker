@@ -84,6 +84,8 @@ public class DiscordPromotionBotWorker(
         };
         _client.Ready += OnReadyAsync;
         _client.ButtonExecuted += HandleButtonAsync;
+        _client.SelectMenuExecuted += HandleSelectMenuAsync;
+        _client.ModalSubmitted += HandleModalSubmittedAsync;
         _client.SlashCommandExecuted += HandleSlashCommandAsync;
 
         await _client.LoginAsync(TokenType.Bot, _options.Token);
@@ -98,8 +100,10 @@ public class DiscordPromotionBotWorker(
             await RunDiscordStep("PostWomMissingActionMessages", () => PostWomMissingActionMessages(stoppingToken), stoppingToken);
             await RunDiscordStep("PostWomOnlyActionMessages", () => PostWomOnlyActionMessages(stoppingToken), stoppingToken);
             await RunDiscordStep("PostWomRankMismatchMessages", () => PostWomRankMismatchMessages(stoppingToken), stoppingToken);
+            await RunDiscordStep("PostMergeActionMessages", () => PostMergeActionMessages(stoppingToken), stoppingToken);
             await RunDiscordStep("ProcessMessageActionUpdates", () => ProcessMessageActionUpdates(stoppingToken), stoppingToken);
             await RunDiscordStep("ProcessTempleMissingActionUpdates", () => ProcessTempleMissingActionUpdates(stoppingToken), stoppingToken);
+            await RunDiscordStep("ProcessMergeActionUpdates", () => ProcessMergeActionUpdates(stoppingToken), stoppingToken);
             await RunDiscordStep("ProcessReviewCardRequeueRequests", () => ProcessReviewCardRequeueRequests(stoppingToken), stoppingToken);
             await RunDiscordStep("UpdatePetHiscoresMessages", () => UpdatePetHiscoresMessages(stoppingToken), stoppingToken);
             await RunDiscordStep("ReconcileCompletedMessageDeletes", () => ReconcileCompletedMessageDeletes(stoppingToken), stoppingToken);
@@ -184,8 +188,10 @@ public class DiscordPromotionBotWorker(
             "PostWomMissingActionMessages" => "Checking Wise Old Man missing-player review messages.",
             "PostWomOnlyActionMessages" => "Checking Wise Old Man only-player review messages.",
             "PostWomRankMismatchMessages" => "Checking Wise Old Man rank mismatch alerts.",
+            "PostMergeActionMessages" => "Checking rename review cards.",
             "ProcessMessageActionUpdates" => "Applying Discord promotion button actions.",
             "ProcessTempleMissingActionUpdates" => "Applying Temple missing-player actions.",
+            "ProcessMergeActionUpdates" => "Applying rename review actions.",
             "ProcessReviewCardRequeueRequests" => "Processing manual review-card repost requests.",
             "UpdatePetHiscoresMessages" => "Updating pet hiscore Discord messages.",
             "ReconcileCompletedMessageDeletes" => "Reconciling completed Discord cleanup.",
@@ -349,6 +355,9 @@ public class DiscordPromotionBotWorker(
                 .WithName("lookup")
                 .WithDescription("Lookup a specific player in SwedesClanTracker.")
                 .AddOption("player", ApplicationCommandOptionType.String, "Player username", isRequired: true);
+            var help = new SlashCommandBuilder()
+                .WithName("help")
+                .WithDescription("Visar alla tillgängliga kommandon och vad de gör.");
             var update = new SlashCommandBuilder()
                 .WithName("update")
                 .WithDescription("Prioritize a player for immediate stats update.")
@@ -400,6 +409,7 @@ public class DiscordPromotionBotWorker(
                 .AddOption("count", ApplicationCommandOptionType.Integer, "Manual pet count (0 or higher)", isRequired: true);
 
             await socketGuild.CreateApplicationCommandAsync(lookup.Build());
+            await socketGuild.CreateApplicationCommandAsync(help.Build());
             await socketGuild.CreateApplicationCommandAsync(update.Build());
             await socketGuild.CreateApplicationCommandAsync(add.Build());
             await socketGuild.CreateApplicationCommandAsync(remove.Build());
@@ -413,15 +423,6 @@ public class DiscordPromotionBotWorker(
             await socketGuild.CreateApplicationCommandAsync(requeueReviewCard.Build());
             await socketGuild.CreateApplicationCommandAsync(setPets.Build());
 
-            // Remove legacy command after rename to avoid stale command lists in Discord.
-            var existingCommands = await socketGuild.GetApplicationCommandsAsync();
-            var legacy = existingCommands.FirstOrDefault(x =>
-                string.Equals(x.Name, "wom-unignore", StringComparison.OrdinalIgnoreCase));
-            if (legacy is not null)
-            {
-                await legacy.DeleteAsync();
-                logger.LogInformation("Deleted legacy slash command /wom-unignore.");
-            }
             logger.LogInformation("Registered /lookup slash command in guild {GuildId}.", _options.GuildId);
         }
         catch (Exception ex)
@@ -459,7 +460,11 @@ public class DiscordPromotionBotWorker(
                 return;
             }
 
-            if (!component.HasResponded)
+            var isMergeManual = parts.Length >= 2 &&
+                string.Equals(parts[0], "merge", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(parts[1], "manual", StringComparison.OrdinalIgnoreCase);
+
+            if (!component.HasResponded && !isMergeManual)
             {
                 await component.DeferAsync();
             }
@@ -507,6 +512,16 @@ public class DiscordPromotionBotWorker(
                     return;
                 }
                 await HandleWomOnlyButtonAsync(component, parts);
+                return;
+            }
+            if (parts[0] == "merge")
+            {
+                if (parts.Length != 3)
+                {
+                    await RespondToComponentAsync(component, "Unknown action.", ephemeral: true);
+                    return;
+                }
+                await HandleMergeButtonAsync(component, parts);
                 return;
             }
             if (parts[0] != "promo" || parts.Length != 3) return;
@@ -844,6 +859,74 @@ public class DiscordPromotionBotWorker(
         }
     }
 
+    private async Task HandleSelectMenuAsync(SocketMessageComponent component)
+    {
+        try
+        {
+            if (!component.HasResponded) await component.DeferAsync(ephemeral: true);
+            var customId = component.Data.CustomId ?? "";
+            if (!customId.StartsWith("mergepick:", StringComparison.OrdinalIgnoreCase)) return;
+            if (!HasDiscordAdminRole(component.User))
+            {
+                await RespondToComponentAsync(component, "You need the admin role for this action.", ephemeral: true);
+                return;
+            }
+
+            var parts = customId.Split(':');
+            if (parts.Length != 2 || !int.TryParse(parts[1], out var playerId))
+            {
+                await RespondToComponentAsync(component, "Malformed selection.", ephemeral: true);
+                return;
+            }
+
+            var selected = component.Data.Values.FirstOrDefault();
+            if (string.IsNullOrWhiteSpace(selected))
+            {
+                await RespondToComponentAsync(component, "No candidate selected.", ephemeral: true);
+                return;
+            }
+            await ApplyMergeActionAsync(component, playerId, "reassign", selected);
+            try
+            {
+                await component.Message.DeleteAsync();
+            }
+            catch
+            {
+                // best effort cleanup of one-off candidate picker prompt
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed handling merge select menu.");
+        }
+    }
+
+    private async Task HandleModalSubmittedAsync(SocketModal modal)
+    {
+        try
+        {
+            if (!modal.HasResponded) await modal.DeferAsync(ephemeral: true);
+            if (!modal.Data.CustomId.StartsWith("mergemanual:", StringComparison.OrdinalIgnoreCase)) return;
+            if (!HasDiscordAdminRole(modal.User))
+            {
+                await RespondModalAsync(modal, "You need the admin role for this action.", true);
+                return;
+            }
+            var parts = modal.Data.CustomId.Split(':');
+            if (parts.Length != 2 || !int.TryParse(parts[1], out var playerId))
+            {
+                await RespondModalAsync(modal, "Malformed manual rename request.", true);
+                return;
+            }
+            var previous = modal.Data.Components.FirstOrDefault(x => x.CustomId == "previous")?.Value?.Trim();
+            await ApplyMergeActionAsync(modal, playerId, "manual", previous ?? "");
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed handling merge modal.");
+        }
+    }
+
     private async Task HandleWomOnlyButtonAsync(SocketMessageComponent component, string[] parts)
     {
         var action = parts[1];
@@ -957,6 +1040,126 @@ public class DiscordPromotionBotWorker(
             });
 
         await db.SaveChangesAsync();
+    }
+
+    private async Task HandleMergeButtonAsync(SocketMessageComponent component, string[] parts)
+    {
+        var action = parts[1];
+        if (!int.TryParse(parts[2], out var playerId))
+        {
+            await RespondToComponentAsync(component, "Malformed merge action.", ephemeral: true);
+            return;
+        }
+
+        if (action == "choose")
+        {
+            var options = await GetMergeCandidateOptionsAsync(playerId);
+            if (options.Count == 0)
+            {
+                await RespondToComponentAsync(component, "No alternate candidates available.", ephemeral: true);
+                return;
+            }
+
+            var menu = new SelectMenuBuilder()
+                .WithCustomId($"mergepick:{playerId}")
+                .WithPlaceholder("Select previous player")
+                .WithMinValues(1)
+                .WithMaxValues(1);
+            foreach (var option in options.Take(25))
+            {
+                menu.AddOption(option, option);
+            }
+            var builder = new ComponentBuilder().WithSelectMenu(menu);
+            await component.FollowupAsync("Pick the previous player to merge into.", components: builder.Build(), ephemeral: true);
+            return;
+        }
+
+        if (action == "manual")
+        {
+            var modal = new ModalBuilder()
+                .WithTitle("Manual Previous Name")
+                .WithCustomId($"mergemanual:{playerId}")
+                .AddTextInput("Previous username", "previous", TextInputStyle.Short, placeholder: "e.g. Zymzalabim", maxLength: 64, required: true);
+            await component.RespondWithModalAsync(modal.Build());
+            return;
+        }
+
+        if (action is "confirm" or "abort")
+        {
+            await ApplyMergeActionAsync(component, playerId, action, null);
+            return;
+        }
+
+        await RespondToComponentAsync(component, "Unknown merge action.", ephemeral: true);
+    }
+
+    private async Task ApplyMergeActionAsync(SocketMessageComponent component, int playerId, string action, string? previousUsername)
+    {
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var mergeService = scope.ServiceProvider.GetRequiredService<IMergeReviewService>();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+
+        MergeActionResult result = action switch
+        {
+            "confirm" => await mergeService.ConfirmSuggestedAsync(playerId, component.User.Username, "discord", CancellationToken.None),
+            "abort" => await mergeService.AbortAsync(playerId, component.User.Username, "discord", CancellationToken.None),
+            _ => await mergeService.ReassignAsync(playerId, previousUsername ?? "", component.User.Username, "discord", CancellationToken.None)
+        };
+        if (!result.Success)
+        {
+            await RespondToComponentAsync(component, result.Message, ephemeral: true);
+            return;
+        }
+
+        try
+        {
+            var response = await RespondToComponentAsync(component, result.Message, ephemeral: false);
+            ScheduleChannelMessageDelete(db, playerId, component.Channel.Id, component.Message.Id, "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED", new { Reason = "merge-action-handled", Action = action });
+            if (response is not null)
+            {
+                ScheduleChannelMessageDelete(db, playerId, component.Channel.Id, response.Id, "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED", new { Reason = "merge-action-result", Action = action });
+            }
+            await db.SaveChangesAsync();
+
+            var handled = $"Handled by {component.User.Username} ({action})";
+            try
+            {
+                await UpdateComponentMessageAsync(component, BuildHandledEmbed(component.Message.Embeds.FirstOrDefault(), handled, action == "abort" ? "dismiss" : "approve"));
+            }
+            catch (Exception uiEx)
+            {
+                logger.LogWarning(uiEx, "Merge action succeeded and delete schedule persisted, but Discord card update failed for playerId {PlayerId}.", playerId);
+            }
+        }
+        catch (Exception ex)
+        {
+            // Merge action already succeeded. Do not bubble a false failure.
+            logger.LogWarning(ex, "Merge action succeeded for playerId {PlayerId} but Discord UI update failed.", playerId);
+        }
+    }
+
+    private async Task ApplyMergeActionAsync(SocketModal modal, int playerId, string action, string? previousUsername)
+    {
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var mergeService = scope.ServiceProvider.GetRequiredService<IMergeReviewService>();
+        MergeActionResult result = action switch
+        {
+            "abort" => await mergeService.AbortAsync(playerId, modal.User.Username, "discord", CancellationToken.None),
+            _ => await mergeService.ReassignAsync(playerId, previousUsername ?? "", modal.User.Username, "discord", CancellationToken.None)
+        };
+        await RespondModalAsync(modal, result.Message, true);
+    }
+
+    private async Task RespondModalAsync(SocketModal modal, string message, bool ephemeral)
+    {
+        if (modal.HasResponded)
+        {
+            await modal.FollowupAsync(message, ephemeral: ephemeral);
+        }
+        else
+        {
+            await modal.RespondAsync(message, ephemeral: ephemeral);
+        }
     }
 
     private async Task HandleWomRankMismatchButtonAsync(SocketMessageComponent component, string[] parts)
@@ -1652,6 +1855,41 @@ public class DiscordPromotionBotWorker(
         await db.SaveChangesAsync();
     }
 
+    private async Task ScheduleInteractionFollowupDeleteAsync(SocketMessageComponent component, ulong messageId, string? messageDescription = null)
+    {
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        var ownerId = await ResolveLifecycleOwnerPlayerIdAsync(db, 0, CancellationToken.None);
+        if (!ownerId.HasValue) return;
+
+        var now = DateTimeOffset.UtcNow;
+        var deleteAfter = now.AddMinutes(Math.Min(_discordDeleteDelayMinutes, _discordDeleteHardCapMinutes));
+        var hardDeleteAfter = now.AddMinutes(_discordDeleteHardCapMinutes);
+
+        db.LifecycleEvents.Add(new LifecycleEvent
+        {
+            PlayerId = ownerId.Value,
+            EventType = "DISCORD_INTERACTION_FOLLOWUP_DELETE_SCHEDULED",
+            MetadataJson = JsonUtil.Serialize(new
+            {
+                InteractionId = component.Id,
+                ApplicationId = component.ApplicationId,
+                InteractionToken = component.Token,
+                FollowupMessageId = messageId,
+                DeleteAfterUtc = deleteAfter,
+                HardDeleteAfterUtc = hardDeleteAfter,
+                Extra = new
+                {
+                    Reason = "component-ephemeral-followup",
+                    MessageDescription = NormalizeCleanupDescription(messageDescription, "component ephemeral followup")
+                }
+            }),
+            Status = "OPEN",
+            CreatedAt = now
+        });
+        await db.SaveChangesAsync();
+    }
+
     private async Task ScheduleChannelResponseDeleteAsync(ulong channelId, ulong messageId, string reason, string? messageDescription = null)
     {
         await using var scope = scopeFactory.CreateAsyncScope();
@@ -1698,7 +1936,8 @@ public class DiscordPromotionBotWorker(
                  x.EventType == "TEMPLE_MISSING_DISCORD_DELETE_SCHEDULED" ||
                  x.EventType == "WOM_MISSING_DISCORD_DELETE_SCHEDULED" ||
                  x.EventType == "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED" ||
-                 x.EventType == "DISCORD_INTERACTION_RESPONSE_DELETE_SCHEDULED") &&
+                 x.EventType == "DISCORD_INTERACTION_RESPONSE_DELETE_SCHEDULED" ||
+                 x.EventType == "DISCORD_INTERACTION_FOLLOWUP_DELETE_SCHEDULED") &&
                 x.Status == "OPEN")
             .ToListAsync(ct);
         if (scheduled.Count == 0) return;
@@ -1760,6 +1999,43 @@ public class DiscordPromotionBotWorker(
                 !TryReadUlong(sd.RootElement, "DiscordMessageId", out var messageId))
             {
                 s.Status = "DONE";
+                continue;
+            }
+            if (s.EventType == "DISCORD_INTERACTION_FOLLOWUP_DELETE_SCHEDULED")
+            {
+                if (!TryReadUlong(sd.RootElement, "ApplicationId", out var appId) ||
+                    !sd.RootElement.TryGetProperty("InteractionToken", out var tokenProp) ||
+                    !TryReadUlong(sd.RootElement, "FollowupMessageId", out var followupMessageId))
+                {
+                    s.Status = "DONE";
+                    continue;
+                }
+
+                var token = tokenProp.GetString();
+                if (string.IsNullOrWhiteSpace(token))
+                {
+                    s.Status = "DONE";
+                    continue;
+                }
+
+                try
+                {
+                    var client = httpClientFactory.CreateClient();
+                    var url = $"https://discord.com/api/v10/webhooks/{appId}/{token}/messages/{followupMessageId}";
+                    using var req = new HttpRequestMessage(HttpMethod.Delete, url);
+                    using var resp = await client.SendAsync(req, ct);
+                    if (resp.IsSuccessStatusCode ||
+                        resp.StatusCode == System.Net.HttpStatusCode.NotFound ||
+                        resp.StatusCode == System.Net.HttpStatusCode.Unauthorized ||
+                        resp.StatusCode == System.Net.HttpStatusCode.Forbidden)
+                    {
+                        s.Status = "DONE";
+                    }
+                }
+                catch
+                {
+                    logger.LogWarning("Scheduled Discord followup delete {LifecycleEventId} is due but failed; retrying.", s.Id);
+                }
                 continue;
             }
 
@@ -2682,6 +2958,11 @@ public class DiscordPromotionBotWorker(
         var templeGroupIdForSelfHeal = configuration.GetValue<int?>("TempleOsrs:GroupId") ?? 449;
         foreach (var mp in missingPlayers)
         {
+            if (await HasOpenMergePendingForPreviousUsernameAsync(db, mp.Username, ct))
+            {
+                await CloseOpenLifecycleEventsAsync(db, mp.Id, "MISSING_IN_ROSTER", "TEMPLE_MISSING_ACTION_REQUIRED");
+                continue;
+            }
             var isMissingInTemple = !await IsPlayerInTempleGroupAsync(mp.Username, templeGroupIdForSelfHeal);
             if (!isMissingInTemple) continue;
 
@@ -2718,6 +2999,12 @@ public class DiscordPromotionBotWorker(
             var player = await db.Players.FirstOrDefaultAsync(x => x.Id == ev.PlayerId, ct);
             if (player is null)
             {
+                ev.Status = "DONE";
+                continue;
+            }
+            if (await HasOpenMergePendingForPreviousUsernameAsync(db, player.Username, ct))
+            {
+                await CloseOpenLifecycleEventsAsync(db, player.Id, "MISSING_IN_ROSTER", "TEMPLE_MISSING_ACTION_REQUIRED");
                 ev.Status = "DONE";
                 continue;
             }
@@ -3442,7 +3729,8 @@ public class DiscordPromotionBotWorker(
                     (x.EventType == "TEMPLE_MISSING_DISCORD_POSTED" ||
                      x.EventType == "WOM_MISSING_DISCORD_POSTED" ||
                      x.EventType == "WOM_ONLY_DISCORD_POSTED" ||
-                     x.EventType == "WOM_RANK_MISMATCH_DISCORD_POSTED"))
+                     x.EventType == "WOM_RANK_MISMATCH_DISCORD_POSTED" ||
+                     x.EventType == "MERGE_DISCORD_POSTED"))
                 .OrderByDescending(x => x.CreatedAt)
                 .ToListAsync(ct);
 
@@ -3480,6 +3768,232 @@ public class DiscordPromotionBotWorker(
         }
 
         await db.SaveChangesAsync(ct);
+    }
+
+    private async Task PostMergeActionMessages(CancellationToken ct)
+    {
+        if (_client is null) return;
+        var channel = _client.GetChannel(_options.ChannelId) as IMessageChannel;
+        if (channel is null) return;
+
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        var requiredEvents = await db.LifecycleEvents
+            .Where(x => x.EventType == "MERGE_ACTION_REQUIRED" && x.Status == "OPEN")
+            .OrderBy(x => x.CreatedAt)
+            .ToListAsync(ct);
+
+        foreach (var ev in requiredEvents)
+        {
+            var posted = await db.LifecycleEvents
+                .Where(x => x.EventType == "MERGE_DISCORD_POSTED" && x.MetadataJson.Contains($"\"RequiredEventId\":{ev.Id}"))
+                .OrderByDescending(x => x.CreatedAt)
+                .FirstOrDefaultAsync(ct);
+            if (posted is not null) continue;
+
+            var metadata = ReadLifecycleMetadata(ev.MetadataJson);
+            var newPlayer = PickLifecycleValue(metadata, "NewPlayer") ?? $"Player #{ev.PlayerId}";
+            var suggested = PickLifecycleValue(metadata, "SuggestedPrevious") ?? "Unknown";
+            if (!string.IsNullOrWhiteSpace(suggested))
+            {
+                await SuppressTempleMissingForMergeAsync(db, suggested, ev.PlayerId, ct);
+            }
+            var embed = new EmbedBuilder()
+                .WithTitle("Possible Rename Review")
+                .WithColor(new Color(234, 179, 8))
+                .WithDescription($"New: `{newPlayer}`\nSuggested previous: `{suggested}`\nChoose how to resolve this rename review.\nIf confirmed/reassigned and the old name has unknown WOM role, old-name WOM cleanup is attempted automatically.")
+                .Build();
+            var components = new ComponentBuilder()
+                .WithButton("Confirm rename", $"merge:confirm:{ev.PlayerId}", ButtonStyle.Success)
+                .WithButton("Choose other candidate", $"merge:choose:{ev.PlayerId}", ButtonStyle.Primary)
+                .WithButton("Manual previous name", $"merge:manual:{ev.PlayerId}", ButtonStyle.Secondary)
+                .WithButton("Abort rename", $"merge:abort:{ev.PlayerId}", ButtonStyle.Danger)
+                .Build();
+            var msg = await channel.SendMessageAsync(embed: embed, components: components);
+            db.LifecycleEvents.Add(new LifecycleEvent
+            {
+                PlayerId = ev.PlayerId,
+                EventType = "MERGE_DISCORD_POSTED",
+                MetadataJson = JsonUtil.Serialize(new
+                {
+                    RequiredEventId = ev.Id,
+                    NewPlayer = newPlayer,
+                    SuggestedPrevious = suggested,
+                    ChannelId = _options.ChannelId,
+                    DiscordMessageId = msg.Id
+                }),
+                Status = "DONE",
+                CreatedAt = DateTimeOffset.UtcNow
+            });
+            await db.SaveChangesAsync(ct);
+        }
+    }
+
+    private async Task<bool> HasOpenMergePendingForPreviousUsernameAsync(TrackerDbContext db, string username, CancellationToken ct)
+    {
+        var normalizedUsername = NormalizeUsername(username);
+        if (string.IsNullOrWhiteSpace(normalizedUsername)) return false;
+
+        var openMergeEvents = await db.LifecycleEvents
+            .Where(x => x.EventType == "MERGE_ACTION_REQUIRED" && x.Status == "OPEN")
+            .ToListAsync(ct);
+
+        foreach (var mergeEvent in openMergeEvents)
+        {
+            var metadata = ReadLifecycleMetadata(mergeEvent.MetadataJson);
+            var suggested = NormalizeUsername(PickLifecycleValue(metadata, "SuggestedPrevious") ?? "");
+            if (string.IsNullOrWhiteSpace(suggested))
+            {
+                var fallbackPosted = await db.LifecycleEvents
+                    .Where(x => x.PlayerId == mergeEvent.PlayerId && x.EventType == "MERGE_DISCORD_POSTED")
+                    .OrderByDescending(x => x.CreatedAt)
+                    .FirstOrDefaultAsync(ct);
+                if (fallbackPosted is not null)
+                {
+                    var fallbackMetadata = ReadLifecycleMetadata(fallbackPosted.MetadataJson);
+                    suggested = NormalizeUsername(PickLifecycleValue(fallbackMetadata, "SuggestedPrevious") ?? "");
+                }
+            }
+            if (string.Equals(suggested, normalizedUsername, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private async Task SuppressTempleMissingForMergeAsync(TrackerDbContext db, string previousUsername, int mergePlayerId, CancellationToken ct)
+    {
+        var normalizedPrevious = NormalizeUsername(previousUsername);
+        if (string.IsNullOrWhiteSpace(normalizedPrevious)) return;
+
+        var oldPlayer = await db.Players.FirstOrDefaultAsync(x => x.Username.ToLower() == normalizedPrevious.ToLower(), ct);
+        if (oldPlayer is null) return;
+
+        await CloseOpenLifecycleEventsAsync(db, oldPlayer.Id, "MISSING_IN_ROSTER", "TEMPLE_MISSING_ACTION_REQUIRED");
+
+        var supersedeMarker = $"\"PreviousPlayer\":\"{oldPlayer.Username}\"";
+        var hasRecentSupersede = await db.LifecycleEvents.AnyAsync(x =>
+            x.PlayerId == mergePlayerId &&
+            x.EventType == "MERGE_SUPERSEDED_TEMPLE_MISSING" &&
+            x.MetadataJson.Contains(supersedeMarker) &&
+            x.CreatedAt >= DateTimeOffset.UtcNow.AddMinutes(-10), ct);
+        if (!hasRecentSupersede)
+        {
+            db.LifecycleEvents.Add(new LifecycleEvent
+            {
+                PlayerId = mergePlayerId,
+                EventType = "MERGE_SUPERSEDED_TEMPLE_MISSING",
+                MetadataJson = JsonUtil.Serialize(new
+                {
+                    PreviousPlayer = oldPlayer.Username,
+                    Source = "merge-review-pending"
+                }),
+                Status = "DONE",
+                CreatedAt = DateTimeOffset.UtcNow
+            });
+        }
+
+        var oldPosted = await db.LifecycleEvents
+            .Where(x => x.PlayerId == oldPlayer.Id && x.EventType == "TEMPLE_MISSING_DISCORD_POSTED")
+            .OrderByDescending(x => x.CreatedAt)
+            .FirstOrDefaultAsync(ct);
+        if (oldPosted is null) return;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(oldPosted.MetadataJson);
+            if (!TryReadUlong(doc.RootElement, "ChannelId", out var channelId) ||
+                !TryReadUlong(doc.RootElement, "DiscordMessageId", out var messageId))
+            {
+                return;
+            }
+            ScheduleChannelMessageDelete(
+                db,
+                mergePlayerId,
+                channelId,
+                messageId,
+                "TEMPLE_MISSING_DISCORD_DELETE_SCHEDULED",
+                new { Reason = "temple-missing-superseded-by-merge", PreviousPlayer = oldPlayer.Username });
+        }
+        catch
+        {
+            // best effort
+        }
+    }
+
+    private async Task ProcessMergeActionUpdates(CancellationToken ct)
+    {
+        if (_client is null) return;
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        var updates = await db.LifecycleEvents
+            .Where(x => x.EventType == "MERGE_ACTION_APPLIED" && x.Status == "OPEN")
+            .OrderBy(x => x.CreatedAt)
+            .ToListAsync(ct);
+        if (updates.Count == 0) return;
+
+        foreach (var update in updates)
+        {
+            var posted = await db.LifecycleEvents
+                .Where(x => x.PlayerId == update.PlayerId && x.EventType == "MERGE_DISCORD_POSTED")
+                .OrderByDescending(x => x.CreatedAt)
+                .FirstOrDefaultAsync(ct);
+            if (posted is not null)
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(posted.MetadataJson);
+                    if (TryReadUlong(doc.RootElement, "ChannelId", out var channelId) && TryReadUlong(doc.RootElement, "DiscordMessageId", out var messageId))
+                    {
+                        var channel = await ResolveMessageChannelAsync(channelId);
+                        var msg = channel is null ? null : await channel.GetMessageAsync(messageId);
+                        if (msg is IUserMessage userMessage)
+                        {
+                            await userMessage.ModifyAsync(props =>
+                            {
+                                props.Components = new ComponentBuilder().Build();
+                                props.Embed = BuildHandledEmbed(userMessage.Embeds.FirstOrDefault(), "Handled via web/discord merge action", "approve");
+                            });
+                            ScheduleChannelMessageDelete(db, update.PlayerId, channelId, messageId, "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED", new { Reason = "merge-action-handled" });
+                        }
+                    }
+                }
+                catch { }
+            }
+            update.Status = "DONE";
+        }
+        await db.SaveChangesAsync(ct);
+    }
+
+    private async Task<List<string>> GetMergeCandidateOptionsAsync(int playerId)
+    {
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        var mergeEvent = await db.LifecycleEvents
+            .Where(x => x.PlayerId == playerId && x.EventType == "MERGE_SUGGESTED")
+            .OrderByDescending(x => x.CreatedAt)
+            .FirstOrDefaultAsync();
+        if (mergeEvent is null) return [];
+        var metadata = ReadLifecycleMetadata(mergeEvent.MetadataJson);
+        var candidates = new List<string>();
+        var suggested = PickLifecycleValue(metadata, "SuggestedPrevious");
+        if (!string.IsNullOrWhiteSpace(suggested)) candidates.Add(suggested);
+        var allMissing = await db.Players
+            .Where(x => x.Status == PlayerStatus.MISSING_PENDING_REVIEW)
+            .OrderBy(x => x.Username)
+            .Select(x => x.Username)
+            .Take(10)
+            .ToListAsync();
+        foreach (var candidate in allMissing)
+        {
+            if (!candidates.Any(x => string.Equals(x, candidate, StringComparison.OrdinalIgnoreCase)))
+            {
+                candidates.Add(candidate);
+            }
+        }
+        return candidates;
     }
 
     private async Task<IMessageChannel?> ResolveMessageChannelAsync(ulong channelId)
@@ -3541,19 +4055,40 @@ public class DiscordPromotionBotWorker(
 
                 var templeGroupId = configuration.GetValue<int?>("TempleOsrs:GroupId") ?? 449;
                 var inTemple = await IsPlayerInTempleGroupAsync(foundPlayer.Username, templeGroupId);
+                var suppressedByPendingMerge = await HasOpenMergePendingForPreviousUsernameAsync(updateDb, foundPlayer.Username, CancellationToken.None);
                 if (!inTemple && foundPlayer.Status != PlayerStatus.REMOVED_CONFIRMED)
                 {
-                    foundPlayer.Status = PlayerStatus.MISSING_PENDING_REVIEW;
-                    var hasPendingAction = await updateDb.LifecycleEvents.AnyAsync(x =>
-                        x.PlayerId == foundPlayer.Id &&
-                        x.EventType == "TEMPLE_MISSING_ACTION_REQUIRED" &&
-                        x.Status == "OPEN");
-                    if (!hasPendingAction)
+                    if (suppressedByPendingMerge)
                     {
+                        await CloseOpenLifecycleEventsAsync(updateDb, foundPlayer.Id, "MISSING_IN_ROSTER", "TEMPLE_MISSING_ACTION_REQUIRED");
+                    }
+                    else
+                    {
+                        foundPlayer.Status = PlayerStatus.MISSING_PENDING_REVIEW;
+                        var hasPendingAction = await updateDb.LifecycleEvents.AnyAsync(x =>
+                            x.PlayerId == foundPlayer.Id &&
+                            x.EventType == "TEMPLE_MISSING_ACTION_REQUIRED" &&
+                            x.Status == "OPEN");
+                        if (!hasPendingAction)
+                        {
+                            updateDb.LifecycleEvents.Add(new LifecycleEvent
+                            {
+                                PlayerId = foundPlayer.Id,
+                                EventType = "TEMPLE_MISSING_ACTION_REQUIRED",
+                                MetadataJson = JsonUtil.Serialize(new
+                                {
+                                    foundPlayer.Username,
+                                    MissingAt = DateTimeOffset.UtcNow,
+                                    Source = "discord-slash-update"
+                                }),
+                                Status = "OPEN",
+                                CreatedAt = DateTimeOffset.UtcNow
+                            });
+                        }
                         updateDb.LifecycleEvents.Add(new LifecycleEvent
                         {
                             PlayerId = foundPlayer.Id,
-                            EventType = "TEMPLE_MISSING_ACTION_REQUIRED",
+                            EventType = "MISSING_IN_ROSTER",
                             MetadataJson = JsonUtil.Serialize(new
                             {
                                 foundPlayer.Username,
@@ -3564,19 +4099,6 @@ public class DiscordPromotionBotWorker(
                             CreatedAt = DateTimeOffset.UtcNow
                         });
                     }
-                    updateDb.LifecycleEvents.Add(new LifecycleEvent
-                    {
-                        PlayerId = foundPlayer.Id,
-                        EventType = "MISSING_IN_ROSTER",
-                        MetadataJson = JsonUtil.Serialize(new
-                        {
-                            foundPlayer.Username,
-                            MissingAt = DateTimeOffset.UtcNow,
-                            Source = "discord-slash-update"
-                        }),
-                        Status = "OPEN",
-                        CreatedAt = DateTimeOffset.UtcNow
-                    });
                 }
 
                 updateDb.LifecycleEvents.Add(new LifecycleEvent
@@ -3748,6 +4270,12 @@ public class DiscordPromotionBotWorker(
                 }
 
                 await RespondAndAutoDeleteAsync(command, await ExecuteWomRoleUpdateAsync(command, playerName, role), ephemeral: false);
+                return;
+            }
+
+            if (string.Equals(command.Data.Name, "help", StringComparison.OrdinalIgnoreCase))
+            {
+                await HandleHelpSlashCommandAsync(command);
                 return;
             }
 
@@ -4024,6 +4552,60 @@ public class DiscordPromotionBotWorker(
         await RespondAndAutoDeleteAsync(command, embed, ephemeral: false);
     }
 
+    private async Task HandleHelpSlashCommandAsync(SocketSlashCommand command)
+    {
+        var helpText = """
+### Info / Sync
+**/lookup <player>**  
+Visar spelarens sammanfattning (rank, stats, pets, Temple/WOM-status, senaste sync)
+
+**/update <player>**  
+Prioriterar spelaren i uppdateringskön för snabb sync
+
+**/set-pets <player> <count>**  
+Sätter manuell pet count override för spelaren
+
+### Temple / WOM medlemskap
+**/temple-add <players>**  
+Lägger till en eller flera spelare i TempleOSRS  
+Format: kommaseparerat, t.ex. A, B, C
+
+**/temple-remove <players>**  
+Tar bort en eller flera spelare från TempleOSRS
+
+**/wom-add <players>**  
+Lägger till en eller flera spelare i WiseOldMan
+
+**/wom-remove <players>**  
+Tar bort en eller flera spelare från WiseOldMan
+
+**/add <players>**  
+Kombokommando: lägger till spelare i både TempleOSRS och WiseOldMan
+
+**/remove <players>**  
+Kombokommando: tar bort spelare från både TempleOSRS och WiseOldMan
+
+**/wom-role-update <player> <rank>**  
+Uppdaterar spelarens rank i WiseOldMan
+
+### Review / Ignore-hantering
+**/requeue-review-card <player>**  
+Tvingar ompostning/återskapande av review-kort för spelaren om review fortfarande är aktiv
+
+**/unignore <player>**  
+Tar bort ignore för spelaren i:
+- WOM-only ignore
+- WOM rank mismatch ignore
+
+**/show-ignored**  
+Visar alla spelare som just nu är ignorerade i:
+- WOM-only
+- WOM rank mismatch
+""";
+
+        await RespondAndAutoDeleteAsync(command, helpText, ephemeral: false);
+    }
+
     private async Task LogSlashCommandAsync(SocketSlashCommand command, bool adminLocked, bool allowed)
     {
         try
@@ -4181,15 +4763,21 @@ public class DiscordPromotionBotWorker(
         return normalized.Length <= 480 ? normalized : normalized[..477] + "...";
     }
 
-    private async Task RespondToComponentAsync(SocketMessageComponent component, string text, bool ephemeral = true)
+    private async Task<Discord.Rest.RestFollowupMessage?> RespondToComponentAsync(SocketMessageComponent component, string text, bool ephemeral = true)
     {
         try
         {
-            await component.FollowupAsync(text: text, ephemeral: ephemeral);
+            var response = await component.FollowupAsync(text: text, ephemeral: ephemeral);
+            if (ephemeral && response is not null)
+            {
+                await ScheduleInteractionFollowupDeleteAsync(component, response.Id, text);
+            }
+            return response;
         }
         catch
         {
             // no-op best effort
+            return null;
         }
     }
 
@@ -4206,7 +4794,8 @@ public class DiscordPromotionBotWorker(
              string.Equals(prefix, "missing", StringComparison.OrdinalIgnoreCase) ||
              string.Equals(prefix, "wommissing", StringComparison.OrdinalIgnoreCase) ||
              string.Equals(prefix, "womonly", StringComparison.OrdinalIgnoreCase) ||
-             string.Equals(prefix, "womrank", StringComparison.OrdinalIgnoreCase));
+             string.Equals(prefix, "womrank", StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(prefix, "merge", StringComparison.OrdinalIgnoreCase));
     }
 
     private static bool IsAdminLockedSlashCommand(string commandName)

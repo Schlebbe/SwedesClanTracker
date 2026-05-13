@@ -13,6 +13,7 @@ public static class ServiceRegistration
         services.AddHttpClient<ITempleClient, TempleClient>();
         services.AddHttpClient<IWiseOldManClient, WiseOldManClient>();
         services.AddScoped<ITrackerSyncService, TrackerSyncService>();
+        services.AddScoped<IMergeReviewService, MergeReviewService>();
         return services;
     }
 }

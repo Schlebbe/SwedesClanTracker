@@ -45,7 +45,7 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
                 if (missingInWom && player.Status != PlayerStatus.REMOVED_CONFIRMED)
                 {
                     player.Status = PlayerStatus.MISSING_PENDING_REVIEW;
-                    await CloseOpenLifecycleEventsAsync(player.Id, ct, "NEW_PLAYER", "MERGE_SUGGESTED");
+                    await CloseOpenLifecycleEventsAsync(player.Id, ct, "NEW_PLAYER", "MERGE_SUGGESTED", "MERGE_ACTION_REQUIRED");
                     var hasWomPendingAction = await db.LifecycleEvents.AnyAsync(x =>
                         x.PlayerId == player.Id &&
                         x.EventType == "WOM_MISSING_ACTION_REQUIRED" &&
@@ -68,6 +68,7 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
                     await CloseOpenLifecycleEventsAsync(player.Id, ct,
                         "NEW_PLAYER",
                         "MERGE_SUGGESTED",
+                        "MERGE_ACTION_REQUIRED",
                         "MISSING_IN_ROSTER",
                         "TEMPLE_MISSING_ACTION_REQUIRED",
                         "WOM_MISSING_ACTION_REQUIRED");
@@ -81,7 +82,7 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
             else if (player.Status != PlayerStatus.REMOVED_CONFIRMED)
             {
                 player.Status = PlayerStatus.MISSING_PENDING_REVIEW;
-                await CloseOpenLifecycleEventsAsync(player.Id, ct, "NEW_PLAYER", "MERGE_SUGGESTED");
+                await CloseOpenLifecycleEventsAsync(player.Id, ct, "NEW_PLAYER", "MERGE_SUGGESTED", "MERGE_ACTION_REQUIRED");
                 var hasOpenMissingEvent = await db.LifecycleEvents.AnyAsync(x =>
                     x.PlayerId == player.Id &&
                     x.EventType == "MISSING_IN_ROSTER" &&
@@ -182,6 +183,7 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
         }
 
         var ignoredSet = ignoredByUsername.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var mergeSuppressedUsernames = await GetMergePendingPreviousUsernamesAsync(ct);
 
         var openRequired = await db.LifecycleEvents
             .Where(x => x.EventType == "WOM_ONLY_ACTION_REQUIRED" && x.Status == "OPEN")
@@ -213,6 +215,10 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
             var normalizedUsername = NormalizeUsername(womUsername);
             var womRole = womRoleRaw?.Trim() ?? "";
             if (!ShouldRequireWomOnlyAction(normalizedUsername, womRole, rosterUsernames, dbUsernames, ignoredSet))
+            {
+                continue;
+            }
+            if (mergeSuppressedUsernames.Contains(normalizedUsername))
             {
                 continue;
             }
@@ -262,6 +268,11 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
                 requiredEvents[0].Status = "DONE";
                 continue;
             }
+            if (mergeSuppressedUsernames.Contains(username))
+            {
+                requiredEvents[0].Status = "DONE";
+                continue;
+            }
 
             requiredEvents[0].PlayerId = anchorPlayerId.Value;
             requiredEvents[0].MetadataJson = JsonUtil.Serialize(new
@@ -298,6 +309,51 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
             if (!doc.RootElement.TryGetProperty("Username", out var usernameProperty)) return null;
             if (usernameProperty.ValueKind != JsonValueKind.String) return null;
             return NormalizeUsername(usernameProperty.GetString() ?? "");
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private async Task<HashSet<string>> GetMergePendingPreviousUsernamesAsync(CancellationToken ct)
+    {
+        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var openMergeEvents = await db.LifecycleEvents
+            .Where(x => x.EventType == "MERGE_ACTION_REQUIRED" && x.Status == "OPEN")
+            .ToListAsync(ct);
+        foreach (var ev in openMergeEvents)
+        {
+            var previous = ReadSuggestedPrevious(ev.MetadataJson);
+            if (!string.IsNullOrWhiteSpace(previous))
+            {
+                result.Add(NormalizeUsername(previous));
+                continue;
+            }
+
+            var fallback = await db.LifecycleEvents
+                .Where(x => x.PlayerId == ev.PlayerId && x.EventType == "MERGE_DISCORD_POSTED")
+                .OrderByDescending(x => x.CreatedAt)
+                .Select(x => x.MetadataJson)
+                .FirstOrDefaultAsync(ct);
+            var fallbackPrevious = ReadSuggestedPrevious(fallback ?? "");
+            if (!string.IsNullOrWhiteSpace(fallbackPrevious))
+            {
+                result.Add(NormalizeUsername(fallbackPrevious));
+            }
+        }
+        return result;
+    }
+
+    private static string? ReadSuggestedPrevious(string metadataJson)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(metadataJson);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return null;
+            if (!doc.RootElement.TryGetProperty("SuggestedPrevious", out var property)) return null;
+            if (property.ValueKind != JsonValueKind.String) return null;
+            return property.GetString();
         }
         catch
         {
@@ -427,27 +483,45 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
                     Last = x.Snapshots.OrderByDescending(s => s.Timestamp).FirstOrDefault()
                 })
                 .ToListAsync(ct);
-            var match = missingCandidates.FirstOrDefault(x => x.Last is not null
-                && Math.Abs(x.Last.TotalLevel - snapshot.TotalLevel) <= 5
-                && Math.Abs(x.Last.Ehb - snapshot.Ehb) <= 10
-                && Math.Abs(x.Last.Ehp - snapshot.Ehp) <= 10);
+            var rankedCandidates = missingCandidates
+                .Where(x => x.Last is not null)
+                .Select(x => new
+                {
+                    x.Username,
+                    TotalLevelDelta = Math.Abs(x.Last!.TotalLevel - snapshot.TotalLevel),
+                    EhbDelta = Math.Abs(x.Last!.Ehb - snapshot.Ehb),
+                    EhpDelta = Math.Abs(x.Last!.Ehp - snapshot.Ehp)
+                })
+                .Where(x => x.TotalLevelDelta <= 5 && x.EhbDelta <= 10 && x.EhpDelta <= 10)
+                .OrderBy(x => x.TotalLevelDelta + x.EhbDelta + x.EhpDelta)
+                .ThenBy(x => x.Username)
+                .ToList();
+            var match = rankedCandidates.FirstOrDefault();
             if (match is not null)
             {
                 player.Status = PlayerStatus.MERGE_SUGGESTED;
                 await CloseOpenLifecycleEventsAsync(player.Id, ct, "NEW_PLAYER");
-                db.LifecycleEvents.Add(new LifecycleEvent
+                var mergeMetadata = new
                 {
-                    PlayerId = player.Id,
-                    EventType = "MERGE_SUGGESTED",
-                    MetadataJson = JsonUtil.Serialize(new { NewPlayer = player.Username, SuggestedPrevious = match.Username }),
-                    Status = "OPEN",
-                    CreatedAt = DateTimeOffset.UtcNow
-                });
+                    NewPlayer = player.Username,
+                    SuggestedPrevious = match.Username,
+                    CandidatePreviousPlayers = rankedCandidates.Take(5).Select(x => new
+                    {
+                        PreviousPlayer = x.Username,
+                        x.TotalLevelDelta,
+                        x.EhbDelta,
+                        x.EhpDelta
+                    }),
+                    Source = "sync-auto-rename",
+                    DetectedAt = DateTimeOffset.UtcNow
+                };
+                await UpsertOpenLifecycleEventAsync(player.Id, "MERGE_SUGGESTED", mergeMetadata, ct);
+                await UpsertOpenLifecycleEventAsync(player.Id, "MERGE_ACTION_REQUIRED", mergeMetadata, ct);
             }
             else
             {
                 player.Status = PlayerStatus.ACTIVE;
-                await CloseOpenLifecycleEventsAsync(player.Id, ct, "NEW_PLAYER", "MERGE_SUGGESTED");
+                await CloseOpenLifecycleEventsAsync(player.Id, ct, "NEW_PLAYER", "MERGE_SUGGESTED", "MERGE_ACTION_REQUIRED");
             }
         }
 
@@ -507,6 +581,7 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
         if (player.Status != PlayerStatus.MERGE_SUGGESTED)
         {
             resolvedEventTypes.Add("MERGE_SUGGESTED");
+            resolvedEventTypes.Add("MERGE_ACTION_REQUIRED");
         }
         else
         {
@@ -537,17 +612,105 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
 
     private async Task EnsureOpenMergeSuggestedEventAsync(Player player, CancellationToken ct)
     {
-        var hasOpenMerge = await db.LifecycleEvents.AnyAsync(x =>
+        var hasOpenMergeSuggested = await db.LifecycleEvents.AnyAsync(x =>
             x.PlayerId == player.Id &&
             x.EventType == "MERGE_SUGGESTED" &&
             x.Status == "OPEN", ct);
-        if (hasOpenMerge) return;
+        var hasOpenMergeRequired = await db.LifecycleEvents.AnyAsync(x =>
+            x.PlayerId == player.Id &&
+            x.EventType == "MERGE_ACTION_REQUIRED" &&
+            x.Status == "OPEN", ct);
+
+        // Never overwrite existing open metadata here. Only ensure missing companion event exists.
+        if (hasOpenMergeSuggested && hasOpenMergeRequired)
+        {
+            return;
+        }
+
+        if (hasOpenMergeSuggested && !hasOpenMergeRequired)
+        {
+            var sourceMetadata = await db.LifecycleEvents
+                .Where(x => x.PlayerId == player.Id && x.EventType == "MERGE_SUGGESTED" && x.Status == "OPEN")
+                .OrderByDescending(x => x.CreatedAt)
+                .ThenByDescending(x => x.Id)
+                .Select(x => x.MetadataJson)
+                .FirstAsync(ct);
+            await UpsertOpenLifecycleEventFromJsonAsync(player.Id, "MERGE_ACTION_REQUIRED", sourceMetadata, ct);
+            return;
+        }
+
+        if (!hasOpenMergeSuggested && hasOpenMergeRequired)
+        {
+            var sourceMetadata = await db.LifecycleEvents
+                .Where(x => x.PlayerId == player.Id && x.EventType == "MERGE_ACTION_REQUIRED" && x.Status == "OPEN")
+                .OrderByDescending(x => x.CreatedAt)
+                .ThenByDescending(x => x.Id)
+                .Select(x => x.MetadataJson)
+                .FirstAsync(ct);
+            await UpsertOpenLifecycleEventFromJsonAsync(player.Id, "MERGE_SUGGESTED", sourceMetadata, ct);
+            return;
+        }
+
+        var metadata = new { NewPlayer = player.Username, Source = "status-normalizer", DetectedAt = DateTimeOffset.UtcNow };
+        await UpsertOpenLifecycleEventAsync(player.Id, "MERGE_SUGGESTED", metadata, ct);
+        await UpsertOpenLifecycleEventAsync(player.Id, "MERGE_ACTION_REQUIRED", metadata, ct);
+    }
+
+    private async Task UpsertOpenLifecycleEventAsync(int playerId, string eventType, object metadata, CancellationToken ct)
+    {
+        var openEvents = await db.LifecycleEvents
+            .Where(x => x.PlayerId == playerId && x.EventType == eventType && x.Status == "OPEN")
+            .OrderBy(x => x.CreatedAt)
+            .ThenBy(x => x.Id)
+            .ToListAsync(ct);
+        if (openEvents.Count > 0)
+        {
+            if (!openEvents[0].MetadataJson.Contains("\"SuggestedPrevious\":"))
+            {
+                openEvents[0].MetadataJson = JsonUtil.Serialize(metadata);
+            }
+            foreach (var duplicate in openEvents.Skip(1))
+            {
+                duplicate.Status = "DONE";
+            }
+            return;
+        }
 
         db.LifecycleEvents.Add(new LifecycleEvent
         {
-            PlayerId = player.Id,
-            EventType = "MERGE_SUGGESTED",
-            MetadataJson = JsonUtil.Serialize(new { player.Username, Source = "status-normalizer" }),
+            PlayerId = playerId,
+            EventType = eventType,
+            MetadataJson = JsonUtil.Serialize(metadata),
+            Status = "OPEN",
+            CreatedAt = DateTimeOffset.UtcNow
+        });
+    }
+
+    private async Task UpsertOpenLifecycleEventFromJsonAsync(int playerId, string eventType, string metadataJson, CancellationToken ct)
+    {
+        var openEvents = await db.LifecycleEvents
+            .Where(x => x.PlayerId == playerId && x.EventType == eventType && x.Status == "OPEN")
+            .OrderBy(x => x.CreatedAt)
+            .ThenBy(x => x.Id)
+            .ToListAsync(ct);
+        if (openEvents.Count > 0)
+        {
+            if (!openEvents[0].MetadataJson.Contains("\"SuggestedPrevious\":"))
+            {
+                openEvents[0].MetadataJson = metadataJson;
+            }
+            foreach (var duplicate in openEvents.Skip(1))
+            {
+                duplicate.Status = "DONE";
+            }
+            return;
+        }
+
+        db.LifecycleEvents.Add(new LifecycleEvent
+        {
+            PlayerId = playerId,
+            EventType = eventType,
+            MetadataJson = metadataJson,
             Status = "OPEN",
             CreatedAt = DateTimeOffset.UtcNow
         });

@@ -8,6 +8,7 @@ public interface IWiseOldManClient
     Task<string?> GetMemberRoleAsync(string username, CancellationToken ct);
     Task<IReadOnlyDictionary<string, string>> GetMemberRolesAsync(CancellationToken ct);
     Task<bool> IsImpAccountAsync(string username, CancellationToken ct);
+    Task<(bool Success, string Details)> RemoveMemberAsync(string username, CancellationToken ct);
     Task InvalidateCacheAsync(CancellationToken ct);
 }
 
@@ -37,6 +38,52 @@ public class WiseOldManClient(HttpClient httpClient, IConfiguration configuratio
     {
         var role = await GetMemberRoleAsync(username, ct);
         return string.Equals(role, "imp", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public async Task<(bool Success, string Details)> RemoveMemberAsync(string username, CancellationToken ct)
+    {
+        var normalizedUsername = NormalizeUsername(username);
+        if (string.IsNullOrWhiteSpace(normalizedUsername)) return (false, "Username is empty.");
+
+        var groupId = configuration.GetValue<int?>("WiseOldMan:GroupId") ?? 0;
+        var verificationCode = configuration["WiseOldMan:VerificationCode"] ?? "";
+        if (groupId <= 0 || string.IsNullOrWhiteSpace(verificationCode))
+        {
+            return (false, "WiseOldMan settings missing.");
+        }
+
+        var removeBody = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            verificationCode,
+            members = new[] { normalizedUsername }
+        });
+        var request = new HttpRequestMessage(HttpMethod.Delete, $"https://api.wiseoldman.net/v2/groups/{groupId}/members")
+        {
+            Content = new StringContent(removeBody, System.Text.Encoding.UTF8, "application/json")
+        };
+
+        try
+        {
+            var response = await httpClient.SendAsync(request, ct);
+            var responseText = await response.Content.ReadAsStringAsync(ct);
+            await InvalidateCacheAsync(ct);
+
+            if (response.IsSuccessStatusCode)
+            {
+                return (true, "Removed from WOM.");
+            }
+
+            var roleAfter = await GetMemberRoleAsync(normalizedUsername, ct);
+            if (string.IsNullOrWhiteSpace(roleAfter))
+            {
+                return (true, $"WOM remove returned {(int)response.StatusCode}, but member is not present.");
+            }
+            return (false, $"WOM remove failed ({(int)response.StatusCode}): {Truncate(responseText, 180)}");
+        }
+        catch (Exception ex)
+        {
+            return (false, $"WOM remove exception: {ex.GetType().Name}");
+        }
     }
 
     public async Task InvalidateCacheAsync(CancellationToken ct)
@@ -135,4 +182,10 @@ public class WiseOldManClient(HttpClient httpClient, IConfiguration configuratio
 
     private static string NormalizeUsername(string input) =>
         UsernameRules.NormalizeUsername(input);
+
+    private static string Truncate(string value, int max)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return "";
+        return value.Length <= max ? value : value[..max];
+    }
 }
