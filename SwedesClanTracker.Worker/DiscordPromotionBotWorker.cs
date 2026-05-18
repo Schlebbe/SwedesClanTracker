@@ -1114,12 +1114,24 @@ public class DiscordPromotionBotWorker(
         try
         {
             var response = await RespondToComponentAsync(component, result.Message, ephemeral: false);
-            ScheduleChannelMessageDelete(db, playerId, component.Channel.Id, component.Message.Id, "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED", new { Reason = "merge-action-handled", Action = action });
-            if (response is not null)
+            var ownerId = await ResolveLifecycleOwnerPlayerIdAsync(db, playerId, CancellationToken.None);
+            if (!ownerId.HasValue)
             {
-                ScheduleChannelMessageDelete(db, playerId, component.Channel.Id, response.Id, "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED", new { Reason = "merge-action-result", Action = action });
+                logger.LogWarning(
+                    "Merge action succeeded for playerId {PlayerId}, but no valid lifecycle owner row exists. Skipping delete scheduling for Discord messages {OriginalMessageId} and {ResponseMessageId}.",
+                    playerId,
+                    component.Message.Id,
+                    response?.Id);
             }
-            await db.SaveChangesAsync();
+            else
+            {
+                ScheduleChannelMessageDelete(db, ownerId.Value, component.Channel.Id, component.Message.Id, "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED", new { Reason = "merge-action-handled", Action = action });
+                if (response is not null)
+                {
+                    ScheduleChannelMessageDelete(db, ownerId.Value, component.Channel.Id, response.Id, "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED", new { Reason = "merge-action-result", Action = action });
+                }
+                await db.SaveChangesAsync();
+            }
 
             var handled = $"Handled by {component.User.Username} ({action})";
             try
