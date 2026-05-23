@@ -124,6 +124,12 @@ public class MergeReviewService(TrackerDbContext db, IWiseOldManClient wiseOldMa
         var snapshots = await db.PlayerSnapshots.Where(x => x.PlayerId == newPlayer.Id).ToListAsync(ct);
         foreach (var snapshot in snapshots) snapshot.PlayerId = oldPlayer.Id;
 
+        var transferredPendingCandidateIds = await db.PromotionCandidates
+            .Where(x => x.PlayerId == newPlayer.Id && x.Status == PromotionStatus.PENDING)
+            .Select(x => x.Id)
+            .OrderBy(x => x)
+            .ToListAsync(ct);
+
         var promotions = await db.PromotionCandidates.Where(x => x.PlayerId == newPlayer.Id).ToListAsync(ct);
         foreach (var promotion in promotions) promotion.PlayerId = oldPlayer.Id;
 
@@ -147,6 +153,7 @@ public class MergeReviewService(TrackerDbContext db, IWiseOldManClient wiseOldMa
                 PreviousPlayer = previousUsername,
                 NewPlayer = finalUsername,
                 CanonicalPlayer = oldPlayer.Username,
+                TransferredPendingCandidateIds = transferredPendingCandidateIds,
                 HandledBy = handledBy,
                 Source = source
             }),

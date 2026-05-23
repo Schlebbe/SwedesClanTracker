@@ -41,6 +41,7 @@ public class StatusController(TrackerDbContext db) : ControllerBase
         "WOM_ROLE_UPDATE_APPLIED",
         "PROMOTION_CANDIDATE_CREATED",
         "PROMOTION_DISCORD_POSTED",
+        "PROMOTION_SUPERSEDED_BY_MERGE",
         "PROMOTION_DISCORD_ACTION_APPLIED",
         "DISCORD_MARK_RENAME_SUSPECT",
         "DISCORD_SLASH_COMMAND_USED",

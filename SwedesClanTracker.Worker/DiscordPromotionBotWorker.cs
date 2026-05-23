@@ -220,6 +220,7 @@ public class DiscordPromotionBotWorker(
                 x.OldRank,
                 x.NewRank,
                 x.Reason,
+                PlayerStatus = x.Player.Status,
                 PlayerName = x.Player.Username,
                 LastSynced = x.Player.LastSynced,
                 StoredPetCount = x.Player.StoredPetCount,
@@ -235,8 +236,51 @@ public class DiscordPromotionBotWorker(
             })
             .ToListAsync(ct);
 
+        var pendingPlayerIds = pending
+            .Select(x => x.PlayerId)
+            .Distinct()
+            .ToList();
+        var mergePendingPlayerIds = new HashSet<int>();
+        if (pendingPlayerIds.Count > 0)
+        {
+            var openMergePlayerIds = await db.LifecycleEvents
+                .Where(x =>
+                    x.EventType == "MERGE_ACTION_REQUIRED" &&
+                    x.Status == "OPEN" &&
+                    pendingPlayerIds.Contains(x.PlayerId))
+                .Select(x => x.PlayerId)
+                .Distinct()
+                .ToListAsync(ct);
+            mergePendingPlayerIds = openMergePlayerIds.ToHashSet();
+        }
+
         foreach (var c in pending)
         {
+            var marker = $"\"CandidateId\":{c.Id}";
+            var postedEvents = await db.LifecycleEvents
+                .Where(x => x.EventType == "PROMOTION_DISCORD_POSTED" && x.MetadataJson.Contains(marker))
+                .OrderByDescending(x => x.CreatedAt)
+                .ToListAsync(ct);
+            var postedEvent = postedEvents.FirstOrDefault(x => !IsPromotionPostedSupersededByMerge(x));
+
+            var isMergePending = c.PlayerStatus == PlayerStatus.MERGE_SUGGESTED || mergePendingPlayerIds.Contains(c.PlayerId);
+            if (isMergePending)
+            {
+                if (postedEvent is not null)
+                {
+                    await SupersedePromotionCardForMergeAsync(
+                        db,
+                        postedEvent,
+                        c.Id,
+                        c.PlayerId,
+                        "merge-review-pending",
+                        null,
+                        ct);
+                    await db.SaveChangesAsync(ct);
+                }
+                continue;
+            }
+
             var womRole = await wiseOldManClient.GetMemberRoleAsync(c.PlayerName, ct);
             var candidateType = RankRules.ClassifyPromotionCandidate(c.NewRank, womRole);
 
@@ -255,11 +299,6 @@ public class DiscordPromotionBotWorker(
                 .WithButton("Dismiss", $"promo:dismiss:{c.Id}", ButtonStyle.Danger)
                 .WithButton("Mark Rename Suspect", $"promo:rename:{c.Id}", ButtonStyle.Secondary);
 
-            var marker = $"\"CandidateId\":{c.Id}";
-            var postedEvent = await db.LifecycleEvents
-                .Where(x => x.EventType == "PROMOTION_DISCORD_POSTED" && x.MetadataJson.Contains(marker))
-                .OrderByDescending(x => x.CreatedAt)
-                .FirstOrDefaultAsync(ct);
             if (postedEvent is not null)
             {
                 var lookupKey = $"promotion:{c.Id}";
@@ -274,6 +313,7 @@ public class DiscordPromotionBotWorker(
                 if (lookupState == PostedMessageLookupState.Malformed)
                 {
                     postedEvent.Status = "DONE";
+                    await db.SaveChangesAsync(ct);
                     continue;
                 }
                 if (lookupState == PostedMessageLookupState.Missing)
@@ -303,6 +343,7 @@ public class DiscordPromotionBotWorker(
                         DiscordMessageId = liveDiscordMessage.Id,
                         ChannelId = liveDiscordMessage.Channel.Id
                     });
+                    await db.SaveChangesAsync(ct);
                     continue;
                 }
             }
@@ -1748,6 +1789,52 @@ public class DiscordPromotionBotWorker(
         return false;
     }
 
+    private static async Task<bool> HasOpenWomOnlyRequirementForPostedEventAsync(
+        TrackerDbContext db,
+        LifecycleEvent postedEvent,
+        int? requiredEventId,
+        CancellationToken ct)
+    {
+        if (requiredEventId.HasValue)
+        {
+            return await db.LifecycleEvents.AnyAsync(x =>
+                x.Id == requiredEventId.Value &&
+                x.EventType == "WOM_ONLY_ACTION_REQUIRED" &&
+                x.Status == "OPEN", ct);
+        }
+
+        var postedMetadata = ReadLifecycleMetadata(postedEvent.MetadataJson);
+        var postedUsername = PickLifecycleValue(postedMetadata, "Username", "Player");
+        if (string.IsNullOrWhiteSpace(postedUsername))
+        {
+            return false;
+        }
+
+        var normalizedPostedUsername = NormalizeUsername(postedUsername);
+        var openRequired = await db.LifecycleEvents
+            .Where(x => x.EventType == "WOM_ONLY_ACTION_REQUIRED" && x.Status == "OPEN")
+            .ToListAsync(ct);
+        foreach (var required in openRequired)
+        {
+            var metadata = ReadLifecycleMetadata(required.MetadataJson);
+            var requiredUsername = PickLifecycleValue(metadata, "Username", "Player");
+            if (string.IsNullOrWhiteSpace(requiredUsername))
+            {
+                continue;
+            }
+
+            if (string.Equals(
+                NormalizeUsername(requiredUsername),
+                normalizedPostedUsername,
+                StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private async Task EnsureMessageDeleteScheduledOrDeletedAsync(
         TrackerDbContext db,
         int preferredPlayerId,
@@ -2231,14 +2318,19 @@ public class DiscordPromotionBotWorker(
                     latestWomOnlyPostIds.TryGetValue(requiredEventId.Value, out var latestPostedId) &&
                     latestPostedId == ev.Id;
                 var hasActionApplied = await HasWomOnlyActionForPostedEventAsync(db, ev, ct);
-                if (!hasActionApplied)
+                var hasOpenRequired = await HasOpenWomOnlyRequirementForPostedEventAsync(db, ev, requiredEventId, ct);
+                if (!hasActionApplied && hasOpenRequired && isLatestForRequirement)
                 {
                     continue;
                 }
 
                 var postedMetadata = ReadLifecycleMetadata(ev.MetadataJson);
                 var username = PickLifecycleValue(postedMetadata, "Username", "Player") ?? "player";
-                var reason = isLatestForRequirement ? "wom-only-action-handled" : "wom-only-action-handled-duplicate";
+                var reason = !hasOpenRequired
+                    ? "wom-only-requirement-resolved"
+                    : isLatestForRequirement
+                        ? "wom-only-action-handled"
+                        : "wom-only-action-handled-duplicate";
 
                 await EnsureMessageDeleteScheduledOrDeletedAsync(
                     db,
@@ -2694,6 +2786,39 @@ public class DiscordPromotionBotWorker(
         }
     }
 
+    private static List<int> ExtractIntArray(string json, string property)
+    {
+        var values = new List<int>();
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty(property, out var prop) || prop.ValueKind != JsonValueKind.Array)
+            {
+                return values;
+            }
+
+            foreach (var item in prop.EnumerateArray())
+            {
+                if (item.ValueKind == JsonValueKind.Number && item.TryGetInt32(out var n))
+                {
+                    values.Add(n);
+                    continue;
+                }
+
+                if (item.ValueKind == JsonValueKind.String && int.TryParse(item.GetString(), out var parsed))
+                {
+                    values.Add(parsed);
+                }
+            }
+        }
+        catch
+        {
+            // best effort
+        }
+
+        return values.Distinct().OrderBy(x => x).ToList();
+    }
+
     private static ulong? ExtractUlong(string json, string property)
     {
         try
@@ -2713,6 +2838,13 @@ public class DiscordPromotionBotWorker(
     private static LifecycleEvent? FindLifecycleEventByDiscordMessageId(IEnumerable<LifecycleEvent> events, ulong messageId)
     {
         return events.FirstOrDefault(x => ExtractUlong(x.MetadataJson, "DiscordMessageId") == messageId);
+    }
+
+    private static bool IsPromotionPostedSupersededByMerge(LifecycleEvent postedEvent)
+    {
+        var metadata = ReadLifecycleMetadata(postedEvent.MetadataJson);
+        var value = PickLifecycleValue(metadata, "SupersededByMerge");
+        return string.Equals(value, "true", StringComparison.OrdinalIgnoreCase);
     }
 
     private static Dictionary<string, string> ReadLifecycleMetadata(string metadataJson)
@@ -2889,6 +3021,7 @@ public class DiscordPromotionBotWorker(
 
         var posted = await db.LifecycleEvents
             .Where(x => x.EventType == "PROMOTION_DISCORD_POSTED")
+            .OrderByDescending(x => x.CreatedAt)
             .ToListAsync(ct);
 
         foreach (var u in updates)
@@ -2902,15 +3035,11 @@ public class DiscordPromotionBotWorker(
                 var handledBy = ud.RootElement.TryGetProperty("HandledBy", out var h) ? h.GetString() ?? "web-admin" : "web-admin";
                 var source = ud.RootElement.TryGetProperty("Source", out var s) ? s.GetString() ?? "web" : "web";
 
-                LifecycleEvent? postEvent = null;
-                foreach (var pe in posted)
-                {
-                    using var pd = JsonDocument.Parse(pe.MetadataJson);
-                    if (!pd.RootElement.TryGetProperty("CandidateId", out var pCand)) continue;
-                    if (pCand.GetInt32() != candidateId) continue;
-                    postEvent = pe;
-                    break;
-                }
+                var marker = $"\"CandidateId\":{candidateId}";
+                var postEvent = posted.FirstOrDefault(x =>
+                    x.MetadataJson.Contains(marker) &&
+                    !IsPromotionPostedSupersededByMerge(x));
+                postEvent ??= posted.FirstOrDefault(x => x.MetadataJson.Contains(marker));
                 if (postEvent is null) { u.Status = "DONE"; continue; }
 
                 using var postDoc = JsonDocument.Parse(postEvent.MetadataJson);
@@ -3935,6 +4064,118 @@ public class DiscordPromotionBotWorker(
         }
     }
 
+    private async Task SupersedePromotionCardForMergeAsync(
+        TrackerDbContext db,
+        LifecycleEvent postedEvent,
+        int candidateId,
+        int ownerPlayerId,
+        string source,
+        int? mergeActionEventId,
+        CancellationToken ct)
+    {
+        var metadata = ReadLifecycleMetadata(postedEvent.MetadataJson);
+        var postedCandidateId = ExtractInt(postedEvent.MetadataJson, "CandidateId");
+        if (postedCandidateId.HasValue) candidateId = postedCandidateId.Value;
+
+        var channelId = ExtractUlong(postedEvent.MetadataJson, "ChannelId");
+        var messageId = ExtractUlong(postedEvent.MetadataJson, "DiscordMessageId");
+        var alreadySuperseded = string.Equals(
+            PickLifecycleValue(metadata, "SupersededByMerge"),
+            "true",
+            StringComparison.OrdinalIgnoreCase);
+
+        var lookupKey = $"promotion-supersede:{postedEvent.Id}";
+        var (lookupState, liveDiscordMessage, resolvedChannelId, resolvedMessageId) =
+            await TryGetPostedUserMessageAsync(postedEvent, lookupKey);
+        if (lookupState == PostedMessageLookupState.Unknown)
+        {
+            SetLookupBackoff(lookupKey);
+            return;
+        }
+        if (lookupState == PostedMessageLookupState.Malformed)
+        {
+            postedEvent.Status = "DONE";
+            return;
+        }
+
+        if (lookupState == PostedMessageLookupState.Missing)
+        {
+            await RecordMissingTrackedMessageEventAsync(
+                db,
+                ownerPlayerId,
+                "promotion",
+                postedEvent.Id,
+                null,
+                resolvedChannelId ?? channelId,
+                resolvedMessageId ?? messageId,
+                "promotion-merge-superseded",
+                ct);
+        }
+        else if (lookupState == PostedMessageLookupState.Found && liveDiscordMessage is not null)
+        {
+            await liveDiscordMessage.ModifyAsync(props =>
+            {
+                props.Components = new ComponentBuilder().Build();
+                props.Embed = BuildHandledEmbed(
+                    liveDiscordMessage.Embeds.FirstOrDefault(),
+                    "Superseded by rename review; promotion will be re-evaluated.",
+                    "rename");
+            });
+            resolvedChannelId = liveDiscordMessage.Channel.Id;
+            resolvedMessageId = liveDiscordMessage.Id;
+        }
+
+        var finalChannelId = resolvedChannelId ?? channelId;
+        var finalMessageId = resolvedMessageId ?? messageId;
+        if (finalChannelId.HasValue && finalMessageId.HasValue)
+        {
+            ScheduleChannelMessageDelete(
+                db,
+                ownerPlayerId,
+                finalChannelId.Value,
+                finalMessageId.Value,
+                "PROMOTION_DISCORD_DELETE_SCHEDULED",
+                new
+                {
+                    CandidateId = candidateId,
+                    Reason = "promotion-superseded-by-merge",
+                    Source = source,
+                    MergeActionEventId = mergeActionEventId
+                });
+        }
+
+        postedEvent.MetadataJson = JsonUtil.Serialize(new
+        {
+            CandidateId = candidateId,
+            DiscordMessageId = finalMessageId,
+            ChannelId = finalChannelId,
+            SupersededByMerge = true,
+            SupersededAt = DateTimeOffset.UtcNow,
+            SupersededByMergeActionEventId = mergeActionEventId,
+            SupersedeReason = source
+        });
+
+        if (!alreadySuperseded)
+        {
+            db.LifecycleEvents.Add(new LifecycleEvent
+            {
+                PlayerId = ownerPlayerId,
+                EventType = "PROMOTION_SUPERSEDED_BY_MERGE",
+                MetadataJson = JsonUtil.Serialize(new
+                {
+                    CandidateId = candidateId,
+                    Source = source,
+                    MergeActionEventId = mergeActionEventId,
+                    PromotionPostedEventId = postedEvent.Id,
+                    ChannelId = finalChannelId,
+                    DiscordMessageId = finalMessageId
+                }),
+                Status = "DONE",
+                CreatedAt = DateTimeOffset.UtcNow
+            });
+        }
+    }
+
     private async Task ProcessMergeActionUpdates(CancellationToken ct)
     {
         if (_client is null) return;
@@ -3946,8 +4187,40 @@ public class DiscordPromotionBotWorker(
             .ToListAsync(ct);
         if (updates.Count == 0) return;
 
+        var shouldRefreshPromotions = false;
         foreach (var update in updates)
         {
+            var updateMetadata = ReadLifecycleMetadata(update.MetadataJson);
+            var mergeAction = (PickLifecycleValue(updateMetadata, "Action") ?? "").Trim().ToLowerInvariant();
+            if (mergeAction is "confirm" or "reassign")
+            {
+                var transferredPendingCandidateIds = ExtractIntArray(update.MetadataJson, "TransferredPendingCandidateIds");
+                if (transferredPendingCandidateIds.Count > 0)
+                {
+                    foreach (var candidateId in transferredPendingCandidateIds)
+                    {
+                        var marker = $"\"CandidateId\":{candidateId}";
+                        var postedPromotionEvents = await db.LifecycleEvents
+                            .Where(x => x.EventType == "PROMOTION_DISCORD_POSTED" && x.MetadataJson.Contains(marker))
+                            .OrderByDescending(x => x.CreatedAt)
+                            .ToListAsync(ct);
+                        foreach (var postedPromotionEvent in postedPromotionEvents)
+                        {
+                            await SupersedePromotionCardForMergeAsync(
+                                db,
+                                postedPromotionEvent,
+                                candidateId,
+                                update.PlayerId,
+                                "merge-action-applied",
+                                update.Id,
+                                ct);
+                        }
+                    }
+                }
+
+                shouldRefreshPromotions = true;
+            }
+
             var posted = await db.LifecycleEvents
                 .Where(x => x.PlayerId == update.PlayerId && x.EventType == "MERGE_DISCORD_POSTED")
                 .OrderByDescending(x => x.CreatedAt)
@@ -3977,6 +4250,11 @@ public class DiscordPromotionBotWorker(
             update.Status = "DONE";
         }
         await db.SaveChangesAsync(ct);
+
+        if (shouldRefreshPromotions)
+        {
+            await PostPendingPromotionCandidates(ct);
+        }
     }
 
     private async Task<List<string>> GetMergeCandidateOptionsAsync(int playerId)

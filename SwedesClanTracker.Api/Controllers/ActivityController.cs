@@ -289,6 +289,10 @@ public class ActivityController(TrackerDbContext db) : ControllerBase
                 title = "Promotion posted to Discord";
                 description = $"{candidateReference} was posted to Discord for review.";
                 break;
+            case "PROMOTION_SUPERSEDED_BY_MERGE":
+                title = "Promotion superseded by rename";
+                description = $"{candidateReference} was superseded while handling a rename flow and queued for cleanup/re-evaluation.";
+                break;
             case "PROMOTION_DISCORD_ACTION_APPLIED":
                 title = action switch
                 {
