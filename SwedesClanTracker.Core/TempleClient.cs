@@ -14,6 +14,8 @@ public interface ITempleClient
 
 public class TempleClient(HttpClient httpClient) : ITempleClient
 {
+    private static readonly string[] ModeEhbKeys = ["Ehb", "Im_ehb", "Uim_ehb", "1def_ehb"];
+
     private static readonly TimeSpan[] RetryDelays =
     [
         TimeSpan.FromSeconds(1),
@@ -32,10 +34,11 @@ public class TempleClient(HttpClient httpClient) : ITempleClient
         using var doc = JsonDocument.Parse(raw);
         if (!doc.RootElement.TryGetProperty("data", out var data)) return null;
         int lvl = data.GetProperty("Overall_level").GetInt32();
-        double ehb = data.GetProperty("Ehb").GetDouble();
+        var ehb = ResolvePrimaryEhb(data);
+        if (!ehb.HasValue) return null;
         double ehp = data.GetProperty("Overall_ehp").GetDouble();
         int collections = data.TryGetProperty("Collections", out var c) ? c.GetInt32() : 0;
-        return new PlayerStatsDto(lvl, ehb, ehp, collections);
+        return new PlayerStatsDto(lvl, ehb.Value, ehp, collections);
     }
 
     public async Task<int?> GetPetsAsync(string username, CancellationToken ct)
@@ -117,5 +120,49 @@ public class TempleClient(HttpClient httpClient) : ITempleClient
         if (ex is SocketException) return true;
         if (ex.InnerException is SocketException) return true;
         return false;
+    }
+
+    private static double? ResolvePrimaryEhb(JsonElement data)
+    {
+        if (data.TryGetProperty("info", out var info) &&
+            info.ValueKind == JsonValueKind.Object &&
+            info.TryGetProperty("Primary_ehb", out var primaryEhbProperty) &&
+            primaryEhbProperty.ValueKind == JsonValueKind.String)
+        {
+            var primaryEhbKey = primaryEhbProperty.GetString();
+            if (!string.IsNullOrWhiteSpace(primaryEhbKey) &&
+                TryReadNumericProperty(data, primaryEhbKey, out var primaryEhb))
+            {
+                return primaryEhb;
+            }
+        }
+
+        return TryReadHighestModeEhb(data, out var fallbackEhb) ? fallbackEhb : null;
+    }
+
+    private static bool TryReadHighestModeEhb(JsonElement data, out double ehb)
+    {
+        ehb = 0;
+        var foundValue = false;
+
+        foreach (var key in ModeEhbKeys)
+        {
+            if (!TryReadNumericProperty(data, key, out var value)) continue;
+            if (!foundValue || value > ehb)
+            {
+                ehb = value;
+                foundValue = true;
+            }
+        }
+
+        return foundValue;
+    }
+
+    private static bool TryReadNumericProperty(JsonElement parent, string propertyName, out double value)
+    {
+        value = 0;
+        if (!parent.TryGetProperty(propertyName, out var property)) return false;
+        if (property.ValueKind != JsonValueKind.Number) return false;
+        return property.TryGetDouble(out value);
     }
 }
