@@ -16,3 +16,6 @@ swedesclantracker-frontend/.vite/
 swedesclantracker-frontend/coverage/
 swedesclantracker-frontend/.env.local
 swedesclantracker-frontend/.env.*.local
+
+# Local Codex/Raspberry Pi SSH material.
+.codex_*
