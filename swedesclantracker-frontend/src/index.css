@@ -2,6 +2,65 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  --primary-accent: #c89b3c;
+  --primary-accent-border: #b58b31;
+  --primary-accent-hover: #d6a646;
+  --primary-accent-soft: #3a2b15;
+  --surface-canvas: #111317;
+  --surface-panel: #1a1f26;
+  --surface-panel-raised: #232a34;
+  --surface-muted: #171c23;
+  --border-subtle: #303846;
+  --text-primary: #e8edf5;
+  --text-secondary: #b8c1cf;
+  --text-muted: #8a95a8;
+  --status-success: #26a269;
+  --status-warning: #e0a93f;
+  --status-danger: #d14b62;
+  --status-info: #4b82d8;
+  --status-sync-text: #9fc1ff;
+  --status-success-bg: #052e24;
+  --status-success-border: #0f5132;
+  --status-success-text: #6ee7b7;
+  --status-warning-bg: #3d2a0c;
+  --status-warning-border: #7c5b1f;
+  --status-warning-text: #f0c97a;
+  --status-warning-soft: #f0c97a;
+  --status-danger-bg: #3f1220;
+  --status-danger-border: #8e2940;
+  --status-danger-text: #f6b4c1;
+  --status-sync-bg-soft: #172554;
+  --status-sync-border: #334ca3;
+  --status-sync-text-soft: #c7d7ff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
 body {
-  @apply bg-slate-100 text-slate-900;
+  margin: 0;
+  background: radial-gradient(circle at 12% 0%, #1c212a 0%, #12161c 35%, #0f1115 100%);
+  color: var(--text-primary);
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  overflow-wrap: anywhere;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--status-sync-text);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

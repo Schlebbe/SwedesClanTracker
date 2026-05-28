@@ -28,6 +28,7 @@ AGENTS.md
 docs/
 scripts/windows/test-pi-ssh.ps1
 scripts/windows/check-pi-db-readonly.ps1
+.impeccable/
 
 
 # Local environment and secret overrides (templates with .example stay tracked).
