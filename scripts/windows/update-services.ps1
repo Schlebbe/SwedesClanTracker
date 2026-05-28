@@ -1,5 +1,8 @@
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
 param(
+    [string]$RepoRoot = "",
+    [string]$PublishRoot = "",
+    [string]$Configuration = "Release",
     [string]$ApiServiceName = "SwedesClanTracker-Api",
     [string]$WorkerServiceName = "SwedesClanTracker-Worker",
     [switch]$NoPause,
@@ -49,48 +52,40 @@ function Ensure-ElevatedOrRelaunch {
     exit $proc.ExitCode
 }
 
-function Invoke-Sc {
-    param([Parameter(Mandatory = $true)][string[]]$Args)
-    & sc.exe @Args | Out-Host
-    if ($LASTEXITCODE -ne 0) {
-        throw "sc.exe failed: $($Args -join ' ')"
-    }
-}
-
-function Remove-ServiceIfExists {
-    param([Parameter(Mandatory = $true)][string]$Name)
-
-    $service = Get-Service -Name $Name -ErrorAction SilentlyContinue
-    if ($null -eq $service) {
-        Write-Host "Service not found, skipping: $Name"
-        return
-    }
-
-    if ($service.Status -eq [System.ServiceProcess.ServiceControllerStatus]::Running) {
-        Stop-Service -Name $Name -Force
-    }
-
-    Invoke-Sc -Args @("delete", $Name)
-    Write-Host "Removed service: $Name"
-}
-
 try {
     Ensure-ElevatedOrRelaunch
 
-    if (-not $PSCmdlet.ShouldProcess("$ApiServiceName, $WorkerServiceName", "Uninstall Windows services")) {
-        Write-OpResult -Success $true -Step "Service uninstall canceled" -Details "No local service changes were made." -NextStep "Rerun and confirm when ready."
+    if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
+        $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+    }
+    if ([string]::IsNullOrWhiteSpace($PublishRoot)) {
+        $PublishRoot = Join-Path $RepoRoot "deploy"
+    }
+
+    if (-not $PSCmdlet.ShouldProcess("$ApiServiceName, $WorkerServiceName", "Stop services, publish, and start services")) {
+        Write-OpResult -Success $true -Step "Service update canceled" -Details "No local service changes were made." -NextStep "Rerun and confirm when ready."
         Pause-IfRequested -NoPause:$NoPause
         exit 0
     }
     Assert-Admin
 
-    Remove-ServiceIfExists -Name $ApiServiceName
-    Remove-ServiceIfExists -Name $WorkerServiceName
-    Write-OpResult -Success $true -Step "Windows service uninstall completed" -Details "ApiService=$ApiServiceName, WorkerService=$WorkerServiceName" -NextStep "Run check-services.ps1 to confirm they are removed."
+    Stop-Service -Name $ApiServiceName, $WorkerServiceName -ErrorAction Stop
+    Write-OpResult -Success $true -Step "Windows services stopped" -Details "$ApiServiceName and $WorkerServiceName"
+
+    $publishScript = Join-Path $PSScriptRoot "publish-release.ps1"
+    & $publishScript -Configuration $Configuration -RepoRoot $RepoRoot -OutputRoot $PublishRoot -NoPause
+    if ($LASTEXITCODE -ne 0) {
+        throw "Publish step failed."
+    }
+
+    Start-Service -Name $ApiServiceName, $WorkerServiceName -ErrorAction Stop
+    $serviceStates = Get-Service -Name $ApiServiceName, $WorkerServiceName | Select-Object Name, Status
+    $details = ($serviceStates | ForEach-Object { "$($_.Name)=$($_.Status)" }) -join ", "
+    Write-OpResult -Success $true -Step "Windows service update completed" -Details $details -NextStep "Run check-services.ps1 for API probe and final verification."
     Pause-IfRequested -NoPause:$NoPause
 }
 catch {
-    Write-OpResult -Success $false -Step "Windows service uninstall failed" -Details $_.Exception.Message -NextStep "Resolve the issue and rerun uninstall-services.ps1."
+    Write-OpResult -Success $false -Step "Windows service update failed" -Details $_.Exception.Message -NextStep "Inspect service state, fix the issue, and rerun update-services.ps1."
     Pause-IfRequested -NoPause:$NoPause
     exit 1
 }

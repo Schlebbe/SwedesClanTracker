@@ -9,7 +9,7 @@ public static class ServiceRegistration
     public static IServiceCollection AddTrackerCore(this IServiceCollection services, IConfiguration config)
     {
         services.AddDbContext<TrackerDbContext>(opt =>
-            opt.UseSqlServer(config.GetConnectionString("DefaultConnection")));
+            opt.UseNpgsql(config.GetConnectionString("DefaultConnection")));
         services.AddHttpClient<ITempleClient, TempleClient>();
         services.AddHttpClient<IWiseOldManClient, WiseOldManClient>();
         services.AddScoped<ITrackerSyncService, TrackerSyncService>();

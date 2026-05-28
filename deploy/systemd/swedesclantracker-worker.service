@@ -1,0 +1,23 @@
+[Unit]
+Description=Swedes Clan Tracker Worker
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=notify
+WorkingDirectory=/opt/swedesclantracker/worker
+ExecStart=/usr/bin/dotnet /opt/swedesclantracker/worker/SwedesClanTracker.Worker.dll
+Restart=always
+RestartSec=10
+KillSignal=SIGINT
+SyslogIdentifier=swedesclantracker-worker
+User=swedestracker
+Environment=DOTNET_ENVIRONMENT=Production
+EnvironmentFile=/etc/swedesclantracker/worker.env
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

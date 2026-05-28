@@ -1,0 +1,24 @@
+[Unit]
+Description=Swedes Clan Tracker API
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=notify
+WorkingDirectory=/opt/swedesclantracker/api
+ExecStart=/usr/bin/dotnet /opt/swedesclantracker/api/SwedesClanTracker.Api.dll
+Restart=always
+RestartSec=10
+KillSignal=SIGINT
+SyslogIdentifier=swedesclantracker-api
+User=swedestracker
+Environment=ASPNETCORE_ENVIRONMENT=Production
+Environment=ASPNETCORE_URLS=http://127.0.0.1:5166
+EnvironmentFile=/etc/swedesclantracker/api.env
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
