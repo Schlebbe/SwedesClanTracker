@@ -2,8 +2,8 @@
 param(
     [string]$HostOrIp = $env:PI_HOST_OR_IP,
     [string]$User = $(if ($env:PI_USER) { $env:PI_USER } else { "sebastian" }),
-    [string]$KeyPath = $(if ($env:PI_SSH_KEY_PATH) { $env:PI_SSH_KEY_PATH } else { Join-Path $HOME ".ssh\id_ed25519" }),
-    [string]$KnownHostsPath = $(if ($env:PI_SSH_KNOWN_HOSTS_PATH) { $env:PI_SSH_KNOWN_HOSTS_PATH } else { Join-Path $HOME ".ssh\known_hosts" }),
+    [string]$KeyPath = $(if ($env:PI_SSH_KEY_PATH) { $env:PI_SSH_KEY_PATH } else { $codexKey = Join-Path $HOME ".codex\keys\swedesclantracker-pi\.codex_pi_ed25519"; if (Test-Path -LiteralPath $codexKey) { $codexKey } else { Join-Path $HOME ".ssh\id_ed25519" } }),
+    [string]$KnownHostsPath = $(if ($env:PI_SSH_KNOWN_HOSTS_PATH) { $env:PI_SSH_KNOWN_HOSTS_PATH } else { $codexKnownHosts = Join-Path $HOME ".codex\keys\swedesclantracker-pi\.codex_known_hosts"; if (Test-Path -LiteralPath $codexKnownHosts) { $codexKnownHosts } else { Join-Path $HOME ".ssh\known_hosts" } }),
     [switch]$NoPause
 )
 
@@ -25,6 +25,33 @@ try {
     else {
         $failures.Add("SSH connectivity failed.")
         Write-OpResult -Success $false -Step "SSH connectivity" -Details "Unable to connect to Pi."
+    }
+
+    $sudoCheck = Invoke-Ssh -HostOrIp $HostOrIp -User $User -KeyPath $KeyPath -KnownHostsPath $KnownHostsPath -RemoteCommand "sudo -n true"
+    if ($sudoCheck.ExitCode -eq 0) {
+        Write-OpResult -Success $true -Step "Non-interactive sudo" -Details "sudo -n is available."
+    }
+    else {
+        $failures.Add("Non-interactive sudo is not available.")
+        Write-OpResult -Success $false -Step "Non-interactive sudo" -Details "sudo -n failed."
+    }
+
+    $journalCheck = Invoke-Ssh -HostOrIp $HostOrIp -User $User -KeyPath $KeyPath -KnownHostsPath $KnownHostsPath -RemoteCommand "sudo -n journalctl -u swedesclantracker-worker -n 1 --no-pager >/dev/null"
+    if ($journalCheck.ExitCode -eq 0) {
+        Write-OpResult -Success $true -Step "Journal access check" -Details "Able to read worker journal via sudo."
+    }
+    else {
+        $failures.Add("Unable to read worker journal with sudo.")
+        Write-OpResult -Success $false -Step "Journal access check" -Details "journalctl check failed."
+    }
+
+    $envDiagCheck = Invoke-Ssh -HostOrIp $HostOrIp -User $User -KeyPath $KeyPath -KnownHostsPath $KnownHostsPath -RemoteCommand "sudo -n sh -c 'test -r /etc/swedesclantracker/api.env && test -r /etc/swedesclantracker/worker.env'"
+    if ($envDiagCheck.ExitCode -eq 0) {
+        Write-OpResult -Success $true -Step "Env diagnostics readiness" -Details "api.env and worker.env are readable via sudo."
+    }
+    else {
+        $failures.Add("Env diagnostics not ready (cannot read env files with sudo).")
+        Write-OpResult -Success $false -Step "Env diagnostics readiness" -Details "Read check failed for /etc/swedesclantracker/*.env."
     }
 
     $activeCheck = Invoke-Ssh -HostOrIp $HostOrIp -User $User -KeyPath $KeyPath -KnownHostsPath $KnownHostsPath -RemoteCommand "sudo -n systemctl is-active swedesclantracker-api swedesclantracker-worker nginx"

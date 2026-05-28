@@ -92,19 +92,33 @@ You can run these scripts directly by right-clicking the `.ps1` file and choosin
 Approve UAC prompts for scripts that stop/start Windows services.
 
 - Deploy Pi stack:
-  - `scripts/windows/deploy-pi-stack.ps1`
+  - `scripts/windows/pi/deploy-pi-stack.ps1`
 - Switch Pi worker to temporary Discord:
-  - `scripts/windows/set-pi-discord-config.ps1`
+  - `scripts/windows/pi/discord/set-pi-discord-profile.ps1 -ProfileName temporary`
+  - `scripts/windows/pi/discord/switch-pi-discord-temporary.ps1`
+- Switch Pi worker to real Discord:
+  - `scripts/windows/pi/discord/set-pi-discord-profile.ps1 -ProfileName real`
+  - `scripts/windows/pi/discord/switch-pi-discord-real.ps1`
+- Show current Pi worker Discord profile:
+  - `scripts/windows/pi/discord/get-pi-discord-profile.ps1`
 - Verify Pi burn-in health:
-  - `scripts/windows/verify-pi-stack.ps1`
+  - `scripts/windows/pi/verify-pi-stack.ps1`
+- Check redacted Pi runtime env values (safe output):
+  - `scripts/windows/pi/get-pi-redacted-env.ps1`
+- Manage Pi sudo access bootstrap for Codex/operator automation:
+  - `scripts/windows/pi/set-pi-sudo-access.ps1`
+- Run promotion posted-event ownership repair (dry-run by default):
+  - `scripts/windows/pi/repair-pi-promotion-posted-ownership.ps1`
+- Check EF SQL logging verbosity recommendation on Pi:
+  - `scripts/windows/pi/check-pi-logging-profile.ps1`
 - Control Pi worker quickly:
-  - `scripts/windows/control-pi-worker.ps1`
+  - `scripts/windows/pi/control-pi-worker.ps1`
 - Control Pi API quickly:
-  - `scripts/windows/control-pi-api.ps1`
+  - `scripts/windows/pi/control-pi-api.ps1`
 - Cut over to Pi + real Discord:
-  - `scripts/windows/cutover-to-pi-real-discord.ps1`
+  - `scripts/windows/pi/cutover-to-pi-real-discord.ps1`
 - Roll back to Windows services:
-  - `scripts/windows/rollback-to-windows.ps1`
+  - `scripts/windows/pi/rollback-to-windows.ps1`
 
 One-time Pi database setup:
 ```bash
@@ -117,6 +131,12 @@ Legacy Windows service maintenance scripts are also click-runnable via **Run wit
 - `scripts/windows/install-services.ps1`
 - `scripts/windows/update-services.ps1`
 - `scripts/windows/uninstall-services.ps1`
+
+Discord profile switching setup (one-time on your workstation):
+```powershell
+Copy-Item deploy\env\discord-profiles.example.json deploy\env\discord-profiles.json
+```
+`deploy/env/discord-profiles.json` is git-ignored so local overrides stay out of source control. The bot token is reused from the Pi's existing `/etc/swedesclantracker/worker.env` unless you explicitly pass `-DiscordToken`.
 
 One-time Pi service/nginx setup, from a clone or copied repo on the Pi:
 ```bash
@@ -161,10 +181,12 @@ Do not port-forward the dashboard or API from the router.
 - Run Pi against PostgreSQL and temporary Discord while it builds real live state.
 - Pi burn-in can keep production Temple/WiseOldMan credentials and group IDs when that is an explicit operator choice.
 - Switch Pi Discord values using:
-  - `scripts/windows/set-pi-discord-config.ps1`
+  - `scripts/windows/pi/discord/set-pi-discord-profile.ps1 -ProfileName temporary`
+  - `scripts/windows/pi/discord/set-pi-discord-profile.ps1 -ProfileName real`
+  - `scripts/windows/pi/discord/get-pi-discord-profile.ps1`
 - Cut over or roll back using:
-  - `scripts/windows/cutover-to-pi-real-discord.ps1`
-  - `scripts/windows/rollback-to-windows.ps1`
+  - `scripts/windows/pi/cutover-to-pi-real-discord.ps1`
+  - `scripts/windows/pi/rollback-to-windows.ps1`
 
 ## PostgreSQL Backup And Restore
 Create a backup on the Pi:

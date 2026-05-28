@@ -2,8 +2,11 @@
 param(
     [string]$HostOrIp = $env:PI_HOST_OR_IP,
     [string]$User = $(if ($env:PI_USER) { $env:PI_USER } else { "sebastian" }),
-    [string]$KeyPath = $(if ($env:PI_SSH_KEY_PATH) { $env:PI_SSH_KEY_PATH } else { Join-Path $HOME ".ssh\id_ed25519" }),
-    [string]$KnownHostsPath = $(if ($env:PI_SSH_KNOWN_HOSTS_PATH) { $env:PI_SSH_KNOWN_HOSTS_PATH } else { Join-Path $HOME ".ssh\known_hosts" }),
+    [string]$KeyPath = $(if ($env:PI_SSH_KEY_PATH) { $env:PI_SSH_KEY_PATH } else { $codexKey = Join-Path $HOME ".codex\keys\swedesclantracker-pi\.codex_pi_ed25519"; if (Test-Path -LiteralPath $codexKey) { $codexKey } else { Join-Path $HOME ".ssh\id_ed25519" } }),
+    [string]$KnownHostsPath = $(if ($env:PI_SSH_KNOWN_HOSTS_PATH) { $env:PI_SSH_KNOWN_HOSTS_PATH } else { $codexKnownHosts = Join-Path $HOME ".codex\keys\swedesclantracker-pi\.codex_known_hosts"; if (Test-Path -LiteralPath $codexKnownHosts) { $codexKnownHosts } else { Join-Path $HOME ".ssh\known_hosts" } }),
+    [ValidateSet("real", "temporary")]
+    [string]$DiscordProfile = "real",
+    [string]$DiscordProfilesPath = $(Join-Path (Join-Path $PSScriptRoot "..\..\..\deploy\env") "discord-profiles.json"),
     [string]$DiscordToken,
     [string]$DiscordAdminRoleId,
     [string]$DiscordGuildId,
@@ -64,19 +67,38 @@ try {
         exit 0
     }
 
-    $setDiscordScript = Join-Path $PSScriptRoot "set-pi-discord-config.ps1"
-    & $setDiscordScript `
-        -HostOrIp $HostOrIp `
-        -User $User `
-        -KeyPath $KeyPath `
-        -KnownHostsPath $KnownHostsPath `
-        -DiscordToken $DiscordToken `
-        -DiscordAdminRoleId $DiscordAdminRoleId `
-        -DiscordGuildId $DiscordGuildId `
-        -DiscordChannelId $DiscordChannelId `
-        -DiscordPetHiscoresChannelId $DiscordPetHiscoresChannelId `
-        -Confirm:$false `
-        -NoPause
+    if ([string]::IsNullOrWhiteSpace($DiscordAdminRoleId) -and
+        [string]::IsNullOrWhiteSpace($DiscordGuildId) -and
+        [string]::IsNullOrWhiteSpace($DiscordChannelId) -and
+        [string]::IsNullOrWhiteSpace($DiscordPetHiscoresChannelId))
+    {
+        $setProfileScript = Join-Path $PSScriptRoot "discord\set-pi-discord-profile.ps1"
+        & $setProfileScript `
+            -ProfileName $DiscordProfile `
+            -ProfilesPath $DiscordProfilesPath `
+            -HostOrIp $HostOrIp `
+            -User $User `
+            -KeyPath $KeyPath `
+            -KnownHostsPath $KnownHostsPath `
+            -DiscordToken $DiscordToken `
+            -NoPause
+    }
+    else
+    {
+        $setDiscordScript = Join-Path $PSScriptRoot "discord\set-pi-discord-config.ps1"
+        & $setDiscordScript `
+            -HostOrIp $HostOrIp `
+            -User $User `
+            -KeyPath $KeyPath `
+            -KnownHostsPath $KnownHostsPath `
+            -DiscordToken $DiscordToken `
+            -DiscordAdminRoleId $DiscordAdminRoleId `
+            -DiscordGuildId $DiscordGuildId `
+            -DiscordChannelId $DiscordChannelId `
+            -DiscordPetHiscoresChannelId $DiscordPetHiscoresChannelId `
+            -Confirm:$false `
+            -NoPause
+    }
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to apply real Discord values on Pi worker."
     }

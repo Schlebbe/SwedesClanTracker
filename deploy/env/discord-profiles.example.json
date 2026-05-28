@@ -1,0 +1,14 @@
+{
+  "temporary": {
+    "AdminRoleId": "1508594760913256479",
+    "GuildId": "1186818422810628126",
+    "ChannelId": "1362728523357491321",
+    "PetHiscoresChannelId": "1500523354300481767"
+  },
+  "real": {
+    "AdminRoleId": "290138154537582593",
+    "GuildId": "290137959288537092",
+    "ChannelId": "1500542861974966416",
+    "PetHiscoresChannelId": "1500542941314158712"
+  }
+}

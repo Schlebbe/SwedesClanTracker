@@ -82,7 +82,10 @@ function Invoke-Ssh {
         [Parameter(Mandatory = $true)][string]$RemoteCommand
     )
 
-    $sshArgs = New-SshArgs -HostOrIp $HostOrIp -User $User -KeyPath $KeyPath -KnownHostsPath $KnownHostsPath -RemoteCommand $RemoteCommand
+    # Normalize CRLF to LF so Linux shells do not receive stray '\r' characters.
+    $normalizedCommand = $RemoteCommand -replace "`r`n", "`n"
+    $normalizedCommand = $normalizedCommand -replace "`r", "`n"
+    $sshArgs = New-SshArgs -HostOrIp $HostOrIp -User $User -KeyPath $KeyPath -KnownHostsPath $KnownHostsPath -RemoteCommand $normalizedCommand
     $output = & ssh @sshArgs 2>&1
     $exitCode = $LASTEXITCODE
     return [PSCustomObject]@{

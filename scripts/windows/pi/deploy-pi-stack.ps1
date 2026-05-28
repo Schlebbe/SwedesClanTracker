@@ -2,8 +2,8 @@
 param(
     [string]$HostOrIp = $env:PI_HOST_OR_IP,
     [string]$User = $(if ($env:PI_USER) { $env:PI_USER } else { "sebastian" }),
-    [string]$KeyPath = $(if ($env:PI_SSH_KEY_PATH) { $env:PI_SSH_KEY_PATH } else { Join-Path $HOME ".ssh\id_ed25519" }),
-    [string]$KnownHostsPath = $(if ($env:PI_SSH_KNOWN_HOSTS_PATH) { $env:PI_SSH_KNOWN_HOSTS_PATH } else { Join-Path $HOME ".ssh\known_hosts" }),
+    [string]$KeyPath = $(if ($env:PI_SSH_KEY_PATH) { $env:PI_SSH_KEY_PATH } else { $codexKey = Join-Path $HOME ".codex\keys\swedesclantracker-pi\.codex_pi_ed25519"; if (Test-Path -LiteralPath $codexKey) { $codexKey } else { Join-Path $HOME ".ssh\id_ed25519" } }),
+    [string]$KnownHostsPath = $(if ($env:PI_SSH_KNOWN_HOSTS_PATH) { $env:PI_SSH_KNOWN_HOSTS_PATH } else { $codexKnownHosts = Join-Path $HOME ".codex\keys\swedesclantracker-pi\.codex_known_hosts"; if (Test-Path -LiteralPath $codexKnownHosts) { $codexKnownHosts } else { Join-Path $HOME ".ssh\known_hosts" } }),
     [string]$Configuration = "Release",
     [string]$Runtime = "linux-arm64",
     [string]$RepoRoot = "",
@@ -40,7 +40,7 @@ function Invoke-CheckedCommand {
 
 try {
     if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
-        $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+        $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
     }
 
     $HostOrIp = Resolve-PiHost -HostOrIp $HostOrIp

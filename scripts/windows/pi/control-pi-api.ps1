@@ -4,9 +4,9 @@ param(
     [string]$Action,
     [string]$HostOrIp = $env:PI_HOST_OR_IP,
     [string]$User = $(if ($env:PI_USER) { $env:PI_USER } else { "sebastian" }),
-    [string]$KeyPath = $(if ($env:PI_SSH_KEY_PATH) { $env:PI_SSH_KEY_PATH } else { Join-Path $HOME ".ssh\id_ed25519" }),
-    [string]$KnownHostsPath = $(if ($env:PI_SSH_KNOWN_HOSTS_PATH) { $env:PI_SSH_KNOWN_HOSTS_PATH } else { Join-Path $HOME ".ssh\known_hosts" }),
-    [string]$ServiceName = "swedesclantracker-worker",
+    [string]$KeyPath = $(if ($env:PI_SSH_KEY_PATH) { $env:PI_SSH_KEY_PATH } else { $codexKey = Join-Path $HOME ".codex\keys\swedesclantracker-pi\.codex_pi_ed25519"; if (Test-Path -LiteralPath $codexKey) { $codexKey } else { Join-Path $HOME ".ssh\id_ed25519" } }),
+    [string]$KnownHostsPath = $(if ($env:PI_SSH_KNOWN_HOSTS_PATH) { $env:PI_SSH_KNOWN_HOSTS_PATH } else { $codexKnownHosts = Join-Path $HOME ".codex\keys\swedesclantracker-pi\.codex_known_hosts"; if (Test-Path -LiteralPath $codexKnownHosts) { $codexKnownHosts } else { Join-Path $HOME ".ssh\known_hosts" } }),
+    [string]$ServiceName = "swedesclantracker-api",
     [switch]$NoPause
 )
 
@@ -26,7 +26,7 @@ try {
     $needsConfirmation = $Action -ne "status"
     $targetLabel = "$ServiceName on $User@$HostOrIp"
     if ($needsConfirmation -and -not $PSCmdlet.ShouldProcess($targetLabel, $Action)) {
-        Write-OpResult -Success $true -Step "Worker action canceled" -Details "No changes made." -NextStep "Run script again and confirm to execute '$Action'."
+        Write-OpResult -Success $true -Step "API action canceled" -Details "No changes made." -NextStep "Run script again and confirm to execute '$Action'."
         Pause-IfRequested -NoPause:$NoPause
         exit 0
     }
@@ -45,16 +45,16 @@ try {
     }
 
     if ($result.ExitCode -ne 0) {
-        Write-OpResult -Success $false -Step "Worker action failed" -Details "Action '$Action' exited with code $($result.ExitCode)." -NextStep "Run '-Action status' to inspect service state."
+        Write-OpResult -Success $false -Step "API action failed" -Details "Action '$Action' exited with code $($result.ExitCode)." -NextStep "Run '-Action status' to inspect service state."
         Pause-IfRequested -NoPause:$NoPause
         exit 1
     }
 
-    Write-OpResult -Success $true -Step "Worker action succeeded" -Details "Action '$Action' applied to $ServiceName." -NextStep "Use '-Action status' to inspect live logs/state if needed."
+    Write-OpResult -Success $true -Step "API action succeeded" -Details "Action '$Action' applied to $ServiceName." -NextStep "Use '-Action status' to inspect live logs/state if needed."
     Pause-IfRequested -NoPause:$NoPause
 }
 catch {
-    Write-OpResult -Success $false -Step "Worker control error" -Details $_.Exception.Message -NextStep "Verify SSH key/host settings and rerun."
+    Write-OpResult -Success $false -Step "API control error" -Details $_.Exception.Message -NextStep "Verify SSH key/host settings and rerun."
     Pause-IfRequested -NoPause:$NoPause
     exit 1
 }

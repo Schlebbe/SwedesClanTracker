@@ -37,3 +37,5 @@ scripts/windows/check-pi-db-readonly.ps1
 *.env.*
 !.env.example
 !*.env.example
+deploy/env/discord-profiles.json
+deploy/env/discord-profiles.local.json
