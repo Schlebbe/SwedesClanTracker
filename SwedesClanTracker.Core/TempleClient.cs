@@ -15,6 +15,7 @@ public interface ITempleClient
 public class TempleClient(HttpClient httpClient) : ITempleClient
 {
     private static readonly string[] ModeEhbKeys = ["Ehb", "Im_ehb", "Uim_ehb", "1def_ehb"];
+    private static readonly string[] ModeEhpKeys = ["Ehp", "Im_ehp", "Uim_ehp", "1def_ehp"];
 
     private static readonly TimeSpan[] RetryDelays =
     [
@@ -36,9 +37,10 @@ public class TempleClient(HttpClient httpClient) : ITempleClient
         int lvl = data.GetProperty("Overall_level").GetInt32();
         var ehb = ResolvePrimaryEhb(data);
         if (!ehb.HasValue) return null;
-        double ehp = data.GetProperty("Overall_ehp").GetDouble();
+        var ehp = ResolvePrimaryEhp(data);
+        if (!ehp.HasValue) return null;
         int collections = data.TryGetProperty("Collections", out var c) ? c.GetInt32() : 0;
-        return new PlayerStatsDto(lvl, ehb.Value, ehp, collections);
+        return new PlayerStatsDto(lvl, ehb.Value, ehp.Value, collections);
     }
 
     public async Task<int?> GetPetsAsync(string username, CancellationToken ct)
@@ -140,6 +142,46 @@ public class TempleClient(HttpClient httpClient) : ITempleClient
         return TryReadHighestModeEhb(data, out var fallbackEhb) ? fallbackEhb : null;
     }
 
+    private static double? ResolvePrimaryEhp(JsonElement data)
+    {
+        if (data.TryGetProperty("info", out var info) &&
+            info.ValueKind == JsonValueKind.Object)
+        {
+            if (info.TryGetProperty("Primary_ehp", out var primaryEhpProperty) &&
+                primaryEhpProperty.ValueKind == JsonValueKind.String)
+            {
+                var primaryEhpKey = primaryEhpProperty.GetString();
+                if (!string.IsNullOrWhiteSpace(primaryEhpKey) &&
+                    TryReadNumericProperty(data, primaryEhpKey, out var primaryEhp))
+                {
+                    return primaryEhp;
+                }
+            }
+
+            // Backward-compatible fallback if Temple only provides Primary_ehb:
+            // derive the corresponding EHP key for the same build.
+            if (info.TryGetProperty("Primary_ehb", out var primaryEhbProperty) &&
+                primaryEhbProperty.ValueKind == JsonValueKind.String)
+            {
+                var primaryEhbKey = primaryEhbProperty.GetString();
+                if (!string.IsNullOrWhiteSpace(primaryEhbKey))
+                {
+                    var derivedEhpKey = primaryEhbKey.EndsWith("_ehb", StringComparison.OrdinalIgnoreCase)
+                        ? primaryEhbKey[..^4] + "_ehp"
+                        : primaryEhbKey == "Ehb" ? "Ehp" : "";
+                    if (!string.IsNullOrWhiteSpace(derivedEhpKey) &&
+                        TryReadNumericProperty(data, derivedEhpKey, out var derivedEhp))
+                    {
+                        return derivedEhp;
+                    }
+                }
+            }
+        }
+
+        if (TryReadHighestModeEhp(data, out var fallbackEhp)) return fallbackEhp;
+        return TryReadNumericProperty(data, "Overall_ehp", out var overallEhp) ? overallEhp : null;
+    }
+
     private static bool TryReadHighestModeEhb(JsonElement data, out double ehb)
     {
         ehb = 0;
@@ -151,6 +193,24 @@ public class TempleClient(HttpClient httpClient) : ITempleClient
             if (!foundValue || value > ehb)
             {
                 ehb = value;
+                foundValue = true;
+            }
+        }
+
+        return foundValue;
+    }
+
+    private static bool TryReadHighestModeEhp(JsonElement data, out double ehp)
+    {
+        ehp = 0;
+        var foundValue = false;
+
+        foreach (var key in ModeEhpKeys)
+        {
+            if (!TryReadNumericProperty(data, key, out var value)) continue;
+            if (!foundValue || value > ehp)
+            {
+                ehp = value;
                 foundValue = true;
             }
         }
