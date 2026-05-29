@@ -25,10 +25,13 @@ swedesclantracker-frontend/.env.*.local
 .codex/
 **/.codex/
 AGENTS.md
+old_agents.md
 docs/
 scripts/windows/test-pi-ssh.ps1
 scripts/windows/check-pi-db-readonly.ps1
 .impeccable/
+.agents/
+skills-lock.json
 
 
 # Local environment and secret overrides (templates with .example stay tracked).
