@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import "./index.css";
-import { fetchAdminQueue, fetchAdminQueueCase, fetchClanLog, fetchHome, fetchLiveStatus, fetchPlayerProfile, fetchReadiness, fetchRoster } from "./data/appDataApi";
+import { fetchAdminQueue, fetchAdminQueueCase, fetchClanLog, fetchHome, fetchLiveStatus, fetchPlayerProfile, fetchReadiness, fetchRoster, login } from "./data/appDataApi";
+import { ApiError } from "./data/apiClient";
 import { AdminQueueSurface } from "./surfaces/AdminQueueSurface";
 import { ClanLogSurface } from "./surfaces/ClanLogSurface";
 import { DashboardSurface } from "./surfaces/DashboardSurface";
@@ -9,8 +10,16 @@ import { PlayerProfileSurface } from "./surfaces/PlayerProfileSurface";
 import { ReadinessSurface } from "./surfaces/ReadinessSurface";
 
 const surfaces = ["Dashboard", "Members", "Player Profile", "Clan Log", "Admin Queue", "Readiness"];
+const authRequiredMessage = "Session expired. Sign in again to continue.";
+
+function isUnauthorized(error) {
+  return error instanceof ApiError && (error.status === 401 || error.status === 403);
+}
 
 export default function App() {
+  const [authState, setAuthState] = useState({ status: "authenticated", message: "" });
+  const [loginForm, setLoginForm] = useState({ username: "", password: "" });
+  const [loginState, setLoginState] = useState({ submitting: false, error: "" });
   const [surface, setSurface] = useState("Dashboard");
 
   const [homeState, setHomeState] = useState({ loading: true, error: "", data: null });
@@ -26,6 +35,15 @@ export default function App() {
   const [readinessState, setReadinessState] = useState({ loading: true, error: "", data: null });
   const [liveStatusState, setLiveStatusState] = useState({ loading: true, error: "", data: null, stale: false });
 
+  function handleRequestError(error, fallbackMessage) {
+    if (isUnauthorized(error)) {
+      setAuthState({ status: "unauthenticated", message: authRequiredMessage });
+      return authRequiredMessage;
+    }
+
+    return error?.message ?? fallbackMessage;
+  }
+
   useEffect(() => {
     let active = true;
 
@@ -37,7 +55,7 @@ export default function App() {
         setHomeState({ loading: false, error: "", data });
       } catch (error) {
         if (!active) return;
-        setHomeState({ loading: false, error: error?.message ?? "Failed loading dashboard.", data: null });
+        setHomeState({ loading: false, error: handleRequestError(error, "Failed loading dashboard."), data: null });
       }
     }
 
@@ -58,7 +76,7 @@ export default function App() {
         setQueueState({ loading: false, error: "", cases: Array.isArray(cases) ? cases : [] });
       } catch (error) {
         if (!active) return;
-        setQueueState({ loading: false, error: error?.message ?? "Failed loading admin queue.", cases: [] });
+        setQueueState({ loading: false, error: handleRequestError(error, "Failed loading admin queue."), cases: [] });
       }
     }
 
@@ -80,7 +98,7 @@ export default function App() {
         setRosterState({ loading: false, error: "", rows });
       } catch (error) {
         if (!active) return;
-        setRosterState({ loading: false, error: error?.message ?? "Failed loading roster.", rows: [] });
+        setRosterState({ loading: false, error: handleRequestError(error, "Failed loading roster."), rows: [] });
       }
     }
 
@@ -101,7 +119,7 @@ export default function App() {
         setClanLogState({ loading: false, error: "", data });
       } catch (error) {
         if (!active) return;
-        setClanLogState({ loading: false, error: error?.message ?? "Failed loading clan log.", data: null });
+        setClanLogState({ loading: false, error: handleRequestError(error, "Failed loading clan log."), data: null });
       }
     }
 
@@ -122,7 +140,7 @@ export default function App() {
         setReadinessState({ loading: false, error: "", data });
       } catch (error) {
         if (!active) return;
-        setReadinessState({ loading: false, error: error?.message ?? "Failed loading readiness.", data: null });
+        setReadinessState({ loading: false, error: handleRequestError(error, "Failed loading readiness."), data: null });
       }
     }
 
@@ -154,7 +172,7 @@ export default function App() {
         setLiveStatusState((prev) => ({
           ...prev,
           loading: false,
-          error: error?.message ?? "Live status update failed.",
+          error: handleRequestError(error, "Live status update failed."),
           stale: Boolean(prev.data),
         }));
       }
@@ -218,7 +236,7 @@ export default function App() {
         setCaseDetailState({ loading: false, error: "", data });
       } catch (error) {
         if (!active) return;
-        setCaseDetailState({ loading: false, error: error?.message ?? "Failed loading case detail.", data: null });
+        setCaseDetailState({ loading: false, error: handleRequestError(error, "Failed loading case detail."), data: null });
       }
     }
 
@@ -244,7 +262,7 @@ export default function App() {
         setProfileState({ loading: false, error: "", data });
       } catch (error) {
         if (!active) return;
-        setProfileState({ loading: false, error: error?.message ?? "Failed loading player profile.", data: null });
+        setProfileState({ loading: false, error: handleRequestError(error, "Failed loading player profile."), data: null });
       }
     }
 
@@ -253,6 +271,68 @@ export default function App() {
       active = false;
     };
   }, [selectedPlayerId]);
+
+  async function handleLoginSubmit(event) {
+    event.preventDefault();
+    setLoginState({ submitting: true, error: "" });
+    try {
+      await login(loginForm.username, loginForm.password);
+      setAuthState({ status: "authenticated", message: "" });
+      setLoginState({ submitting: false, error: "" });
+      if (typeof window !== "undefined") {
+        window.location.reload();
+      }
+    } catch (error) {
+      const message = isUnauthorized(error) ? "Invalid username or password." : (error?.message ?? "Login failed.");
+      setLoginState({ submitting: false, error: message });
+    }
+  }
+
+  if (authState.status === "unauthenticated") {
+    return (
+      <main className="app-shell auth-shell">
+        <section className="app-stage auth-stage">
+          <div className="surface-grid">
+            <header className="surface-header">
+              <p className="eyebrow">SwedesClanTracker</p>
+              <h2>Sign In Required</h2>
+              <p>{authState.message || "Sign in to continue using the tracker."}</p>
+            </header>
+
+            <section className="panel">
+              <form className="surface-grid" onSubmit={handleLoginSubmit}>
+                <div className="toolbar auth-form-grid">
+                  <input
+                    value={loginForm.username}
+                    onChange={(event) => setLoginForm((prev) => ({ ...prev, username: event.target.value }))}
+                    placeholder="Username"
+                    aria-label="Username"
+                    autoComplete="username"
+                    required
+                  />
+                  <input
+                    type="password"
+                    value={loginForm.password}
+                    onChange={(event) => setLoginForm((prev) => ({ ...prev, password: event.target.value }))}
+                    placeholder="Password"
+                    aria-label="Password"
+                    autoComplete="current-password"
+                    required
+                  />
+                </div>
+                {loginState.error ? <p className="tone tone-danger">{loginState.error}</p> : null}
+                <div className="message-action">
+                  <button className="btn-primary" type="submit" disabled={loginState.submitting}>
+                    {loginState.submitting ? "Signing in..." : "Sign in"}
+                  </button>
+                </div>
+              </form>
+            </section>
+          </div>
+        </section>
+      </main>
+    );
+  }
 
   return (
     <main className="app-shell">
@@ -286,7 +366,7 @@ export default function App() {
                 const data = await fetchHome();
                 setHomeState({ loading: false, error: "", data });
               } catch (error) {
-                setHomeState({ loading: false, error: error?.message ?? "Failed loading dashboard.", data: null });
+                setHomeState({ loading: false, error: handleRequestError(error, "Failed loading dashboard."), data: null });
               }
             }}
             onRetryLive={async () => {
@@ -298,7 +378,7 @@ export default function App() {
                 setLiveStatusState((prev) => ({
                   ...prev,
                   loading: false,
-                  error: error?.message ?? "Live status update failed.",
+                  error: handleRequestError(error, "Live status update failed."),
                   stale: Boolean(prev.data),
                 }));
               }
@@ -319,7 +399,7 @@ export default function App() {
                 const rows = Array.isArray(data?.rows) ? data.rows : [];
                 setRosterState({ loading: false, error: "", rows });
               } catch (error) {
-                setRosterState({ loading: false, error: error?.message ?? "Failed loading roster.", rows: [] });
+                setRosterState({ loading: false, error: handleRequestError(error, "Failed loading roster."), rows: [] });
               }
             }}
             onOpenProfile={(playerId) => {
@@ -341,7 +421,7 @@ export default function App() {
                 const data = await fetchPlayerProfile(selectedPlayerId);
                 setProfileState({ loading: false, error: "", data });
               } catch (error) {
-                setProfileState({ loading: false, error: error?.message ?? "Failed loading player profile.", data: null });
+                setProfileState({ loading: false, error: handleRequestError(error, "Failed loading player profile."), data: null });
               }
             }}
             onBackToMembers={() => setSurface("Members")}
@@ -359,7 +439,7 @@ export default function App() {
                 const data = await fetchClanLog();
                 setClanLogState({ loading: false, error: "", data });
               } catch (error) {
-                setClanLogState({ loading: false, error: error?.message ?? "Failed loading clan log.", data: null });
+                setClanLogState({ loading: false, error: handleRequestError(error, "Failed loading clan log."), data: null });
               }
             }}
           />
@@ -380,7 +460,7 @@ export default function App() {
                 const cases = await fetchAdminQueue();
                 setQueueState({ loading: false, error: "", cases: Array.isArray(cases) ? cases : [] });
               } catch (error) {
-                setQueueState({ loading: false, error: error?.message ?? "Failed loading admin queue.", cases: [] });
+                setQueueState({ loading: false, error: handleRequestError(error, "Failed loading admin queue."), cases: [] });
               }
             }}
             onRetryDetail={async () => {
@@ -390,7 +470,7 @@ export default function App() {
                 const data = await fetchAdminQueueCase(selectedCaseId);
                 setCaseDetailState({ loading: false, error: "", data });
               } catch (error) {
-                setCaseDetailState({ loading: false, error: error?.message ?? "Failed loading case detail.", data: null });
+                setCaseDetailState({ loading: false, error: handleRequestError(error, "Failed loading case detail."), data: null });
               }
             }}
             onSelectCase={setSelectedCaseId}
@@ -408,7 +488,7 @@ export default function App() {
                 const data = await fetchReadiness();
                 setReadinessState({ loading: false, error: "", data });
               } catch (error) {
-                setReadinessState({ loading: false, error: error?.message ?? "Failed loading readiness.", data: null });
+                setReadinessState({ loading: false, error: handleRequestError(error, "Failed loading readiness."), data: null });
               }
             }}
           />

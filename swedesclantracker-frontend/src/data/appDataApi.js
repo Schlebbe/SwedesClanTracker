@@ -1,4 +1,4 @@
-﻿import { apiGet } from "./apiClient";
+import { apiGet, apiPost } from "./apiClient";
 
 export async function fetchHome() {
   return apiGet("/app/home");
@@ -20,8 +20,7 @@ export async function fetchPlayerProfile(playerId) {
   try {
     return await apiGet(`/app/players/${playerId}/profile`);
   } catch (error) {
-    const message = error?.message ?? "";
-    if (message.includes("404")) {
+    if (error?.status === 404) {
       throw new Error("Player not found. It may have been removed or merged.");
     }
     throw error;
@@ -38,4 +37,12 @@ export async function fetchReadiness() {
 
 export async function fetchLiveStatus() {
   return apiGet("/status");
+}
+
+export async function login(username, password) {
+  return apiPost("/auth/login", { username, password });
+}
+
+export async function logout() {
+  return apiPost("/auth/logout");
 }
