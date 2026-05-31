@@ -236,7 +236,8 @@ public class DiscordPromotionBotWorker(
                     .Select(s => new
                     {
                         s.Ehb,
-                        s.Ehp
+                        s.Ehp,
+                        s.Collections
                     })
                     .FirstOrDefault()
             })
@@ -321,7 +322,7 @@ public class DiscordPromotionBotWorker(
                 c.NewRank,
                 string.IsNullOrWhiteSpace(womRole) ? "Unknown" : RankRules.NormalizeRankName(womRole),
                 ToPromotionUpdateTargetLabel(candidateType),
-                BuildStatsSummary(c.Latest?.Ehb, c.Latest?.Ehp, c.ManualPetOverride ?? c.StoredPetCount),
+                BuildStatsSummary(c.Latest?.Ehb, c.Latest?.Ehp, c.Latest?.Collections, c.ManualPetOverride ?? c.StoredPetCount),
                 c.Reason,
                 FormatSwedishTime(c.LastSynced));
             var renderFingerprint = ComputeRenderFingerprint(new
@@ -334,7 +335,7 @@ public class DiscordPromotionBotWorker(
                 c.NewRank,
                 WomRole = string.IsNullOrWhiteSpace(womRole) ? "Unknown" : RankRules.NormalizeRankName(womRole),
                 CandidateType = candidateType.ToString(),
-                Stats = BuildStatsSummary(c.Latest?.Ehb, c.Latest?.Ehp, c.ManualPetOverride ?? c.StoredPetCount),
+                Stats = BuildStatsSummary(c.Latest?.Ehb, c.Latest?.Ehp, c.Latest?.Collections, c.ManualPetOverride ?? c.StoredPetCount),
                 c.Reason,
                 LastSynced = FormatSwedishTime(c.LastSynced)
             });
@@ -5723,13 +5724,14 @@ Visar alla spelare som just nu är ignorerade i:
         };
     }
 
-    private static string BuildStatsSummary(double? ehb, double? ehp, int pets)
+    private static string BuildStatsSummary(double? ehb, double? ehp, int? collections, int pets)
     {
         var parts = new List<string>
         {
             $"EHB: {(ehb.HasValue ? ehb.Value.ToString("0.0", CultureInfo.InvariantCulture) : "N/A")}",
             $"EHP: {(ehp.HasValue ? ehp.Value.ToString("0.0", CultureInfo.InvariantCulture) : "N/A")}"
         };
+        if (collections.HasValue) parts.Add($"Collections: {collections.Value}");
         if (pets > 0) parts.Add($"Pets: {pets}");
         return string.Join(" | ", parts);
     }
