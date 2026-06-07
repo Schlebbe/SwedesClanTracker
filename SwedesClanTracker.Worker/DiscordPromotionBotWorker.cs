@@ -228,6 +228,7 @@ public class DiscordPromotionBotWorker(
                 x.Reason,
                 PlayerStatus = x.Player.Status,
                 PlayerName = x.Player.Username,
+                CurrentRank = x.Player.CurrentRank,
                 LastSynced = x.Player.LastSynced,
                 StoredPetCount = x.Player.StoredPetCount,
                 ManualPetOverride = x.Player.ManualPetOverride,
@@ -291,6 +292,32 @@ public class DiscordPromotionBotWorker(
                         "Skipping promotion card patch for candidate {CandidateId}; latest status is {CandidateStatus}.",
                         c.Id,
                         currentStatus?.ToString() ?? "MISSING");
+                }
+                continue;
+            }
+
+            if (RankRules.RankOrder(c.NewRank) <= RankRules.RankOrder(c.CurrentRank))
+            {
+                await DismissPromotionCandidateAlreadyCurrentRankAsync(
+                    db,
+                    c.PlayerId,
+                    c.Id,
+                    c.PlayerName,
+                    c.CurrentRank,
+                    c.NewRank,
+                    "discord-promotion-post-guard",
+                    ct);
+                if (postedEvent is not null)
+                {
+                    await SchedulePromotionCandidateCleanupAsync(
+                        db,
+                        c.PlayerId,
+                        c.Id,
+                        postedEvent,
+                        null,
+                        null,
+                        "candidate-already-current-rank",
+                        ct);
                 }
                 continue;
             }
@@ -3177,6 +3204,38 @@ public class DiscordPromotionBotWorker(
             .FirstOrDefaultAsync(ct);
     }
 
+    private async Task DismissPromotionCandidateAlreadyCurrentRankAsync(
+        TrackerDbContext db,
+        int playerId,
+        int candidateId,
+        string playerName,
+        string currentRank,
+        string candidateNewRank,
+        string source,
+        CancellationToken ct)
+    {
+        var candidate = await db.PromotionCandidates.FirstOrDefaultAsync(x => x.Id == candidateId, ct);
+        if (candidate is null || candidate.Status != PromotionStatus.PENDING) return;
+
+        candidate.Status = PromotionStatus.DISMISSED;
+        db.LifecycleEvents.Add(new LifecycleEvent
+        {
+            PlayerId = playerId,
+            EventType = "PROMOTION_CANDIDATE_ALREADY_CURRENT_RANK",
+            MetadataJson = JsonUtil.Serialize(new
+            {
+                CandidateId = candidateId,
+                Username = playerName,
+                CurrentRank = currentRank,
+                CandidateNewRank = candidateNewRank,
+                Source = source
+            }),
+            Status = "DONE",
+            CreatedAt = DateTimeOffset.UtcNow
+        });
+        await db.SaveChangesAsync(ct);
+    }
+
     private async Task SchedulePromotionCandidateCleanupAsync(
         TrackerDbContext db,
         int playerId,
@@ -3731,6 +3790,35 @@ public class DiscordPromotionBotWorker(
 
             var templeGroupId = configuration.GetValue<int?>("TempleOsrs:GroupId") ?? 449;
             var templeAdded = await IsPlayerInTempleGroupAsync(player.Username, templeGroupId);
+            var womGroupId = configuration.GetValue<int?>("WiseOldMan:GroupId") ?? 7173;
+            var womAdded = womGroupId > 0 && await IsPlayerInWiseOldManGroupAsync(player.Username, womGroupId);
+            if (womAdded)
+            {
+                await CloseOpenLifecycleEventsAsync(db, player.Id, "WOM_MISSING_ACTION_REQUIRED");
+                if (templeAdded && player.Status == PlayerStatus.MISSING_PENDING_REVIEW)
+                {
+                    player.Status = PlayerStatus.ACTIVE;
+                    await CloseOpenLifecycleEventsAsync(db, player.Id,
+                        "MISSING_IN_ROSTER",
+                        "TEMPLE_MISSING_ACTION_REQUIRED");
+                }
+                ev.Status = "DONE";
+                db.LifecycleEvents.Add(new LifecycleEvent
+                {
+                    PlayerId = player.Id,
+                    EventType = "WOM_MISSING_SUPPRESSED_BY_LIVE_CHECK",
+                    MetadataJson = JsonUtil.Serialize(new
+                    {
+                        player.Username,
+                        Source = "discord-post-guard",
+                        Temple = templeAdded ? "Added" : "Missing",
+                        Wom = "Added"
+                    }),
+                    Status = "DONE",
+                    CreatedAt = DateTimeOffset.UtcNow
+                });
+                continue;
+            }
 
             var embed = new EmbedBuilder()
                 .WithTitle("WiseOldMan Membership Missing")
@@ -4494,7 +4582,10 @@ public class DiscordPromotionBotWorker(
         var oldPlayer = await db.Players.FirstOrDefaultAsync(x => x.Username.ToLower() == normalizedPrevious.ToLower(), ct);
         if (oldPlayer is null) return;
 
-        await CloseOpenLifecycleEventsAsync(db, oldPlayer.Id, "MISSING_IN_ROSTER", "TEMPLE_MISSING_ACTION_REQUIRED");
+        await CloseOpenLifecycleEventsAsync(db, oldPlayer.Id,
+            "MISSING_IN_ROSTER",
+            "TEMPLE_MISSING_ACTION_REQUIRED",
+            "WOM_MISSING_ACTION_REQUIRED");
 
         var recentSupersedeRows = await db.LifecycleEvents
             .Where(x =>
@@ -4524,23 +4615,49 @@ public class DiscordPromotionBotWorker(
             .Where(x => x.PlayerId == oldPlayer.Id && x.EventType == "TEMPLE_MISSING_DISCORD_POSTED")
             .OrderByDescending(x => x.CreatedAt)
             .FirstOrDefaultAsync(ct);
-        if (oldPosted is null) return;
+        if (oldPosted is not null)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(oldPosted.MetadataJson);
+                if (TryReadUlong(doc.RootElement, "ChannelId", out var channelId) &&
+                    TryReadUlong(doc.RootElement, "DiscordMessageId", out var messageId))
+                {
+                    ScheduleChannelMessageDelete(
+                        db,
+                        mergePlayerId,
+                        channelId,
+                        messageId,
+                        "TEMPLE_MISSING_DISCORD_DELETE_SCHEDULED",
+                        new { Reason = "temple-missing-superseded-by-merge", PreviousPlayer = oldPlayer.Username });
+                }
+            }
+            catch
+            {
+                // best effort
+            }
+        }
+
+        var oldWomPosted = await db.LifecycleEvents
+            .Where(x => x.PlayerId == oldPlayer.Id && x.EventType == "WOM_MISSING_DISCORD_POSTED")
+            .OrderByDescending(x => x.CreatedAt)
+            .FirstOrDefaultAsync(ct);
+        if (oldWomPosted is null) return;
 
         try
         {
-            using var doc = JsonDocument.Parse(oldPosted.MetadataJson);
-            if (!TryReadUlong(doc.RootElement, "ChannelId", out var channelId) ||
-                !TryReadUlong(doc.RootElement, "DiscordMessageId", out var messageId))
+            using var doc = JsonDocument.Parse(oldWomPosted.MetadataJson);
+            if (TryReadUlong(doc.RootElement, "ChannelId", out var channelId) &&
+                TryReadUlong(doc.RootElement, "DiscordMessageId", out var messageId))
             {
-                return;
+                ScheduleChannelMessageDelete(
+                    db,
+                    mergePlayerId,
+                    channelId,
+                    messageId,
+                    "WOM_MISSING_DISCORD_DELETE_SCHEDULED",
+                    new { Reason = "wom-missing-superseded-by-merge", PreviousPlayer = oldPlayer.Username });
             }
-            ScheduleChannelMessageDelete(
-                db,
-                mergePlayerId,
-                channelId,
-                messageId,
-                "TEMPLE_MISSING_DISCORD_DELETE_SCHEDULED",
-                new { Reason = "temple-missing-superseded-by-merge", PreviousPlayer = oldPlayer.Username });
         }
         catch
         {

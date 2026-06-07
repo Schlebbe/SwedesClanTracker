@@ -472,6 +472,7 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
         var rankResult = RankEvaluator.Evaluate(snapshot);
         player.EligibleRank = rankResult.Rank;
         player.LastSynced = syncedAt;
+        await DismissSatisfiedPendingPromotionCandidatesAsync(player, syncedAt, ct);
         if (player.Status is PlayerStatus.NEW_PENDING_REVIEW)
         {
             var missingCandidates = await db.Players
@@ -569,6 +570,39 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
         }
 
         await db.SaveChangesAsync(ct);
+    }
+
+    private async Task DismissSatisfiedPendingPromotionCandidatesAsync(Player player, DateTimeOffset now, CancellationToken ct)
+    {
+        var satisfiedCandidates = await db.PromotionCandidates
+            .Where(x =>
+                x.PlayerId == player.Id &&
+                x.Status == PromotionStatus.PENDING)
+            .ToListAsync(ct);
+        satisfiedCandidates = satisfiedCandidates
+            .Where(x => RankOrder(x.NewRank) <= RankOrder(player.CurrentRank))
+            .ToList();
+        if (satisfiedCandidates.Count == 0) return;
+
+        foreach (var candidate in satisfiedCandidates)
+        {
+            candidate.Status = PromotionStatus.DISMISSED;
+            db.LifecycleEvents.Add(new LifecycleEvent
+            {
+                PlayerId = player.Id,
+                EventType = "PROMOTION_CANDIDATE_ALREADY_CURRENT_RANK",
+                MetadataJson = JsonUtil.Serialize(new
+                {
+                    CandidateId = candidate.Id,
+                    player.Username,
+                    CurrentRank = player.CurrentRank,
+                    CandidateNewRank = candidate.NewRank,
+                    Source = "player-sync"
+                }),
+                Status = "DONE",
+                CreatedAt = now
+            });
+        }
     }
 
     private async Task CloseReviewLifecycleEventsResolvedByStatusAsync(Player player, CancellationToken ct)

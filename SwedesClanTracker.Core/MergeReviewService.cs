@@ -93,6 +93,7 @@ public class MergeReviewService(TrackerDbContext db, IWiseOldManClient wiseOldMa
         if (collided) return new(false, $"Cannot merge because '{finalUsername}' already exists.");
 
         var womCleanupSummary = "";
+        await wiseOldManClient.InvalidateCacheAsync(ct);
         var oldWomRole = await wiseOldManClient.GetMemberRoleAsync(oldPlayer.Username, ct);
         if (string.IsNullOrWhiteSpace(oldWomRole) ||
             string.Equals(oldWomRole, "member", StringComparison.OrdinalIgnoreCase))
@@ -131,7 +132,17 @@ public class MergeReviewService(TrackerDbContext db, IWiseOldManClient wiseOldMa
             .ToListAsync(ct);
 
         var promotions = await db.PromotionCandidates.Where(x => x.PlayerId == newPlayer.Id).ToListAsync(ct);
-        foreach (var promotion in promotions) promotion.PlayerId = oldPlayer.Id;
+        var dismissedTransferredCandidateIds = new List<int>();
+        foreach (var promotion in promotions)
+        {
+            promotion.PlayerId = oldPlayer.Id;
+            if (promotion.Status == PromotionStatus.PENDING &&
+                RankRules.RankOrder(promotion.NewRank) <= RankRules.RankOrder(oldPlayer.CurrentRank))
+            {
+                promotion.Status = PromotionStatus.DISMISSED;
+                dismissedTransferredCandidateIds.Add(promotion.Id);
+            }
+        }
 
         var lifecycle = await db.LifecycleEvents.Where(x => x.PlayerId == newPlayer.Id).ToListAsync(ct);
         foreach (var ev in lifecycle) ev.PlayerId = oldPlayer.Id;
@@ -142,7 +153,8 @@ public class MergeReviewService(TrackerDbContext db, IWiseOldManClient wiseOldMa
             "MERGE_SUGGESTED",
             "MERGE_ACTION_REQUIRED",
             "MISSING_IN_ROSTER",
-            "TEMPLE_MISSING_ACTION_REQUIRED");
+            "TEMPLE_MISSING_ACTION_REQUIRED",
+            "WOM_MISSING_ACTION_REQUIRED");
         db.LifecycleEvents.Add(new LifecycleEvent
         {
             PlayerId = oldPlayer.Id,
@@ -154,8 +166,10 @@ public class MergeReviewService(TrackerDbContext db, IWiseOldManClient wiseOldMa
                 NewPlayer = finalUsername,
                 CanonicalPlayer = oldPlayer.Username,
                 TransferredPendingCandidateIds = transferredPendingCandidateIds,
+                DismissedTransferredCandidateIds = dismissedTransferredCandidateIds,
                 HandledBy = handledBy,
-                Source = source
+                Source = source,
+                WomCacheInvalidated = true
             }),
             Status = "OPEN",
             CreatedAt = DateTimeOffset.UtcNow
@@ -163,6 +177,7 @@ public class MergeReviewService(TrackerDbContext db, IWiseOldManClient wiseOldMa
 
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
+        await wiseOldManClient.InvalidateCacheAsync(ct);
         return new(true, $"Rename confirmed: {previousUsername} -> {finalUsername}.{womCleanupSummary}");
     }
 
