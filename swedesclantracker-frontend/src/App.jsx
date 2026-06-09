@@ -34,12 +34,12 @@ export default function App() {
   const [readinessState, setReadinessState] = useState({ loading: true, error: "", data: null });
   const [liveStatusState, setLiveStatusState] = useState({ loading: true, error: "", data: null, stale: false });
   const navItems = [
-    { id: "Dashboard", label: "Dashboard", icon: "D" },
-    { id: "Members", label: "Clan Members", icon: "CM" },
-    { id: "Player Profile", label: "Player Profiles", icon: "P" },
-    { id: "Admin Queue", label: "Review Queue", icon: "RQ", badge: queueState.cases.length ? String(queueState.cases.length) : "" },
-    { id: "Clan Log", label: "Activity Log", icon: "A" },
-    { id: "Readiness", label: "Readiness", icon: "R" },
+    { id: "Dashboard", label: "Dashboard", icon: "dashboard" },
+    { id: "Members", label: "Clan Members", icon: "members" },
+    { id: "Player Profile", label: "Player Profiles", icon: "profile" },
+    { id: "Admin Queue", label: "Review Queue", icon: "review", badge: queueState.cases.length ? String(queueState.cases.length) : "" },
+    { id: "Clan Log", label: "Activity Log", icon: "activity" },
+    { id: "Readiness", label: "Readiness", icon: "readiness" },
   ];
 
   function handleRequestError(error, fallbackMessage) {

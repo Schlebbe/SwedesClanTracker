@@ -38,65 +38,44 @@ export function DashboardSurface({ data, liveStatus, loading, error, onRetry, on
 
   return (
     <div className="surface-grid dashboard-surface">
-      <header className="surface-header dashboard-header">
+      <header className="dashboard-command-header">
         <div>
-          <p className="eyebrow">Dashboard</p>
           <h2>{dashboard.title}</h2>
           <p>{dashboard.subtitle}</p>
         </div>
-        <BeveledButton variant="secondary" onClick={onOpenQueue}>Open Admin Queue</BeveledButton>
+        <div className="dashboard-command-actions">
+          <BeveledButton variant="primary" icon="review" onClick={onOpenQueue}>Review Queue</BeveledButton>
+        </div>
       </header>
 
-      <section className="dashboard-stat-grid" aria-label="Dashboard metrics">
+      <section className="dashboard-kpi-row" aria-label="Dashboard metrics">
         {dashboard.statCards.map((card) => (
           <StatCard
             key={card.key}
             label={card.label}
             value={card.value}
             detail={card.detail}
+            icon={dashboardIconForKey(card.key)}
             tone={card.tone}
             available={card.available}
-          />
-        ))}
-        {dashboard.futureStats.map((card) => (
-          <StatCard
-            key={card.key}
-            label={card.label}
-            icon={card.icon}
-            available={card.available}
-            unavailableReason={card.unavailableReason}
+            variant="hero"
           />
         ))}
       </section>
 
-      <section className="dashboard-main-grid">
-        <StonePanel title="Tracker Health" subtitle="Live worker status is merged with the dashboard health snapshot.">
-          <div className="dashboard-health-grid">
-            {dashboard.healthCards.map((item) => (
-              <StatusBlock key={item.key} item={item} />
-            ))}
-          </div>
-          {dashboard.liveStatus.loading ? <StatusPill tone="info" loading>Connecting to live status...</StatusPill> : null}
-          {dashboard.liveStatus.error ? (
-            <div className="live-status-note">
-              <StatusPill tone={dashboard.liveStatus.stale ? "warning" : "danger"}>
-                {dashboard.liveStatus.stale ? "Showing last known worker status." : "Live worker status unavailable."}
-              </StatusPill>
-              <BeveledButton variant="ghost" onClick={onRetryLive}>Retry live status</BeveledButton>
-            </div>
-          ) : null}
-        </StonePanel>
-
+      <section className="dashboard-operations-grid">
         <StonePanel
           title="Pending Admin Work"
-          subtitle="Current review and promotion work from the existing admin queue preview."
-          actions={<BeveledButton variant="primary" onClick={onOpenQueue}>Review</BeveledButton>}
+          icon="review"
+          variant="featured"
+          actions={<BeveledButton variant="secondary" icon="review" onClick={onOpenQueue}>Open Queue</BeveledButton>}
         >
           {dashboard.workItems.length ? (
-            <ul className="dashboard-card-list">
+            <ul className="dashboard-work-grid">
               {dashboard.workItems.map((item) => (
-                <li key={item.key} className="dashboard-work-item">
-                  <div>
+                <li key={item.key} className="dashboard-work-card">
+                  <span className="dashboard-work-icon" aria-hidden="true">{workIconForTone(item.tone)}</span>
+                  <div className="dashboard-work-copy">
                     <strong>{item.label}</strong>
                     <p>{item.detail || "No case detail available"}</p>
                   </div>
@@ -108,14 +87,31 @@ export function DashboardSurface({ data, liveStatus, loading, error, onRetry, on
             <EmptyFeatureState title="No admin work waiting" message="The current dashboard preview returned no open work items." />
           )}
         </StonePanel>
+
+        <StonePanel title="Tracker Health" icon="readiness" variant="featured">
+          <div className="dashboard-health-grid">
+            {dashboard.healthCards.map((item) => (
+              <StatusBlock key={item.key} item={item} icon={dashboardIconForKey(item.key)} />
+            ))}
+          </div>
+          {dashboard.liveStatus.loading ? <StatusPill tone="info" loading>Connecting to live status...</StatusPill> : null}
+          {dashboard.liveStatus.error ? (
+            <div className="live-status-note">
+              <StatusPill tone={dashboard.liveStatus.stale ? "warning" : "danger"}>
+                {dashboard.liveStatus.stale ? "Showing last known worker status." : "Live worker status unavailable."}
+              </StatusPill>
+              <BeveledButton variant="ghost" icon="refresh" onClick={onRetryLive}>Retry live status</BeveledButton>
+            </div>
+          ) : null}
+        </StonePanel>
       </section>
 
-      <section className="dashboard-main-grid">
-        <StonePanel title="Roster Posture" subtitle="Counts supported by the current home endpoint.">
+      <section className="dashboard-support-grid">
+        <StonePanel title="Roster Posture" icon="members">
           {dashboard.postureCards.length ? (
             <div className="dashboard-posture-grid">
               {dashboard.postureCards.map((item) => (
-                <StatusBlock key={item.key} item={item} />
+                <StatusBlock key={item.key} item={item} compact />
               ))}
             </div>
           ) : (
@@ -123,16 +119,20 @@ export function DashboardSurface({ data, liveStatus, loading, error, onRetry, on
           )}
         </StonePanel>
 
-        <StonePanel title="Future Tracking" subtitle="Shown as unavailable because the current backend does not collect these metrics.">
-          <div className="dashboard-unavailable-grid">
+        <StonePanel title="Future Telemetry" icon="future" variant="muted" compact>
+          <div className="dashboard-future-strip">
+            {dashboard.futureStats.map((card) => (
+              <UnavailableMetric key={card.key} label={card.label} reason={card.unavailableReason} />
+            ))}
             <UnavailableMetric label="Drops and splits" reason="Requires a drops/splits source and persisted domain model." />
             <UnavailableMetric label="Competitions" reason="Requires competition rules, participants, and scoring windows." />
           </div>
         </StonePanel>
       </section>
 
-      <StonePanel title="Recent Meaningful Clan Changes" subtitle="Current lifecycle highlights from the existing dashboard response.">
+      <StonePanel title="Recent Clan Activity" icon="activity" variant="table">
         <DataTable
+          className="dashboard-activity-table"
           columns={[
             { key: "event", header: "Event" },
             { key: "category", header: "Category", render: (row) => <StatusPill tone={row.tone}>{row.category}</StatusPill> },
@@ -141,15 +141,17 @@ export function DashboardSurface({ data, liveStatus, loading, error, onRetry, on
           rows={dashboard.recentChanges}
           emptyTitle="No recent changes"
           emptyMessage="No meaningful clan changes were recorded in the current window."
+          footer={<span>Current dashboard feed from the existing home endpoint.</span>}
         />
       </StonePanel>
     </div>
   );
 }
 
-function StatusBlock({ item }) {
+function StatusBlock({ item, icon, compact = false }) {
   return (
-    <div className="dashboard-status-block">
+    <div className={compact ? "dashboard-status-block dashboard-status-block-compact" : "dashboard-status-block"}>
+      {icon ? <span className={`dashboard-status-icon dashboard-status-icon-${icon}`} aria-hidden="true" /> : null}
       <div>
         <span>{item.label}</span>
         <strong>{item.value}</strong>
@@ -166,6 +168,28 @@ function toneLabel(tone) {
   if (tone === "danger") return "Issue";
   if (tone === "info") return "Info";
   return "OK";
+}
+
+function dashboardIconForKey(key) {
+  const icons = {
+    "tracked-members": "members",
+    "pending-promotions": "rank",
+    "open-admin-cases": "review",
+    overall: "readiness",
+    api: "status",
+    worker: "refresh",
+    "latest-sync": "activity",
+    "latest-event": "scroll",
+  };
+
+  return icons[key] ?? "default";
+}
+
+function workIconForTone(tone) {
+  if (tone === "danger") return "!";
+  if (tone === "warning") return "?";
+  if (tone === "success") return "✓";
+  return "•";
 }
 
 function SurfaceMessage({ title, text, tone, action = null, loading = false }) {

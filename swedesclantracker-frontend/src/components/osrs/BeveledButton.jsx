@@ -1,3 +1,5 @@
+import { IconGlyph } from "./IconGlyph";
+
 const variantClassByName = {
   primary: "osrs-button osrs-button-primary",
   secondary: "osrs-button osrs-button-secondary",
@@ -12,6 +14,7 @@ export function BeveledButton({
   type = "button",
   disabled = false,
   loading = false,
+  icon,
   className = "",
   ...props
 }) {
@@ -20,7 +23,8 @@ export function BeveledButton({
 
   return (
     <button type={type} className={classes} disabled={disabled || loading} {...props}>
-      {loading ? "Working..." : children}
+      {icon ? <IconGlyph name={icon} className="osrs-button-icon" /> : null}
+      <span>{loading ? "Working..." : children}</span>
     </button>
   );
 }

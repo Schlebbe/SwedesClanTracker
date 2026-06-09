@@ -30,7 +30,7 @@ export function MembersSurface({ rows, loading, error, onRetry, onOpenProfile })
         </div>
       </header>
 
-      <StonePanel>
+      <StonePanel icon="search" variant="toolbar" compact>
         <div className="members-toolbar">
           <input
             value={query}
@@ -72,7 +72,12 @@ export function MembersSurface({ rows, loading, error, onRetry, onOpenProfile })
             <SummaryItem label="Rank Mismatch" value={roster.summary.rankMismatch} tone={roster.summary.rankMismatch > 0 ? "danger" : "success"} state={roster.summary.rankMismatch > 0 ? "fix" : "clear"} />
           </section>
 
-          <StonePanel title="Roster" subtitle={`${filtered.length.toLocaleString()} of ${roster.summary.total.toLocaleString()} members shown`}>
+          <StonePanel
+            title="Roster"
+            icon="members"
+            actions={<StatusPill tone="info">{filtered.length.toLocaleString()} shown</StatusPill>}
+            variant="table"
+          >
             <DataTable
               className="members-table"
               columns={[
@@ -115,6 +120,7 @@ export function MembersSurface({ rows, loading, error, onRetry, onOpenProfile })
                   render: (row) => (
                     <BeveledButton
                       variant="ghost"
+                      icon="profile"
                       disabled={!row.id}
                       onClick={() => {
                         if (row.id) onOpenProfile(row.id);
@@ -128,6 +134,7 @@ export function MembersSurface({ rows, loading, error, onRetry, onOpenProfile })
               rows={filtered}
               emptyTitle="No members found"
               emptyMessage="No roster rows match the current search and status filter."
+              footer={<span>{roster.summary.total.toLocaleString()} total members from the current roster API response.</span>}
             />
           </StonePanel>
         </>
@@ -138,7 +145,7 @@ export function MembersSurface({ rows, loading, error, onRetry, onOpenProfile })
 
 function SummaryItem({ label, value, tone, state }) {
   return (
-    <div className="members-summary-item">
+    <div className={`members-summary-item members-summary-item-${tone}`}>
       <span>{label}</span>
       <strong>{value.toLocaleString()}</strong>
       <StatusPill tone={tone}>{state}</StatusPill>

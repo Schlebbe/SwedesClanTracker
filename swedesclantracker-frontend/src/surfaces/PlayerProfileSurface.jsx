@@ -80,7 +80,7 @@ export function PlayerProfileSurface({ player, loading, error, onRetry, onBackTo
             {profile.eligibleRank ? <span>Eligible: {profile.eligibleRank}</span> : null}
           </div>
         </div>
-        <BeveledButton variant="ghost" onClick={onBackToMembers}>Back to Members</BeveledButton>
+        <BeveledButton variant="ghost" icon="members" onClick={onBackToMembers}>Back to Members</BeveledButton>
       </header>
 
       <section className="profile-stat-grid">
@@ -99,7 +99,7 @@ export function PlayerProfileSurface({ player, loading, error, onRetry, onBackTo
 
       <section className="profile-main-grid">
         <div className="profile-main-stack">
-          <StonePanel title="Current State" subtitle="Real values from the player profile endpoint">
+          <StonePanel title="Current State" icon="profile">
             <dl className="profile-fact-grid">
               <div>
                 <dt>Username</dt>
@@ -130,7 +130,7 @@ export function PlayerProfileSurface({ player, loading, error, onRetry, onBackTo
             </dl>
           </StonePanel>
 
-          <StonePanel title="Latest Snapshot" subtitle="Only values exposed by the current profile API">
+          <StonePanel title="Latest Snapshot" icon="scroll" variant="table">
             {profile.latestSnapshot.available ? (
               <DataTable
                 columns={[
@@ -149,7 +149,7 @@ export function PlayerProfileSurface({ player, loading, error, onRetry, onBackTo
             )}
           </StonePanel>
 
-          <StonePanel title="Recent Events" subtitle="Latest lifecycle events tied to this player">
+          <StonePanel title="Recent Events" icon="activity" variant="table">
             <DataTable
               columns={[
                 {
@@ -178,7 +178,7 @@ export function PlayerProfileSurface({ player, loading, error, onRetry, onBackTo
         <aside className="profile-side-stack">
           <StonePanel
             title="Open Cases"
-            subtitle="Review and rank flags currently exposed"
+            icon="review"
             actions={<StatusPill tone={profile.openCases.length ? "warning" : "success"}>{profile.openCases.length}</StatusPill>}
           >
             {profile.openCases.length ? (
@@ -195,7 +195,7 @@ export function PlayerProfileSurface({ player, loading, error, onRetry, onBackTo
             )}
           </StonePanel>
 
-          <StonePanel title="Unavailable Profile Modules" subtitle="Shown only as future backend work">
+          <StonePanel title="Future Profile Modules" icon="future" variant="muted" compact>
             <div className="profile-unavailable-grid">
               {profile.futureSections.map((feature) => (
                 <UnavailableMetric key={feature.reason} label={feature.label} reason={feature.reason} />

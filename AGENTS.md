@@ -6,6 +6,10 @@
 
 ## Required reading before frontend implementation
 
+For the OSRS redesign, do not treat the existing frontend as the visual baseline. The existing frontend is legacy structure. It may be substantially rewritten as long as current behavior and real API data usage are preserved.
+
+A successful redesign should look substantially closer to the generated reference screenshots than to the previous dashboard. A dark theme over the existing layout is not sufficient.
+
 Before making frontend changes, read these files in order:
 
 ```text
@@ -23,6 +27,40 @@ docs/OSRS_TEXTURE_RESEARCH.md
 Also inspect the reference images folder before implementing UI work.
 
 If any of those files are missing, stop and report which ones are missing before continuing.
+
+## Local frontend preview against Pi API
+
+For local frontend visual checks, Codex may run the Vite dev server locally and proxy `/api` to the Raspberry Pi API.
+
+Read:
+
+```text
+docs/LOCAL_DEV_PROXY.md
+```
+
+If present, Codex may also read this untracked local-only file:
+
+```text
+docs/LOCAL_DEV_PRIVATE.md
+```
+
+`docs/LOCAL_DEV_PRIVATE.md` may contain temporary dev credentials for browser smoke checks. It must never be committed.
+
+For local frontend preview, use:
+
+```powershell
+cd swedesclantracker-frontend
+$env:VITE_API_PROXY_TARGET="http://192.168.10.106"
+npm run dev -- --host 127.0.0.1 --port 5173
+```
+
+Production safety rules:
+
+- Keep frontend API calls relative to `/api`.
+- Do not hard-code the Pi IP into production client code.
+- Do not modify `apiClient.js` for local preview.
+- Do not run Raspberry Pi deploy scripts unless the user explicitly asks.
+- Do not commit temporary usernames, passwords, tokens, cookies, or private connection details.
 
 ## Current implementation phase
 

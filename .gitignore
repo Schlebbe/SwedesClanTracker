@@ -31,7 +31,7 @@ scripts/windows/check-pi-db-readonly.ps1
 .agents/
 skills-lock.json
 docs/CODEX_TASKS.md
-
+docs/LOCAL_DEV_PRIVATE.md
 
 # Local environment and secret overrides (templates with .example stay tracked).
 .env

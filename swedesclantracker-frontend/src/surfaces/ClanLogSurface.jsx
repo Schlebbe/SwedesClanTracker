@@ -44,7 +44,7 @@ export function ClanLogSurface({ log, loading, error, onRetry }) {
 
       {!loading && !error ? (
         <>
-          <StonePanel className="activity-toolbar-panel">
+          <StonePanel icon="activity" className="activity-toolbar-panel" variant="toolbar" compact>
             <div className="activity-toolbar" aria-label="Activity log filters">
               {activity.filters.map((item) => (
                 <BeveledButton
@@ -61,9 +61,10 @@ export function ClanLogSurface({ log, loading, error, onRetry }) {
 
           <StonePanel
             title="Clan Activity"
-            subtitle="Real lifecycle projections from the current app API"
+            icon="activity"
             actions={<StatusPill tone={rows.length ? "info" : "neutral"}>{rows.length} shown</StatusPill>}
             className="activity-table-panel"
+            variant="table"
           >
             <DataTable
               columns={columns}
@@ -75,7 +76,7 @@ export function ClanLogSurface({ log, loading, error, onRetry }) {
           </StonePanel>
 
           {activity.summary.routine ? (
-            <StonePanel title="Routine Bundle" subtitle="Condensed sync and system entries from the same API response">
+            <StonePanel title="Routine Bundle" icon="scroll" variant="muted" compact>
               <p className="activity-routine-note">
                 {activity.summary.routine} routine entries are included under Sync/System and All.
               </p>

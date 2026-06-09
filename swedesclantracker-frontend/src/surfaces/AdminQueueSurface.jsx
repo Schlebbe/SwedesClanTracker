@@ -69,9 +69,10 @@ export function AdminQueueSurface({
               <StonePanel
                 key={group.id}
                 title={group.label}
-                subtitle={group.description}
+                icon={groupIcon(group.id)}
                 actions={<StatusPill tone={group.items.length ? "warning" : "success"}>{group.items.length}</StatusPill>}
                 className="review-group-panel"
+                variant="featured"
               >
                 {group.items.length ? (
                   <ul className="review-card-grid">
@@ -110,7 +111,7 @@ export function AdminQueueSurface({
             ))}
           </div>
 
-          <StonePanel title="Case Detail" subtitle="Evidence and decision notes" className="review-detail-panel">
+          <StonePanel title="Case Detail" icon="scroll" className="review-detail-panel" variant="table">
             {detailLoading ? <StatusPill tone="info" loading>Loading case detail...</StatusPill> : null}
 
             {detailError ? (
@@ -137,6 +138,13 @@ export function AdminQueueSurface({
       ) : null}
     </div>
   );
+}
+
+function groupIcon(id) {
+  if (id === "rsn-changes") return "review";
+  if (id === "missing-members") return "members";
+  if (id === "rank-reviews") return "rank";
+  return "scroll";
 }
 
 function ReviewCaseDetail({ detail }) {

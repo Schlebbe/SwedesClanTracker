@@ -1,3 +1,4 @@
+import { IconGlyph } from "../osrs/IconGlyph";
 import { StatusPill } from "../osrs/StatusPill";
 
 export function TopStatusBar({ home, liveStatus }) {
@@ -7,10 +8,16 @@ export function TopStatusBar({ home, liveStatus }) {
     <header className="osrs-topbar">
       <div className="osrs-topbar-status">
         <StatusPill tone={status.tone} loading={status.loading}>{status.label}</StatusPill>
-        {status.detail ? <span>{status.detail}</span> : null}
+        {status.detail ? <span className="osrs-topbar-sync">{status.detail}</span> : null}
       </div>
       <div className="osrs-topbar-admin" aria-label="Current session">
-        <span>Admin session</span>
+        <span className="osrs-topbar-emblem" aria-hidden="true">
+          <IconGlyph name="shield" />
+        </span>
+        <div>
+          <strong>Admin session</strong>
+          <span>Cookie auth active</span>
+        </div>
       </div>
     </header>
   );
