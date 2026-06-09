@@ -1,3 +1,5 @@
+import { cleanText, formatDisplayLabel, normalizeArray } from "./formatters";
+
 const filterLabels = {
   important: "Important",
   promotions: "Promotions",
@@ -28,7 +30,7 @@ export function mapClanLogToActivityLogViewModel(log) {
     subtitle: "Lifecycle and tracker events from the existing clan-log API.",
     filters: filters.map((filter) => ({
       id: filter,
-      label: filterLabels[filter] ?? formatLabel(filter),
+      label: filterLabels[filter] ?? formatDisplayLabel(filter),
     })),
     rows: allRows,
     importantRows,
@@ -113,35 +115,19 @@ function mapAction(item) {
 }
 
 function statusLabelForGroup(group) {
-  if (group === "Promotion") return "Promotion";
-  if (group === "Review") return "Review";
-  if (group === "Roster") return "Roster";
-  if (group === "System") return "System";
+  const normalized = cleanText(group, "").toLowerCase();
+  if (normalized === "promotion") return "Promotion";
+  if (normalized === "review") return "Review";
+  if (normalized === "roster") return "Roster";
+  if (normalized === "system") return "System";
   return "General";
 }
 
 function toneForGroup(group) {
-  if (group === "Promotion") return "success";
-  if (group === "Review") return "warning";
-  if (group === "Roster") return "info";
-  if (group === "System") return "info";
+  const normalized = cleanText(group, "").toLowerCase();
+  if (normalized === "promotion") return "success";
+  if (normalized === "review") return "warning";
+  if (normalized === "roster") return "info";
+  if (normalized === "system") return "info";
   return "neutral";
-}
-
-function formatLabel(value) {
-  return cleanText(value, "Unknown")
-    .split(/[\s_-]+/)
-    .filter(Boolean)
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-    .join(" ");
-}
-
-function cleanText(value, fallback = "") {
-  if (value === null || value === undefined) return fallback;
-  const text = String(value).trim();
-  return text.length ? text : fallback;
-}
-
-function normalizeArray(value) {
-  return Array.isArray(value) ? value : [];
 }

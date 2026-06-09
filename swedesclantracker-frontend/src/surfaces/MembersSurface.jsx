@@ -112,7 +112,17 @@ export function MembersSurface({ rows, loading, error, onRetry, onOpenProfile })
                 {
                   key: "actions",
                   header: "Actions",
-                  render: (row) => <BeveledButton variant="ghost" onClick={() => onOpenProfile(row.id)}>Open</BeveledButton>,
+                  render: (row) => (
+                    <BeveledButton
+                      variant="ghost"
+                      disabled={!row.id}
+                      onClick={() => {
+                        if (row.id) onOpenProfile(row.id);
+                      }}
+                    >
+                      Open
+                    </BeveledButton>
+                  ),
                 },
               ]}
               rows={filtered}

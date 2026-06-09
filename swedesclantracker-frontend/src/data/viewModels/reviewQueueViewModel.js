@@ -1,3 +1,5 @@
+import { cleanText, normalizeArray, riskTone } from "./formatters";
+
 const REVIEW_GROUPS = [
   {
     id: "rsn-changes",
@@ -20,14 +22,21 @@ const REVIEW_GROUPS = [
 ];
 
 export function mapAdminQueueToReviewQueueViewModel(cases = [], selectedCase = null, selectedCaseId = "") {
-  const items = Array.isArray(cases) ? cases.map(mapListItem) : [];
+  const items = normalizeArray(cases).map(mapListItem);
+  const itemsByGroup = items.reduce((groups, item) => {
+    const groupId = findReviewGroupId(item);
+    const bucket = groups.get(groupId) ?? [];
+    bucket.push(item);
+    groups.set(groupId, bucket);
+    return groups;
+  }, new Map());
+
   const groupedItems = REVIEW_GROUPS.map((group) => ({
     ...group,
-    items: items.filter(group.matches),
+    items: itemsByGroup.get(group.id) ?? [],
   }));
 
-  const knownItemIds = new Set(groupedItems.flatMap((group) => group.items.map((item) => item.id)));
-  const uncategorizedItems = items.filter((item) => !knownItemIds.has(item.id));
+  const uncategorizedItems = itemsByGroup.get("other-reviews") ?? [];
   const groups = uncategorizedItems.length
     ? [
         ...groupedItems,
@@ -40,7 +49,7 @@ export function mapAdminQueueToReviewQueueViewModel(cases = [], selectedCase = n
       ]
     : groupedItems;
 
-  const selectedSummary = items.find((item) => item.id === selectedCaseId) ?? null;
+  const selectedSummary = items.find((item) => item.caseId === selectedCaseId) ?? null;
 
   return {
     totalCount: items.length,
@@ -49,18 +58,21 @@ export function mapAdminQueueToReviewQueueViewModel(cases = [], selectedCase = n
   };
 }
 
-function mapListItem(item) {
+function mapListItem(item, index) {
   const risk = cleanText(item?.risk, "unknown").toLowerCase();
   const confidence = cleanText(item?.confidence, "");
+  const caseId = cleanText(item?.id, "");
 
   return {
-    id: cleanText(item?.id, ""),
+    id: caseId || `case-${index}`,
+    caseId,
+    canOpenDetail: Boolean(caseId),
     type: cleanText(item?.type, "review"),
     lane: cleanText(item?.lane, "inspect"),
     player: cleanText(item?.player, "Unknown player"),
     title: cleanText(item?.title, "Review case"),
     risk,
-    riskTone: mapRiskTone(risk),
+    riskTone: riskTone(risk),
     confidenceLabel: confidence,
     age: cleanText(item?.age, "unknown age"),
     recommendedAction: cleanText(item?.recommendedAction, ""),
@@ -94,7 +106,7 @@ function mapDetailItem(detail, summary) {
     player: cleanText(source?.player, summary?.player ?? "Unknown player"),
     title: cleanText(source?.title, summary?.title ?? "Review case"),
     risk,
-    riskTone: mapRiskTone(risk),
+    riskTone: riskTone(risk),
     confidenceLabel: cleanText(source?.confidence, summary?.confidenceLabel ?? ""),
     age: cleanText(source?.age, summary?.age ?? "unknown age"),
     recommendedAction: cleanText(source?.recommendedAction, summary?.recommendedAction ?? ""),
@@ -108,21 +120,10 @@ function includesAny(item, terms) {
   return terms.some((term) => item.searchText.includes(term));
 }
 
-function cleanText(value, fallback = "") {
-  if (value === null || value === undefined) return fallback;
-  const text = String(value).trim();
-  return text.length ? text : fallback;
+function findReviewGroupId(item) {
+  return REVIEW_GROUPS.find((group) => group.matches(item))?.id ?? "other-reviews";
 }
 
 function normalizeList(value) {
-  return Array.isArray(value)
-    ? value.map((item) => cleanText(item, "")).filter(Boolean)
-    : [];
-}
-
-function mapRiskTone(risk) {
-  if (risk === "high") return "danger";
-  if (risk === "medium") return "warning";
-  if (risk === "low") return "success";
-  return "neutral";
+  return normalizeArray(value).map((item) => cleanText(item, "")).filter(Boolean);
 }

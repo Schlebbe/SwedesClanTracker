@@ -1,3 +1,5 @@
+import { cleanText, formatDateTime, formatDisplayLabel, statusTone } from "./formatters";
+
 export function mapRosterToRosterViewModel(rows) {
   const safeRows = Array.isArray(rows) ? rows : [];
   const mappedRows = safeRows.map(mapRosterRow);
@@ -5,7 +7,7 @@ export function mapRosterToRosterViewModel(rows) {
     .sort((left, right) => left.localeCompare(right))
     .map((status) => ({
       value: status,
-      label: formatStatusLabel(status),
+      label: formatDisplayLabel(status),
     }));
 
   return {
@@ -25,16 +27,17 @@ export function mapRosterToRosterViewModel(rows) {
 
 function mapRosterRow(row) {
   const flags = buildFlags(row);
+  const statusRaw = cleanText(row.status, "UNKNOWN");
 
   return {
-    id: row.id,
-    username: row.username ?? "Unknown",
-    rank: row.rank ?? "Unknown",
-    statusRaw: row.status ?? "UNKNOWN",
-    statusLabel: formatStatusLabel(row.status),
-    statusTone: statusTone(row.status),
-    lastSync: formatDate(row.lastSync),
-    lastSeen: formatDate(row.lastSeen),
+    id: row.id ?? null,
+    username: cleanText(row.username, "Unknown"),
+    rank: cleanText(row.rank, "Unknown"),
+    statusRaw,
+    statusLabel: formatDisplayLabel(statusRaw),
+    statusTone: statusTone(statusRaw),
+    lastSync: formatDateTime(row.lastSync),
+    lastSeen: formatDateTime(row.lastSeen),
     isSyncStale: Boolean(row.isSyncStale),
     hasOpenReviewCase: Boolean(row.hasOpenReviewCase),
     hasPendingPromotion: Boolean(row.hasPendingPromotion),
@@ -67,50 +70,4 @@ function buildFlags(row) {
   }
 
   return flags;
-}
-
-function formatDate(value) {
-  if (!value) {
-    return "Unknown";
-  }
-
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return "Unknown";
-  }
-
-  return date.toLocaleString("sv-SE");
-}
-
-function statusTone(value) {
-  if (typeof value !== "string") {
-    return "neutral";
-  }
-
-  if (value.includes("MISSING") || value.includes("MISMATCH")) {
-    return "danger";
-  }
-
-  if (value.includes("REVIEW") || value.includes("MERGE") || value.includes("PENDING")) {
-    return "warning";
-  }
-
-  if (value.includes("ACTIVE")) {
-    return "success";
-  }
-
-  return "info";
-}
-
-function formatStatusLabel(value) {
-  if (typeof value !== "string" || !value.trim()) {
-    return "Unknown";
-  }
-
-  return value
-    .trim()
-    .split(/[\s_-]+/)
-    .filter(Boolean)
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-    .join(" ");
 }

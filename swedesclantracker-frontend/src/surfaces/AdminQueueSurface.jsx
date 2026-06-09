@@ -78,8 +78,12 @@ export function AdminQueueSurface({
                     {group.items.map((item) => (
                       <li key={item.id}>
                         <button
-                          className={selectedCaseId === item.id ? "review-card review-card-active" : "review-card"}
-                          onClick={() => onSelectCase(item.id)}
+                          type="button"
+                          className={selectedCaseId === item.caseId ? "review-card review-card-active" : "review-card"}
+                          disabled={!item.canOpenDetail}
+                          onClick={() => {
+                            if (item.canOpenDetail) onSelectCase(item.caseId);
+                          }}
                         >
                           <span className="review-card-head">
                             <small>{item.type}</small>

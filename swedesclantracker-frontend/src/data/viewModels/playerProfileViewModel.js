@@ -1,3 +1,5 @@
+import { cleanText, formatDateParts, formatDisplayLabel, normalizeArray, statusTone } from "./formatters";
+
 export const playerProfileFeatureAvailability = {
   totalXp: {
     label: "Total XP",
@@ -48,8 +50,8 @@ export function mapPlayerProfileToViewModel(player) {
   if (!player) return null;
 
   const statusRaw = cleanText(player.status, "UNKNOWN");
-  const lastSync = formatDate(player.lastSync);
-  const lastSeen = formatDate(player.lastSeen);
+  const lastSync = formatDateParts(player.lastSync);
+  const lastSeen = formatDateParts(player.lastSeen);
   const openCases = normalizeArray(player.openCases).map(mapOpenCase);
   const recentEvents = normalizeArray(player.recentEvents).map(mapRecentEvent);
   const latestSnapshot = mapLatestSnapshot(player);
@@ -60,7 +62,7 @@ export function mapPlayerProfileToViewModel(player) {
     username: cleanText(player.username, "Unknown player"),
     currentRank: cleanText(player.currentRank, "Unknown"),
     eligibleRank: cleanText(player.eligibleRank, ""),
-    statusLabel: formatLabel(statusRaw),
+    statusLabel: formatDisplayLabel(statusRaw),
     statusTone: statusTone(statusRaw),
     lastSync,
     lastSeen,
@@ -136,7 +138,7 @@ function mapRecentEvent(item, index) {
   return {
     id: item?.id ?? `event-${index}`,
     title: cleanText(item?.title, "Player event"),
-    occurredAt: formatDate(item?.occurredAt),
+    occurredAt: formatDateParts(item?.occurredAt),
     timeAgo: cleanText(item?.timeAgo, ""),
     tone: "info",
   };
@@ -169,61 +171,10 @@ function caseTone(type) {
   return "neutral";
 }
 
-function statusTone(value) {
-  if (typeof value !== "string") return "neutral";
-  if (value.includes("MISSING") || value.includes("MISMATCH")) return "danger";
-  if (value.includes("REVIEW") || value.includes("MERGE") || value.includes("PENDING")) return "warning";
-  if (value.includes("ACTIVE")) return "success";
-  return "info";
-}
-
-function formatDate(value) {
-  if (!value) {
-    return {
-      available: false,
-      short: "Unknown",
-      full: "Timestamp unavailable",
-    };
-  }
-
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return {
-      available: false,
-      short: "Unknown",
-      full: "Timestamp unavailable",
-    };
-  }
-
-  return {
-    available: true,
-    short: date.toLocaleDateString("sv-SE"),
-    full: date.toLocaleString("sv-SE"),
-  };
-}
-
 function formatSnapshotValue(value) {
   if (typeof value === "number") {
     return Number.isInteger(value) ? value.toLocaleString() : value.toLocaleString(undefined, { maximumFractionDigits: 2 });
   }
 
   return String(value);
-}
-
-function formatLabel(value) {
-  return cleanText(value, "Unknown")
-    .split(/[\s_-]+/)
-    .filter(Boolean)
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-    .join(" ");
-}
-
-function cleanText(value, fallback = "") {
-  if (value === null || value === undefined) return fallback;
-  const text = String(value).trim();
-  return text.length ? text : fallback;
-}
-
-function normalizeArray(value) {
-  return Array.isArray(value) ? value : [];
 }

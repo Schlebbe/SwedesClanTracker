@@ -155,9 +155,17 @@ function StatusBlock({ item }) {
         <strong>{item.value}</strong>
         {item.detail ? <p>{item.detail}</p> : null}
       </div>
-      <StatusPill tone={item.tone}>{item.tone}</StatusPill>
+      <StatusPill tone={item.tone}>{item.statusLabel ?? toneLabel(item.tone)}</StatusPill>
     </div>
   );
+}
+
+function toneLabel(tone) {
+  if (tone === "success") return "Clear";
+  if (tone === "warning") return "Watch";
+  if (tone === "danger") return "Issue";
+  if (tone === "info") return "Info";
+  return "OK";
 }
 
 function SurfaceMessage({ title, text, tone, action = null, loading = false }) {
