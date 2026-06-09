@@ -1200,6 +1200,160 @@ select:focus-visible {
   padding-top: 0.8rem;
 }
 
+.profile-surface {
+  gap: 1.05rem;
+}
+
+.profile-hero {
+  border: 1px solid var(--osrs-border-muted);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, rgba(241, 212, 134, 0.055), transparent 48%),
+    var(--osrs-panel);
+  box-shadow:
+    inset 0 1px 0 rgba(241, 212, 134, 0.08),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.38);
+  padding: 1rem;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 1rem;
+}
+
+.profile-avatar {
+  width: 76px;
+  aspect-ratio: 1;
+  border: 1px solid var(--osrs-border);
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  color: var(--osrs-gold-bright);
+  font-size: 2rem;
+  font-weight: 800;
+  background: linear-gradient(145deg, #302418, #15100b);
+  box-shadow: inset 0 1px 0 rgba(241, 212, 134, 0.16), 0 6px 14px rgba(0, 0, 0, 0.22);
+}
+
+.profile-title-block {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.profile-title-block h2 {
+  margin: 0;
+  color: var(--osrs-gold-bright);
+  font-size: 1.55rem;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.profile-status-line,
+.profile-action-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.profile-status-line span:not(.osrs-pill) {
+  color: var(--osrs-text-muted);
+}
+
+.profile-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.profile-main-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(300px, 0.75fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+.profile-main-stack,
+.profile-side-stack {
+  display: grid;
+  gap: 1rem;
+}
+
+.profile-side-stack {
+  position: sticky;
+  top: 1rem;
+}
+
+.profile-fact-grid {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.profile-fact-grid div {
+  border: 1px solid var(--osrs-border-muted);
+  border-radius: 7px;
+  background: var(--osrs-panel-2);
+  padding: 0.62rem 0.66rem;
+}
+
+.profile-fact-grid dt {
+  color: var(--osrs-text-muted);
+  font-size: 0.78rem;
+}
+
+.profile-fact-grid dd {
+  margin: 0.14rem 0 0;
+  color: var(--osrs-text);
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.profile-case-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.profile-case-list li {
+  border: 1px solid var(--osrs-border-muted);
+  border-radius: 7px;
+  background: var(--osrs-panel-2);
+  padding: 0.62rem 0.66rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.profile-case-list span:not(.osrs-pill) {
+  color: var(--osrs-text);
+  overflow-wrap: anywhere;
+}
+
+.profile-event-cell {
+  display: grid;
+  gap: 0.18rem;
+}
+
+.profile-event-cell strong {
+  color: var(--osrs-text);
+  overflow-wrap: anywhere;
+}
+
+.profile-event-cell span {
+  color: var(--osrs-text-muted);
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.profile-unavailable-grid {
+  display: grid;
+  gap: 0.72rem;
+}
+
 .log-item {
   align-items: flex-start;
   gap: 0.85rem;
@@ -1273,16 +1427,22 @@ select:focus-visible {
 
   .queue-layout,
   .review-layout,
+  .profile-main-grid,
   .layout-two,
   .dashboard-main-grid {
     grid-template-columns: 1fr;
   }
 
-  .review-detail-panel {
+  .review-detail-panel,
+  .profile-side-stack {
     position: static;
   }
 
   .dashboard-stat-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .profile-stat-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -1307,6 +1467,9 @@ select:focus-visible {
   .review-header,
   .review-card-grid,
   .review-detail-grid,
+  .profile-hero,
+  .profile-stat-grid,
+  .profile-fact-grid,
   .health-grid,
   .posture-grid,
   .dashboard-header,
