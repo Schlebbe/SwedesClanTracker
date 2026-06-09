@@ -17,6 +17,19 @@
   --osrs-blue: #7d9fc7;
   --osrs-shadow: rgba(0, 0, 0, 0.45);
   --osrs-focus: #f1d486;
+  --osrs-noise-svg: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='64' viewBox='0 0 64 64'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.78' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='64' height='64' filter='url(%23n)' opacity='.24'/%3E%3C/svg%3E");
+  --osrs-panel-texture:
+    linear-gradient(180deg, rgba(255, 239, 182, 0.045), rgba(0, 0, 0, 0.18) 76%),
+    radial-gradient(circle at 18% 0%, rgba(215, 181, 109, 0.08), transparent 30%),
+    radial-gradient(circle at 92% 100%, rgba(88, 62, 30, 0.22), transparent 38%),
+    var(--osrs-noise-svg);
+  --osrs-brass-bevel:
+    linear-gradient(180deg, rgba(255, 239, 182, 0.36), rgba(111, 84, 38, 0.18) 44%, rgba(0, 0, 0, 0.38));
+  --osrs-inset-depth:
+    inset 0 1px 0 rgba(255, 239, 182, 0.12),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.62),
+    inset 1px 0 0 rgba(255, 239, 182, 0.035),
+    inset -1px 0 0 rgba(0, 0, 0, 0.42);
   --primary-accent: var(--osrs-gold);
   --primary-accent-border: var(--osrs-border);
   --primary-accent-hover: var(--osrs-gold-bright);
@@ -51,10 +64,14 @@ body {
   line-height: 1.5;
   overflow-wrap: anywhere;
   background:
+    radial-gradient(90% 70% at 62% 0%, rgba(215, 181, 109, 0.09), transparent 42%),
+    radial-gradient(90% 85% at 0% 48%, rgba(60, 45, 24, 0.22), transparent 54%),
     linear-gradient(90deg, rgba(111, 84, 38, 0.12) 1px, transparent 1px),
     linear-gradient(180deg, rgba(111, 84, 38, 0.08) 1px, transparent 1px),
+    var(--osrs-noise-svg),
     radial-gradient(120% 100% at 50% -20%, #2b2115 0%, #17130e 38%, #0f0d0a 100%);
-  background-size: 28px 28px, 28px 28px, auto;
+  background-size: auto, auto, 28px 28px, 28px 28px, 64px 64px, auto;
+  background-blend-mode: normal, normal, normal, normal, soft-light, normal;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -101,9 +118,16 @@ select:focus-visible {
   min-height: 100vh;
   border-right: 1px solid var(--osrs-border);
   background:
-    linear-gradient(180deg, rgba(36, 28, 19, 0.92), rgba(15, 13, 10, 0.96)),
+    linear-gradient(90deg, rgba(255, 239, 182, 0.03), transparent 16%, rgba(0, 0, 0, 0.28) 100%),
+    radial-gradient(circle at 50% 0%, rgba(215, 181, 109, 0.08), transparent 28%),
+    var(--osrs-noise-svg),
+    linear-gradient(180deg, rgba(36, 28, 19, 0.96), rgba(15, 13, 10, 0.98)),
     var(--osrs-bg-soft);
-  box-shadow: inset -1px 0 0 rgba(0, 0, 0, 0.7);
+  background-blend-mode: normal, soft-light, multiply, normal, normal;
+  box-shadow:
+    inset -1px 0 0 rgba(0, 0, 0, 0.78),
+    inset -4px 0 14px rgba(0, 0, 0, 0.34),
+    8px 0 24px rgba(0, 0, 0, 0.24);
   padding: 1rem 0;
   display: flex;
   flex-direction: column;
@@ -113,6 +137,12 @@ select:focus-visible {
   min-height: 148px;
   padding: 0.9rem 1rem 1.05rem;
   border-bottom: 1px solid var(--osrs-border-muted);
+  background:
+    linear-gradient(180deg, rgba(255, 239, 182, 0.04), rgba(0, 0, 0, 0.08)),
+    rgba(15, 13, 10, 0.28);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 239, 182, 0.06),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.58);
   display: grid;
   place-items: center;
   text-align: center;
@@ -129,8 +159,14 @@ select:focus-visible {
   color: var(--osrs-gold-bright);
   font-weight: 800;
   letter-spacing: 0.04em;
-  background: linear-gradient(145deg, #2d2317, #16110c);
-  box-shadow: inset 0 1px 0 rgba(241, 212, 134, 0.18), 0 8px 18px rgba(0, 0, 0, 0.28);
+  background:
+    radial-gradient(circle at 36% 24%, rgba(241, 212, 134, 0.16), transparent 34%),
+    var(--osrs-noise-svg),
+    linear-gradient(145deg, #2d2317, #16110c);
+  background-blend-mode: normal, soft-light, normal;
+  box-shadow:
+    var(--osrs-inset-depth),
+    0 8px 18px rgba(0, 0, 0, 0.28);
 }
 
 .osrs-sidebar-brand strong {
@@ -188,8 +224,14 @@ select:focus-visible {
 .nav-item-active {
   color: var(--osrs-gold-bright);
   border-color: var(--osrs-border-muted);
-  background: linear-gradient(90deg, rgba(215, 181, 109, 0.22), rgba(215, 181, 109, 0.04));
-  box-shadow: inset 3px 0 0 var(--osrs-gold);
+  background:
+    linear-gradient(90deg, rgba(215, 181, 109, 0.28), rgba(215, 181, 109, 0.055)),
+    var(--osrs-noise-svg);
+  background-blend-mode: normal, soft-light;
+  box-shadow:
+    inset 3px 0 0 var(--osrs-gold),
+    inset 0 1px 0 rgba(255, 239, 182, 0.08),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.45);
 }
 
 .osrs-nav-item:disabled,
@@ -224,7 +266,16 @@ select:focus-visible {
 .osrs-topbar {
   min-height: 72px;
   border-bottom: 1px solid var(--osrs-border);
-  background: rgba(15, 13, 10, 0.86);
+  background:
+    linear-gradient(180deg, rgba(255, 239, 182, 0.05), transparent 48%, rgba(0, 0, 0, 0.28)),
+    radial-gradient(circle at 16% 0%, rgba(215, 181, 109, 0.06), transparent 34%),
+    var(--osrs-noise-svg),
+    rgba(15, 13, 10, 0.9);
+  background-blend-mode: normal, soft-light, multiply, normal;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 239, 182, 0.08),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.72),
+    0 8px 20px rgba(0, 0, 0, 0.18);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -252,6 +303,9 @@ select:focus-visible {
 .osrs-content,
 .app-stage {
   padding: 1.35rem;
+  background:
+    radial-gradient(85% 60% at 50% 0%, rgba(111, 84, 38, 0.08), transparent 56%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.08), transparent 9rem);
 }
 
 .surface-grid {
@@ -297,12 +351,13 @@ select:focus-visible {
   border: 1px solid var(--osrs-border-muted);
   border-radius: 8px;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent 42%),
+    var(--osrs-panel-texture),
     var(--osrs-panel);
+  background-blend-mode: overlay, soft-light, normal, multiply, normal;
   box-shadow:
-    inset 0 1px 0 rgba(241, 212, 134, 0.08),
+    var(--osrs-inset-depth),
     inset 0 0 0 1px rgba(0, 0, 0, 0.38),
-    0 8px 22px rgba(0, 0, 0, 0.18);
+    0 8px 22px rgba(0, 0, 0, 0.22);
   padding: 1rem;
 }
 
@@ -320,6 +375,9 @@ select:focus-visible {
   align-items: start;
   gap: 1rem;
   margin-bottom: 0.85rem;
+  border-bottom: 1px solid rgba(111, 84, 38, 0.36);
+  padding-bottom: 0.66rem;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.48);
 }
 
 .osrs-panel-header h3,
@@ -350,6 +408,11 @@ select:focus-visible {
   border-radius: 6px;
   padding: 0 0.85rem;
   font-weight: 650;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 247, 202, 0.18),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.48),
+    0 4px 10px rgba(0, 0, 0, 0.18);
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.36);
   transition-property: background-color, border-color, color, transform;
   transition-duration: 150ms;
   transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
@@ -365,27 +428,44 @@ select:focus-visible {
 .btn-primary {
   border: 1px solid var(--osrs-border);
   color: #18110a;
-  background: linear-gradient(180deg, var(--osrs-gold-bright), var(--osrs-gold));
-  box-shadow: inset 0 1px 0 rgba(255, 247, 202, 0.36);
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, 0.16), transparent 22%, rgba(0, 0, 0, 0.12) 100%),
+    var(--osrs-brass-bevel),
+    linear-gradient(180deg, var(--osrs-gold-bright), var(--osrs-gold));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 247, 202, 0.46),
+    inset 0 -2px 0 rgba(92, 61, 20, 0.46),
+    0 4px 10px rgba(0, 0, 0, 0.22);
+  text-shadow: 0 1px 0 rgba(255, 239, 182, 0.22);
 }
 
 .osrs-button-secondary,
 .btn-ghost {
   border: 1px solid var(--osrs-border);
   color: var(--osrs-text);
-  background: linear-gradient(180deg, #2d2418, #1b150f);
+  background:
+    linear-gradient(180deg, rgba(255, 239, 182, 0.075), rgba(0, 0, 0, 0.24)),
+    var(--osrs-noise-svg),
+    linear-gradient(180deg, #2d2418, #1b150f);
+  background-blend-mode: normal, soft-light, normal;
 }
 
 .osrs-button-ghost {
   border: 1px solid var(--osrs-border-muted);
   color: var(--osrs-text-muted);
-  background: rgba(15, 13, 10, 0.2);
+  background:
+    linear-gradient(180deg, rgba(255, 239, 182, 0.035), rgba(0, 0, 0, 0.18)),
+    rgba(15, 13, 10, 0.28);
 }
 
 .osrs-button-danger {
   border: 1px solid color-mix(in oklab, var(--osrs-red) 62%, #1b150f);
   color: #f6c6bd;
-  background: linear-gradient(180deg, #3b1813, #21100d);
+  background:
+    linear-gradient(180deg, rgba(255, 197, 178, 0.07), rgba(0, 0, 0, 0.28)),
+    var(--osrs-noise-svg),
+    linear-gradient(180deg, #3b1813, #21100d);
+  background-blend-mode: normal, soft-light, normal;
 }
 
 .osrs-button-disabled,
@@ -394,9 +474,12 @@ select:focus-visible {
 .btn-ghost:disabled {
   border: 1px solid var(--osrs-border-muted);
   color: var(--osrs-text-dim);
-  background: #18130e;
+  background:
+    linear-gradient(180deg, rgba(255, 239, 182, 0.025), rgba(0, 0, 0, 0.18)),
+    #18130e;
   opacity: 0.72;
   transform: none;
+  box-shadow: inset 0 1px 0 rgba(255, 239, 182, 0.04);
 }
 
 .osrs-button:not(:disabled):hover,
@@ -467,7 +550,13 @@ select:focus-visible {
   min-height: 146px;
   border: 1px solid var(--osrs-border-muted);
   border-radius: 8px;
-  background: var(--osrs-panel);
+  background:
+    var(--osrs-panel-texture),
+    var(--osrs-panel);
+  background-blend-mode: overlay, soft-light, normal, multiply, normal;
+  box-shadow:
+    var(--osrs-inset-depth),
+    0 6px 16px rgba(0, 0, 0, 0.18);
   padding: 1rem;
   display: grid;
   align-content: start;
@@ -531,7 +620,12 @@ select:focus-visible {
 .dashboard-work-item {
   border: 1px solid var(--osrs-border-muted);
   border-radius: 7px;
-  background: var(--osrs-panel-2);
+  background:
+    linear-gradient(180deg, rgba(255, 239, 182, 0.035), rgba(0, 0, 0, 0.16)),
+    var(--osrs-panel-2);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 239, 182, 0.055),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.42);
   padding: 0.72rem;
 }
 
@@ -630,7 +724,12 @@ select:focus-visible {
 .members-summary-item {
   border: 1px solid var(--osrs-border-muted);
   border-radius: 7px;
-  background: var(--osrs-panel);
+  background:
+    linear-gradient(180deg, rgba(255, 239, 182, 0.035), rgba(0, 0, 0, 0.14)),
+    var(--osrs-panel);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 239, 182, 0.055),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.38);
   padding: 0.74rem;
   display: grid;
   gap: 0.32rem;
@@ -710,6 +809,10 @@ select:focus-visible {
 .osrs-table-wrap,
 .table-wrap {
   overflow-x: auto;
+  border-radius: 7px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 239, 182, 0.045),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.45);
 }
 
 .osrs-data-table,
@@ -737,7 +840,12 @@ select:focus-visible {
   font-weight: 700;
   text-transform: none;
   letter-spacing: 0;
-  background: rgba(15, 13, 10, 0.34);
+  background:
+    linear-gradient(180deg, rgba(255, 239, 182, 0.06), rgba(0, 0, 0, 0.2)),
+    rgba(15, 13, 10, 0.54);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 239, 182, 0.06),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.58);
 }
 
 .osrs-data-table td,
@@ -763,7 +871,12 @@ select:focus-visible {
 .case-card {
   border: 1px solid var(--osrs-border-muted);
   border-radius: 7px;
-  background: var(--osrs-panel-2);
+  background:
+    linear-gradient(180deg, rgba(255, 239, 182, 0.035), rgba(0, 0, 0, 0.16)),
+    var(--osrs-panel-2);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 239, 182, 0.05),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.4);
 }
 
 .health-item,
@@ -899,7 +1012,9 @@ select:focus-visible {
   min-height: 36px;
   border: 1px solid var(--osrs-border-muted);
   border-radius: 6px;
-  background: var(--osrs-panel-2);
+  background:
+    linear-gradient(180deg, rgba(255, 239, 182, 0.045), rgba(0, 0, 0, 0.2)),
+    var(--osrs-panel-2);
   color: var(--osrs-text-muted);
   padding: 0.35rem 0.7rem;
   text-transform: capitalize;
@@ -917,6 +1032,9 @@ select:focus-visible {
   background: color-mix(in oklab, var(--osrs-gold) 22%, var(--osrs-panel-2));
   color: var(--osrs-gold-bright);
   border-color: var(--osrs-border);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 239, 182, 0.12),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.42);
 }
 
 .queue-layout {
@@ -1028,8 +1146,14 @@ select:focus-visible {
   border-radius: 7px;
   color: var(--osrs-text);
   background:
-    linear-gradient(180deg, rgba(241, 212, 134, 0.045), transparent 52%),
+    linear-gradient(180deg, rgba(241, 212, 134, 0.06), transparent 52%),
+    var(--osrs-noise-svg),
     var(--osrs-panel-2);
+  background-blend-mode: normal, soft-light, normal;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 239, 182, 0.07),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.44),
+    0 6px 16px rgba(0, 0, 0, 0.18);
   padding: 0.75rem;
   text-align: left;
   display: grid;
@@ -1052,8 +1176,12 @@ select:focus-visible {
   border-color: var(--osrs-gold);
   background:
     linear-gradient(180deg, rgba(215, 181, 109, 0.16), rgba(215, 181, 109, 0.04)),
+    var(--osrs-noise-svg),
     var(--osrs-panel-2);
-  box-shadow: inset 0 0 0 1px rgba(241, 212, 134, 0.12);
+  background-blend-mode: normal, soft-light, normal;
+  box-shadow:
+    inset 0 0 0 1px rgba(241, 212, 134, 0.12),
+    inset 0 1px 0 rgba(255, 239, 182, 0.09);
 }
 
 .review-card-head,
@@ -1208,11 +1336,13 @@ select:focus-visible {
   border: 1px solid var(--osrs-border-muted);
   border-radius: 8px;
   background:
-    linear-gradient(180deg, rgba(241, 212, 134, 0.055), transparent 48%),
+    var(--osrs-panel-texture),
     var(--osrs-panel);
+  background-blend-mode: overlay, soft-light, normal, multiply, normal;
   box-shadow:
-    inset 0 1px 0 rgba(241, 212, 134, 0.08),
-    inset 0 0 0 1px rgba(0, 0, 0, 0.38);
+    var(--osrs-inset-depth),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.38),
+    0 8px 22px rgba(0, 0, 0, 0.2);
   padding: 1rem;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -1230,8 +1360,14 @@ select:focus-visible {
   color: var(--osrs-gold-bright);
   font-size: 2rem;
   font-weight: 800;
-  background: linear-gradient(145deg, #302418, #15100b);
-  box-shadow: inset 0 1px 0 rgba(241, 212, 134, 0.16), 0 6px 14px rgba(0, 0, 0, 0.22);
+  background:
+    radial-gradient(circle at 38% 24%, rgba(241, 212, 134, 0.14), transparent 36%),
+    var(--osrs-noise-svg),
+    linear-gradient(145deg, #302418, #15100b);
+  background-blend-mode: normal, soft-light, normal;
+  box-shadow:
+    var(--osrs-inset-depth),
+    0 6px 14px rgba(0, 0, 0, 0.22);
 }
 
 .profile-title-block {
