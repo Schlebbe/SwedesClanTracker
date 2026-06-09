@@ -987,6 +987,219 @@ select:focus-visible {
   color: #e1b3a9;
 }
 
+.review-queues-surface {
+  gap: 1.05rem;
+}
+
+.review-header {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+}
+
+.review-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(320px, 0.85fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+.review-group-stack {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.review-group-panel .osrs-empty-state {
+  padding-inline: 0;
+}
+
+.review-card-grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.7rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.review-card {
+  width: 100%;
+  min-height: 10rem;
+  border: 1px solid var(--osrs-border-muted);
+  border-radius: 7px;
+  color: var(--osrs-text);
+  background:
+    linear-gradient(180deg, rgba(241, 212, 134, 0.045), transparent 52%),
+    var(--osrs-panel-2);
+  padding: 0.75rem;
+  text-align: left;
+  display: grid;
+  align-content: start;
+  gap: 0.42rem;
+  transition-property: background-color, border-color, transform;
+  transition-duration: 150ms;
+  transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
+}
+
+.review-card:hover {
+  border-color: var(--osrs-border);
+}
+
+.review-card:active {
+  transform: scale(0.99);
+}
+
+.review-card-active {
+  border-color: var(--osrs-gold);
+  background:
+    linear-gradient(180deg, rgba(215, 181, 109, 0.16), rgba(215, 181, 109, 0.04)),
+    var(--osrs-panel-2);
+  box-shadow: inset 0 0 0 1px rgba(241, 212, 134, 0.12);
+}
+
+.review-card-head,
+.review-card-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.review-card small,
+.review-card-meta > span:not(.osrs-pill),
+.review-player {
+  color: var(--osrs-text-muted);
+}
+
+.review-card strong {
+  color: var(--osrs-gold-bright);
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.review-player {
+  overflow-wrap: anywhere;
+}
+
+.review-card em {
+  color: var(--osrs-text);
+  font-size: 0.86rem;
+  font-style: normal;
+  line-height: 1.35;
+}
+
+.review-detail-panel {
+  position: sticky;
+  top: 1rem;
+}
+
+.review-detail {
+  display: grid;
+  gap: 0.95rem;
+}
+
+.review-detail-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 0.8rem;
+}
+
+.review-detail-title h3 {
+  margin: 0.08rem 0 0.18rem;
+  color: var(--osrs-gold-bright);
+  font-size: 1.08rem;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.review-detail-title p:not(.eyebrow) {
+  margin: 0;
+  color: var(--osrs-text-muted);
+  overflow-wrap: anywhere;
+}
+
+.review-detail-grid {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.review-detail-grid div {
+  border: 1px solid var(--osrs-border-muted);
+  border-radius: 7px;
+  background: var(--osrs-panel-2);
+  padding: 0.62rem 0.66rem;
+}
+
+.review-detail-wide {
+  grid-column: 1 / -1;
+}
+
+.review-detail-grid dt {
+  color: var(--osrs-text-muted);
+  font-size: 0.78rem;
+}
+
+.review-detail-grid dd {
+  margin: 0.12rem 0 0;
+  color: var(--osrs-text);
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.review-detail-section {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.review-detail-section h4 {
+  margin: 0;
+  color: var(--osrs-gold);
+  font-size: 0.84rem;
+}
+
+.review-detail-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.48rem;
+}
+
+.review-detail-list li {
+  border: 1px solid var(--osrs-border-muted);
+  border-radius: 7px;
+  background: var(--osrs-panel-2);
+  color: var(--osrs-text);
+  padding: 0.62rem 0.66rem;
+  overflow-wrap: anywhere;
+}
+
+.review-danger-note {
+  border: 1px solid color-mix(in oklab, var(--osrs-red) 62%, #2b1118 38%);
+  border-radius: 7px;
+  background: #2b120f;
+  padding: 0.72rem;
+  display: grid;
+  gap: 0.25rem;
+}
+
+.review-danger-note strong {
+  color: #f2afa4;
+}
+
+.review-danger-note p {
+  margin: 0;
+  color: #e1b3a9;
+}
+
+.review-detail-actions {
+  border-top: 1px solid var(--osrs-border-muted);
+  padding-top: 0.8rem;
+}
+
 .log-item {
   align-items: flex-start;
   gap: 0.85rem;
@@ -1059,9 +1272,14 @@ select:focus-visible {
   }
 
   .queue-layout,
+  .review-layout,
   .layout-two,
   .dashboard-main-grid {
     grid-template-columns: 1fr;
+  }
+
+  .review-detail-panel {
+    position: static;
   }
 
   .dashboard-stat-grid {
@@ -1086,6 +1304,9 @@ select:focus-visible {
 
   .osrs-nav-list,
   .queue-columns,
+  .review-header,
+  .review-card-grid,
+  .review-detail-grid,
   .health-grid,
   .posture-grid,
   .dashboard-header,

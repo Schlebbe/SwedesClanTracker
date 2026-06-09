@@ -1,6 +1,10 @@
-﻿import { toneClass } from "../ui";
-
-const laneOrder = ["safe", "inspect", "high-risk"];
+import { useMemo } from "react";
+import { BeveledButton } from "../components/osrs/BeveledButton";
+import { EmptyFeatureState } from "../components/osrs/EmptyFeatureState";
+import { StatusPill } from "../components/osrs/StatusPill";
+import { StonePanel } from "../components/osrs/StonePanel";
+import { UnavailableMetric } from "../components/osrs/UnavailableMetric";
+import { mapAdminQueueToReviewQueueViewModel } from "../data/viewModels/reviewQueueViewModel";
 
 export function AdminQueueSurface({
   cases,
@@ -14,91 +18,187 @@ export function AdminQueueSurface({
   onRetryDetail,
   onSelectCase,
 }) {
+  const queue = useMemo(
+    () => mapAdminQueueToReviewQueueViewModel(cases, selectedCase, selectedCaseId),
+    [cases, selectedCase, selectedCaseId]
+  );
+
   return (
-    <div className="surface-grid">
-      <header className="surface-header">
-        <p className="eyebrow">Admin Queue</p>
-        <h2>Unified Execution Workflow for Promotions and Reviews</h2>
-        <p>Case-first triage with evidence and action separation, not stacked raw tables.</p>
+    <div className="surface-grid review-queues-surface">
+      <header className="surface-header review-header">
+        <div>
+          <p className="eyebrow">Review Queues</p>
+          <h2>Officer triage for member identity and rank decisions</h2>
+          <p>Grouped review cases using the app queue data that already exists.</p>
+        </div>
+        <StatusPill tone={queue.totalCount ? "warning" : "success"}>
+          {queue.totalCount} open
+        </StatusPill>
       </header>
 
       {loading ? (
-        <section className="panel"><p className="tone tone-info" data-loading="true">Loading admin queue...</p></section>
+        <StonePanel>
+          <StatusPill tone="info" loading>Loading review queues...</StatusPill>
+        </StonePanel>
       ) : null}
 
       {error ? (
-        <section className="panel">
-          <p className="tone tone-danger">Unable to load admin queue: {error}</p>
-          <div className="message-action"><button className="btn-ghost" onClick={onRetryList}>Retry</button></div>
-        </section>
+        <StonePanel tone="danger">
+          <EmptyFeatureState
+            title="Unable to load review queues"
+            message={error}
+            tone="danger"
+            action={<BeveledButton onClick={onRetryList}>Retry</BeveledButton>}
+          />
+        </StonePanel>
       ) : null}
 
       {!loading && !error ? (
-        <section className="queue-layout">
-          <div className="queue-columns">
-            {laneOrder.map((lane) => {
-              const items = cases.filter((item) => item.lane === lane);
-              return (
-                <article key={lane} className="panel queue-lane">
-                  <h3>{lane}</h3>
-                  {items.length ? (
-                    <ul className="queue-list">
-                      {items.map((item) => (
-                        <li key={item.id}>
-                          <button className={selectedCaseId === item.id ? "case-card case-card-active" : "case-card"} onClick={() => onSelectCase(item.id)}>
+        <section className="review-layout">
+          <div className="review-group-stack">
+            {queue.totalCount ? null : (
+              <StonePanel>
+                <EmptyFeatureState
+                  title="No open review cases"
+                  message="There are no rename, missing-member, or rank-review cases in the current admin queue."
+                />
+              </StonePanel>
+            )}
+
+            {queue.groups.map((group) => (
+              <StonePanel
+                key={group.id}
+                title={group.label}
+                subtitle={group.description}
+                actions={<StatusPill tone={group.items.length ? "warning" : "success"}>{group.items.length}</StatusPill>}
+                className="review-group-panel"
+              >
+                {group.items.length ? (
+                  <ul className="review-card-grid">
+                    {group.items.map((item) => (
+                      <li key={item.id}>
+                        <button
+                          className={selectedCaseId === item.id ? "review-card review-card-active" : "review-card"}
+                          onClick={() => onSelectCase(item.id)}
+                        >
+                          <span className="review-card-head">
                             <small>{item.type}</small>
-                            <strong title={item.title}>{item.title}</strong>
-                            <p title={item.player}>{item.player}</p>
-                            <div className="case-meta">
-                              <span className={toneClass(item.risk === "high" ? "danger" : item.risk === "medium" ? "warning" : "success")}>{item.risk}</span>
-                              <span>{item.age ?? "unknown"}</span>
-                            </div>
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  ) : <p className="empty-note">No cases in this lane.</p>}
-                </article>
-              );
-            })}
+                            <StatusPill tone={item.riskTone}>{item.risk}</StatusPill>
+                          </span>
+                          <strong title={item.title}>{item.title}</strong>
+                          <span className="review-player" title={item.player}>{item.player}</span>
+                          <span className="review-card-meta">
+                            {item.confidenceLabel ? <StatusPill tone="info">confidence: {item.confidenceLabel}</StatusPill> : null}
+                            <span>{item.age}</span>
+                          </span>
+                          {item.recommendedAction ? <em>{item.recommendedAction}</em> : null}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <EmptyFeatureState
+                    title="Queue clear"
+                    message={`No ${group.label.toLowerCase()} are currently exposed by the admin queue.`}
+                  />
+                )}
+              </StonePanel>
+            ))}
           </div>
 
-          <aside className="panel case-detail">
-            {detailLoading ? <p className="tone tone-info" data-loading="true">Loading case detail...</p> : null}
+          <StonePanel title="Case Detail" subtitle="Evidence and decision notes" className="review-detail-panel">
+            {detailLoading ? <StatusPill tone="info" loading>Loading case detail...</StatusPill> : null}
+
             {detailError ? (
-              <>
-                <p className="tone tone-danger">Unable to load case detail: {detailError}</p>
-                <div className="message-action"><button className="btn-ghost" onClick={onRetryDetail}>Retry detail</button></div>
-              </>
+              <EmptyFeatureState
+                title="Unable to load case detail"
+                message={detailError}
+                tone="danger"
+                action={<BeveledButton onClick={onRetryDetail}>Retry detail</BeveledButton>}
+              />
             ) : null}
 
-            {!detailLoading && !detailError && selectedCase ? (
-              <>
-                <h3 title={selectedCase.title}>{selectedCase.title}</h3>
-                <p className="case-player" title={selectedCase.player}>{selectedCase.player} | {selectedCase.type}</p>
-                <p className="recommend">Recommended: {selectedCase.recommendedAction}</p>
-
-                <h4>Evidence</h4>
-                <ul className="stack-list compact">
-                  {selectedCase.evidence.length ? selectedCase.evidence.map((item) => <li key={item} className="line-item"><span>{item}</span></li>) : <li className="line-item"><span>No evidence available.</span></li>}
-                </ul>
-
-                <h4>Alternative actions</h4>
-                <ul className="stack-list compact">
-                  {selectedCase.alternatives.length ? selectedCase.alternatives.map((item) => <li key={item} className="line-item"><span>{item}</span></li>) : <li className="line-item"><span>No alternatives available.</span></li>}
-                </ul>
-
-                <div className="danger-zone">
-                  <p>Dangerous action zone</p>
-                  <small>{selectedCase.dangerous ?? selectedCase.danger}</small>
-                </div>
-              </>
+            {!detailLoading && !detailError && queue.selectedCase ? (
+              <ReviewCaseDetail detail={queue.selectedCase} />
             ) : null}
 
-            {!detailLoading && !detailError && !selectedCase ? <p className="empty-note">No case selected. Choose a lane item when available.</p> : null}
-          </aside>
+            {!detailLoading && !detailError && !queue.selectedCase ? (
+              <EmptyFeatureState
+                title="No case selected"
+                message="Choose a review card to inspect the available evidence and recommendations."
+              />
+            ) : null}
+          </StonePanel>
         </section>
       ) : null}
     </div>
+  );
+}
+
+function ReviewCaseDetail({ detail }) {
+  return (
+    <div className="review-detail">
+      <div className="review-detail-title">
+        <div>
+          <p className="eyebrow">{detail.type}</p>
+          <h3 title={detail.title}>{detail.title}</h3>
+          <p title={detail.player}>{detail.player}</p>
+        </div>
+        <StatusPill tone={detail.riskTone}>{detail.risk}</StatusPill>
+      </div>
+
+      <dl className="review-detail-grid">
+        <div>
+          <dt>Age</dt>
+          <dd>{detail.age}</dd>
+        </div>
+        {detail.confidenceLabel ? (
+          <div>
+            <dt>Confidence</dt>
+            <dd>{detail.confidenceLabel}</dd>
+          </div>
+        ) : null}
+        {detail.recommendedAction ? (
+          <div className="review-detail-wide">
+            <dt>Recommended Action</dt>
+            <dd>{detail.recommendedAction}</dd>
+          </div>
+        ) : null}
+      </dl>
+
+      <ReviewDetailList title="Evidence" items={detail.evidence} emptyMessage="No evidence is currently provided for this case." />
+      <ReviewDetailList title="Alternatives" items={detail.alternatives} emptyMessage="No alternatives are currently provided for this case." />
+
+      {detail.dangerousNote ? (
+        <div className="review-danger-note">
+          <strong>Dangerous Action Note</strong>
+          <p>{detail.dangerousNote}</p>
+        </div>
+      ) : null}
+
+      <div className="review-detail-actions">
+        <UnavailableMetric
+          label="Direct case actions unavailable"
+          reason="The app queue currently exposes guidance only, not executable action contracts."
+        />
+      </div>
+    </div>
+  );
+}
+
+function ReviewDetailList({ title, items, emptyMessage }) {
+  return (
+    <section className="review-detail-section">
+      <h4>{title}</h4>
+      {items.length ? (
+        <ul className="review-detail-list">
+          {items.map((item) => (
+            <li key={item}>{item}</li>
+          ))}
+        </ul>
+      ) : (
+        <EmptyFeatureState title={`No ${title.toLowerCase()}`} message={emptyMessage} />
+      )}
+    </section>
   );
 }
