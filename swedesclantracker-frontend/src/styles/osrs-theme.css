@@ -1,0 +1,948 @@
+:root {
+  --osrs-bg: #0f0d0a;
+  --osrs-bg-soft: #17130e;
+  --osrs-panel: #1d1710;
+  --osrs-panel-2: #241c13;
+  --osrs-panel-3: #2b2115;
+  --osrs-border: #6f5426;
+  --osrs-border-muted: #3c2d18;
+  --osrs-gold: #d7b56d;
+  --osrs-gold-bright: #f1d486;
+  --osrs-text: #f3ead2;
+  --osrs-text-muted: #b8a98a;
+  --osrs-text-dim: #89795f;
+  --osrs-green: #68c27a;
+  --osrs-amber: #d99c3b;
+  --osrs-red: #c45f4f;
+  --osrs-blue: #7d9fc7;
+  --osrs-shadow: rgba(0, 0, 0, 0.45);
+  --osrs-focus: #f1d486;
+  --primary-accent: var(--osrs-gold);
+  --primary-accent-border: var(--osrs-border);
+  --primary-accent-hover: var(--osrs-gold-bright);
+  --surface-canvas: var(--osrs-bg);
+  --surface-panel: var(--osrs-panel);
+  --surface-panel-raised: var(--osrs-panel-2);
+  --surface-muted: var(--osrs-bg-soft);
+  --border-subtle: var(--osrs-border-muted);
+  --text-primary: var(--osrs-text);
+  --text-secondary: var(--osrs-text-muted);
+  --text-muted: var(--osrs-text-dim);
+  --status-success: var(--osrs-green);
+  --status-warning: var(--osrs-amber);
+  --status-danger: var(--osrs-red);
+  --status-info: var(--osrs-blue);
+  --focus-ring: var(--osrs-focus);
+}
+
+* {
+  box-sizing: border-box;
+  min-width: 0;
+}
+
+html {
+  background: var(--osrs-bg);
+}
+
+body {
+  margin: 0;
+  color: var(--osrs-text);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  background:
+    linear-gradient(90deg, rgba(111, 84, 38, 0.12) 1px, transparent 1px),
+    linear-gradient(180deg, rgba(111, 84, 38, 0.08) 1px, transparent 1px),
+    radial-gradient(120% 100% at 50% -20%, #2b2115 0%, #17130e 38%, #0f0d0a 100%);
+  background-size: 28px 28px, 28px 28px, auto;
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--osrs-focus);
+  outline-offset: 2px;
+}
+
+.osrs-app-shell,
+.app-shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 236px minmax(0, 1fr);
+}
+
+.auth-shell {
+  grid-template-columns: 1fr;
+}
+
+.auth-stage {
+  max-width: 720px;
+  width: 100%;
+  margin: 4rem auto;
+}
+
+.osrs-sidebar,
+.app-nav {
+  min-height: 100vh;
+  border-right: 1px solid var(--osrs-border);
+  background:
+    linear-gradient(180deg, rgba(36, 28, 19, 0.92), rgba(15, 13, 10, 0.96)),
+    var(--osrs-bg-soft);
+  box-shadow: inset -1px 0 0 rgba(0, 0, 0, 0.7);
+  padding: 1rem 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.osrs-sidebar-brand {
+  min-height: 148px;
+  padding: 0.9rem 1rem 1.05rem;
+  border-bottom: 1px solid var(--osrs-border-muted);
+  display: grid;
+  place-items: center;
+  text-align: center;
+  gap: 0.75rem;
+}
+
+.osrs-brand-mark {
+  width: 58px;
+  height: 58px;
+  border: 1px solid var(--osrs-border);
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  color: var(--osrs-gold-bright);
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  background: linear-gradient(145deg, #2d2317, #16110c);
+  box-shadow: inset 0 1px 0 rgba(241, 212, 134, 0.18), 0 8px 18px rgba(0, 0, 0, 0.28);
+}
+
+.osrs-sidebar-brand strong {
+  display: block;
+  color: var(--osrs-gold-bright);
+  font-size: 1.08rem;
+  line-height: 1.25;
+}
+
+.osrs-sidebar-brand span {
+  color: var(--osrs-text-muted);
+  font-size: 0.9rem;
+}
+
+.osrs-nav-list,
+.nav-list {
+  display: grid;
+  gap: 0;
+  padding: 0.7rem 0;
+}
+
+.osrs-sidebar-bottom {
+  margin-top: auto;
+  border-top: 1px solid var(--osrs-border-muted);
+  padding-top: 0.7rem;
+}
+
+.osrs-nav-item,
+.nav-item {
+  min-height: 48px;
+  width: 100%;
+  border: 0;
+  border-block: 1px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--osrs-text-muted);
+  padding: 0 1rem;
+  text-align: left;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.55rem;
+  transition-property: background-color, border-color, color;
+  transition-duration: 150ms;
+  transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
+}
+
+.osrs-nav-item:hover,
+.nav-item:hover {
+  background: rgba(215, 181, 109, 0.07);
+  color: var(--osrs-text);
+}
+
+.osrs-nav-item-active,
+.nav-item-active {
+  color: var(--osrs-gold-bright);
+  border-color: var(--osrs-border-muted);
+  background: linear-gradient(90deg, rgba(215, 181, 109, 0.22), rgba(215, 181, 109, 0.04));
+  box-shadow: inset 3px 0 0 var(--osrs-gold);
+}
+
+.osrs-nav-item:disabled,
+.osrs-nav-item-muted {
+  color: var(--osrs-text-dim);
+  opacity: 0.72;
+}
+
+.osrs-nav-icon {
+  color: var(--osrs-gold);
+  text-align: center;
+}
+
+.osrs-nav-item small,
+.nav-item small {
+  min-width: 1.5rem;
+  border: 1px solid var(--osrs-border-muted);
+  border-radius: 6px;
+  padding: 0.08rem 0.32rem;
+  text-align: center;
+  color: var(--osrs-gold-bright);
+  background: rgba(15, 13, 10, 0.7);
+  font-variant-numeric: tabular-nums;
+}
+
+.osrs-main {
+  min-width: 0;
+  display: grid;
+  grid-template-rows: auto 1fr;
+}
+
+.osrs-topbar {
+  min-height: 72px;
+  border-bottom: 1px solid var(--osrs-border);
+  background: rgba(15, 13, 10, 0.86);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem 1.35rem;
+}
+
+.osrs-topbar-status {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  flex-wrap: wrap;
+}
+
+.osrs-topbar-status > span:not(.osrs-pill) {
+  color: var(--osrs-text-muted);
+  font-size: 0.9rem;
+}
+
+.osrs-topbar-admin {
+  color: var(--osrs-gold-bright);
+  font-weight: 650;
+}
+
+.osrs-content,
+.app-stage {
+  padding: 1.35rem;
+}
+
+.surface-grid {
+  display: grid;
+  gap: 1rem;
+}
+
+.surface-header {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.surface-header h2 {
+  margin: 0;
+  font-size: 1.58rem;
+  line-height: 1.25;
+  color: var(--osrs-text);
+  text-wrap: balance;
+}
+
+.surface-header p {
+  margin: 0;
+  color: var(--osrs-text-muted);
+  max-width: 72ch;
+  text-wrap: pretty;
+}
+
+.eyebrow {
+  margin: 0;
+  color: var(--osrs-gold);
+  font-size: 0.8rem;
+  font-weight: 650;
+}
+
+.layout-two {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.osrs-stone-panel,
+.panel {
+  border: 1px solid var(--osrs-border-muted);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent 42%),
+    var(--osrs-panel);
+  box-shadow:
+    inset 0 1px 0 rgba(241, 212, 134, 0.08),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.38),
+    0 8px 22px rgba(0, 0, 0, 0.18);
+  padding: 1rem;
+}
+
+.osrs-stone-panel-warning {
+  border-color: color-mix(in oklab, var(--osrs-amber) 56%, var(--osrs-border-muted));
+}
+
+.osrs-stone-panel-danger {
+  border-color: color-mix(in oklab, var(--osrs-red) 56%, var(--osrs-border-muted));
+}
+
+.osrs-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 1rem;
+  margin-bottom: 0.85rem;
+}
+
+.osrs-panel-header h3,
+.panel h3 {
+  margin: 0 0 0.18rem;
+  font-size: 0.98rem;
+  color: var(--osrs-text);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.osrs-panel-header p {
+  margin: 0;
+  color: var(--osrs-text-muted);
+  font-size: 0.9rem;
+}
+
+.osrs-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.osrs-button,
+.btn-primary,
+.btn-ghost {
+  min-height: 40px;
+  border-radius: 6px;
+  padding: 0 0.85rem;
+  font-weight: 650;
+  transition-property: background-color, border-color, color, transform;
+  transition-duration: 150ms;
+  transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
+}
+
+.osrs-button:active,
+.btn-primary:active,
+.btn-ghost:active {
+  transform: scale(0.96);
+}
+
+.osrs-button-primary,
+.btn-primary {
+  border: 1px solid var(--osrs-border);
+  color: #18110a;
+  background: linear-gradient(180deg, var(--osrs-gold-bright), var(--osrs-gold));
+  box-shadow: inset 0 1px 0 rgba(255, 247, 202, 0.36);
+}
+
+.osrs-button-secondary,
+.btn-ghost {
+  border: 1px solid var(--osrs-border);
+  color: var(--osrs-text);
+  background: linear-gradient(180deg, #2d2418, #1b150f);
+}
+
+.osrs-button-ghost {
+  border: 1px solid var(--osrs-border-muted);
+  color: var(--osrs-text-muted);
+  background: rgba(15, 13, 10, 0.2);
+}
+
+.osrs-button-danger {
+  border: 1px solid color-mix(in oklab, var(--osrs-red) 62%, #1b150f);
+  color: #f6c6bd;
+  background: linear-gradient(180deg, #3b1813, #21100d);
+}
+
+.osrs-button-disabled,
+.osrs-button:disabled,
+.btn-primary:disabled,
+.btn-ghost:disabled {
+  border: 1px solid var(--osrs-border-muted);
+  color: var(--osrs-text-dim);
+  background: #18130e;
+  opacity: 0.72;
+  transform: none;
+}
+
+.osrs-button:not(:disabled):hover,
+.btn-primary:not(:disabled):hover,
+.btn-ghost:not(:disabled):hover {
+  border-color: var(--osrs-gold);
+  color: var(--osrs-gold-bright);
+}
+
+.osrs-button-primary:not(:disabled):hover,
+.btn-primary:not(:disabled):hover {
+  color: #18110a;
+  background: linear-gradient(180deg, #ffe29a, var(--osrs-gold));
+}
+
+.osrs-pill,
+.tone {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  min-height: 1.55rem;
+  border: 1px solid var(--osrs-border-muted);
+  border-radius: 6px;
+  padding: 0.12rem 0.5rem;
+  font-size: 0.75rem;
+  line-height: 1.2;
+  font-weight: 650;
+  color: var(--osrs-text-muted);
+  background: rgba(15, 13, 10, 0.48);
+  white-space: nowrap;
+}
+
+.osrs-pill-success,
+.tone-success {
+  border-color: color-mix(in oklab, var(--osrs-green) 50%, #21301c);
+  color: #9be28c;
+  background: #172914;
+}
+
+.osrs-pill-warning,
+.tone-warning {
+  border-color: color-mix(in oklab, var(--osrs-amber) 50%, #3b2a13);
+  color: #f1c46f;
+  background: #2d210f;
+}
+
+.osrs-pill-danger,
+.tone-danger {
+  border-color: color-mix(in oklab, var(--osrs-red) 54%, #351510);
+  color: #f2afa4;
+  background: #2b120f;
+}
+
+.osrs-pill-info,
+.tone-info {
+  border-color: color-mix(in oklab, var(--osrs-blue) 48%, #182230);
+  color: #b8cce7;
+  background: #151d27;
+}
+
+.osrs-pill-unavailable {
+  border-color: var(--osrs-border-muted);
+  color: var(--osrs-text-dim);
+  background: #17120d;
+}
+
+.osrs-stat-card {
+  min-height: 146px;
+  border: 1px solid var(--osrs-border-muted);
+  border-radius: 8px;
+  background: var(--osrs-panel);
+  padding: 1rem;
+  display: grid;
+  align-content: start;
+  gap: 0.45rem;
+}
+
+.osrs-stat-card header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--osrs-text-muted);
+}
+
+.osrs-stat-icon {
+  color: var(--osrs-gold);
+}
+
+.osrs-stat-card strong {
+  color: var(--osrs-green);
+  font-size: 2rem;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+.osrs-stat-card p,
+.osrs-stat-card small {
+  margin: 0;
+  color: var(--osrs-text-muted);
+}
+
+.osrs-unavailable-metric {
+  display: grid;
+  gap: 0.2rem;
+  color: var(--osrs-text-dim);
+}
+
+.osrs-unavailable-metric span {
+  font-weight: 650;
+}
+
+.osrs-unavailable-metric small {
+  color: var(--osrs-text-dim);
+}
+
+.osrs-empty-state {
+  padding: 0.9rem;
+  display: grid;
+  gap: 0.25rem;
+  color: var(--osrs-text-muted);
+}
+
+.osrs-empty-state strong {
+  color: var(--osrs-text);
+}
+
+.osrs-empty-state p {
+  margin: 0;
+}
+
+.osrs-empty-action {
+  margin-top: 0.5rem;
+}
+
+.osrs-table-wrap,
+.table-wrap {
+  overflow-x: auto;
+}
+
+.osrs-data-table,
+.roster-table {
+  width: 100%;
+  min-width: 760px;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+
+.osrs-data-table th,
+.osrs-data-table td,
+.roster-table th,
+.roster-table td {
+  padding: 0.62rem 0.66rem;
+  text-align: left;
+  border-bottom: 1px solid var(--osrs-border-muted);
+  vertical-align: top;
+}
+
+.osrs-data-table th,
+.roster-table th {
+  color: var(--osrs-gold);
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: none;
+  letter-spacing: 0;
+  background: rgba(15, 13, 10, 0.34);
+}
+
+.osrs-data-table td,
+.roster-table td {
+  color: var(--osrs-text);
+}
+
+.osrs-data-table tr:hover td,
+.roster-table tr:hover td {
+  background: rgba(215, 181, 109, 0.045);
+}
+
+.health-grid,
+.posture-grid {
+  display: grid;
+  gap: 0.65rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.health-item,
+.posture-item,
+.line-item,
+.case-card {
+  border: 1px solid var(--osrs-border-muted);
+  border-radius: 7px;
+  background: var(--osrs-panel-2);
+}
+
+.health-item,
+.posture-item {
+  padding: 0.75rem;
+  display: grid;
+  gap: 0.25rem;
+}
+
+.health-item strong,
+.posture-item strong {
+  font-size: 1.05rem;
+  color: var(--osrs-text);
+}
+
+.health-item span,
+.posture-item span,
+.line-item p,
+.case-card p,
+.empty-note,
+.placeholder p {
+  color: var(--osrs-text-muted);
+}
+
+.dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  display: inline-block;
+}
+
+.dot-success { background: var(--osrs-green); }
+.dot-warning { background: var(--osrs-amber); }
+.dot-danger { background: var(--osrs-red); }
+.dot-info { background: var(--osrs-blue); }
+.dot-neutral { background: var(--osrs-text-dim); }
+
+.live-status-note,
+.message-action,
+.toolbar,
+.filter-row,
+.flags-inline,
+.case-meta,
+.log-heading {
+  display: flex;
+  gap: 0.55rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.message-action {
+  margin-top: 0.75rem;
+}
+
+.stack-list,
+.changes-list,
+.queue-list,
+.placeholder-stack {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.placeholder {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.compact {
+  gap: 0.48rem;
+}
+
+.line-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.7rem;
+  align-items: center;
+  padding: 0.62rem 0.66rem;
+}
+
+.line-item p {
+  margin: 0.18rem 0 0;
+  font-size: 0.82rem;
+}
+
+.changes-list li {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 0.55rem;
+  align-items: center;
+}
+
+.toolbar input,
+.toolbar select {
+  min-height: 40px;
+  border: 1px solid var(--osrs-border-muted);
+  border-radius: 6px;
+  color: var(--osrs-text);
+  background: #120f0b;
+  padding: 0 0.7rem;
+}
+
+.toolbar input::placeholder {
+  color: var(--osrs-text-dim);
+}
+
+.toolbar.auth-form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+
+.username-cell {
+  max-width: 280px;
+  word-break: break-word;
+  font-weight: 650;
+}
+
+.username-text {
+  display: inline-block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.table-empty {
+  color: var(--osrs-text-muted);
+  text-align: center;
+  padding: 0.9rem;
+}
+
+.chip {
+  min-height: 36px;
+  border: 1px solid var(--osrs-border-muted);
+  border-radius: 6px;
+  background: var(--osrs-panel-2);
+  color: var(--osrs-text-muted);
+  padding: 0.35rem 0.7rem;
+  text-transform: capitalize;
+  transition-property: background-color, border-color, color;
+  transition-duration: 150ms;
+  transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
+}
+
+.chip:hover {
+  border-color: var(--osrs-border);
+  color: var(--osrs-text);
+}
+
+.chip-active {
+  background: color-mix(in oklab, var(--osrs-gold) 22%, var(--osrs-panel-2));
+  color: var(--osrs-gold-bright);
+  border-color: var(--osrs-border);
+}
+
+.queue-layout {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: minmax(0, 1.6fr) minmax(280px, 1fr);
+}
+
+.queue-columns {
+  display: grid;
+  gap: 0.8rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.queue-lane h3 {
+  text-transform: capitalize;
+}
+
+.case-card {
+  width: 100%;
+  min-height: 7.5rem;
+  color: var(--osrs-text);
+  padding: 0.66rem;
+  text-align: left;
+  display: grid;
+  gap: 0.28rem;
+}
+
+.case-card small {
+  color: var(--osrs-text-dim);
+}
+
+.case-card-active {
+  border-color: var(--osrs-border);
+  background: color-mix(in oklab, var(--osrs-panel-2) 72%, var(--osrs-gold) 28%);
+}
+
+.case-detail {
+  align-self: start;
+}
+
+.case-detail h4 {
+  margin: 0.9rem 0 0.45rem;
+  color: var(--osrs-gold);
+  font-size: 0.82rem;
+}
+
+.case-player,
+.recommend {
+  margin: 0.74rem 0;
+}
+
+.danger-zone {
+  margin-top: 0.9rem;
+  border: 1px solid color-mix(in oklab, var(--osrs-red) 62%, #2b1118 38%);
+  background: #2b120f;
+  border-radius: 7px;
+  padding: 0.7rem;
+}
+
+.danger-zone p {
+  margin: 0;
+  font-weight: 700;
+  color: #f2afa4;
+}
+
+.danger-zone small {
+  color: #e1b3a9;
+}
+
+.log-item {
+  align-items: flex-start;
+  gap: 0.85rem;
+}
+
+.log-main {
+  display: grid;
+  gap: 0.34rem;
+  min-width: 0;
+}
+
+.log-detail {
+  margin: 0;
+  line-height: 1.42;
+}
+
+.log-time {
+  white-space: nowrap;
+  color: var(--osrs-text-dim);
+  font-size: 0.8rem;
+  padding-top: 0.1rem;
+}
+
+.tone[data-loading="true"],
+.osrs-pill[data-loading="true"] {
+  position: relative;
+  overflow: hidden;
+}
+
+.tone[data-loading="true"]::after,
+.osrs-pill[data-loading="true"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg, transparent 10%, rgba(255, 255, 255, 0.08) 45%, transparent 80%);
+  animation: tone-sheen 1.3s linear infinite;
+}
+
+@keyframes tone-sheen {
+  from { transform: translateX(-110%); }
+  to { transform: translateX(110%); }
+}
+
+@media (max-width: 1180px) {
+  .osrs-app-shell,
+  .app-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .osrs-sidebar,
+  .app-nav {
+    min-height: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--osrs-border);
+  }
+
+  .osrs-sidebar-brand {
+    min-height: auto;
+    grid-template-columns: auto 1fr;
+    place-items: center start;
+    text-align: left;
+  }
+
+  .osrs-nav-list {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .osrs-sidebar-bottom {
+    display: none;
+  }
+
+  .queue-layout,
+  .layout-two {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 900px) {
+  .osrs-content,
+  .app-stage {
+    padding: 0.9rem;
+  }
+
+  .osrs-topbar {
+    align-items: start;
+    flex-direction: column;
+  }
+
+  .osrs-nav-list,
+  .queue-columns,
+  .health-grid,
+  .posture-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .panel,
+  .osrs-stone-panel {
+    padding: 0.82rem;
+  }
+
+  .toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .toolbar.auth-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .changes-list li {
+    grid-template-columns: 1fr;
+    gap: 0.25rem;
+  }
+
+  .surface-header h2 {
+    font-size: 1.34rem;
+  }
+
+  .log-item {
+    gap: 0.5rem;
+  }
+
+  .log-time {
+    white-space: normal;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}

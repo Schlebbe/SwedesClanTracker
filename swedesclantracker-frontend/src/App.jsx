@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import "./index.css";
+import { AppShell } from "./components/shell/AppShell";
 import { fetchAdminQueue, fetchAdminQueueCase, fetchClanLog, fetchHome, fetchLiveStatus, fetchPlayerProfile, fetchReadiness, fetchRoster, login } from "./data/appDataApi";
 import { ApiError } from "./data/apiClient";
 import { AdminQueueSurface } from "./surfaces/AdminQueueSurface";
@@ -9,7 +9,6 @@ import { MembersSurface } from "./surfaces/MembersSurface";
 import { PlayerProfileSurface } from "./surfaces/PlayerProfileSurface";
 import { ReadinessSurface } from "./surfaces/ReadinessSurface";
 
-const surfaces = ["Dashboard", "Members", "Player Profile", "Clan Log", "Admin Queue", "Readiness"];
 const authRequiredMessage = "Session expired. Sign in again to continue.";
 
 function isUnauthorized(error) {
@@ -34,6 +33,14 @@ export default function App() {
   const [clanLogState, setClanLogState] = useState({ loading: true, error: "", data: null });
   const [readinessState, setReadinessState] = useState({ loading: true, error: "", data: null });
   const [liveStatusState, setLiveStatusState] = useState({ loading: true, error: "", data: null, stale: false });
+  const navItems = [
+    { id: "Dashboard", label: "Dashboard", icon: "D" },
+    { id: "Members", label: "Clan Members", icon: "CM" },
+    { id: "Player Profile", label: "Player Profiles", icon: "P" },
+    { id: "Admin Queue", label: "Review Queue", icon: "RQ", badge: queueState.cases.length ? String(queueState.cases.length) : "" },
+    { id: "Clan Log", label: "Activity Log", icon: "A" },
+    { id: "Readiness", label: "Readiness", icon: "R" },
+  ];
 
   function handleRequestError(error, fallbackMessage) {
     if (isUnauthorized(error)) {
@@ -335,25 +342,13 @@ export default function App() {
   }
 
   return (
-    <main className="app-shell">
-      <aside className="app-nav">
-        <div>
-          <p className="eyebrow">SwedesClanTracker</p>
-          <h1>Clan Tracker Console</h1>
-          <p className="nav-meta">Swedes Clan | LAN tracker operations</p>
-        </div>
-
-        <nav className="nav-list" aria-label="Primary">
-          {surfaces.map((item) => (
-            <button key={item} className={surface === item ? "nav-item nav-item-active" : "nav-item"} onClick={() => setSurface(item)}>
-              <span>{item}</span>
-              {item === "Admin Queue" ? <small>{queueState.cases.length}</small> : null}
-            </button>
-          ))}
-        </nav>
-      </aside>
-
-      <section className="app-stage">
+    <AppShell
+      navItems={navItems}
+      activeItem={surface}
+      onSelectItem={setSurface}
+      home={homeState.data}
+      liveStatus={liveStatusState}
+    >
         {surface === "Dashboard" ? (
           <DashboardSurface
             data={homeState.data}
@@ -493,7 +488,6 @@ export default function App() {
             }}
           />
         ) : null}
-      </section>
-    </main>
+    </AppShell>
   );
 }
