@@ -498,6 +498,100 @@ select:focus-visible {
   color: var(--osrs-text-muted);
 }
 
+.dashboard-surface {
+  gap: 1.15rem;
+}
+
+.dashboard-header {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 1rem;
+}
+
+.dashboard-stat-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.dashboard-main-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: minmax(0, 1.45fr) minmax(300px, 0.8fr);
+}
+
+.dashboard-health-grid,
+.dashboard-posture-grid {
+  display: grid;
+  gap: 0.7rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.dashboard-status-block,
+.dashboard-work-item {
+  border: 1px solid var(--osrs-border-muted);
+  border-radius: 7px;
+  background: var(--osrs-panel-2);
+  padding: 0.72rem;
+}
+
+.dashboard-status-block {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 0.7rem;
+}
+
+.dashboard-status-block span {
+  color: var(--osrs-text-muted);
+  font-size: 0.82rem;
+}
+
+.dashboard-status-block strong {
+  display: block;
+  margin-top: 0.16rem;
+  color: var(--osrs-text);
+  font-size: 1rem;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.dashboard-status-block p {
+  margin: 0.25rem 0 0;
+  color: var(--osrs-text-muted);
+  font-size: 0.82rem;
+}
+
+.dashboard-card-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.7rem;
+}
+
+.dashboard-work-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 0.75rem;
+}
+
+.dashboard-work-item strong {
+  color: var(--osrs-text);
+}
+
+.dashboard-work-item p {
+  margin: 0.18rem 0 0;
+  color: var(--osrs-text-muted);
+  font-size: 0.84rem;
+}
+
+.dashboard-unavailable-grid {
+  display: grid;
+  gap: 0.8rem;
+}
+
 .osrs-unavailable-metric {
   display: grid;
   gap: 0.2rem;
@@ -883,8 +977,13 @@ select:focus-visible {
   }
 
   .queue-layout,
-  .layout-two {
+  .layout-two,
+  .dashboard-main-grid {
     grid-template-columns: 1fr;
+  }
+
+  .dashboard-stat-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -902,8 +1001,16 @@ select:focus-visible {
   .osrs-nav-list,
   .queue-columns,
   .health-grid,
-  .posture-grid {
+  .posture-grid,
+  .dashboard-header,
+  .dashboard-stat-grid,
+  .dashboard-health-grid,
+  .dashboard-posture-grid {
     grid-template-columns: 1fr;
+  }
+
+  .dashboard-header {
+    align-items: start;
   }
 
   .panel,
