@@ -10,9 +10,7 @@ export function SidebarNav({ items, activeItem, onSelect, bottomItems = defaultB
     <aside className="osrs-sidebar">
       <div className="osrs-sidebar-brand">
         <div className="osrs-brand-mark" aria-hidden="true">
-          <span className="osrs-brand-shield">
-            <span />
-          </span>
+          <IconGlyph name="crest" className="osrs-brand-shield" />
         </div>
         <div>
           <strong>Clan Hub Admin</strong>

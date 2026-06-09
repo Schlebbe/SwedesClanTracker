@@ -141,9 +141,9 @@ export function AdminQueueSurface({
 }
 
 function groupIcon(id) {
-  if (id === "rsn-changes") return "review";
-  if (id === "missing-members") return "members";
-  if (id === "rank-reviews") return "rank";
+  if (id === "rsn-changes") return "name-change";
+  if (id === "missing-members") return "member-alert";
+  if (id === "rank-reviews") return "promotion";
   return "scroll";
 }
 

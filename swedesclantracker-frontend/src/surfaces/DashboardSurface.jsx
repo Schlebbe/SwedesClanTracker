@@ -1,6 +1,7 @@
 import { BeveledButton } from "../components/osrs/BeveledButton";
 import { DataTable } from "../components/osrs/DataTable";
 import { EmptyFeatureState } from "../components/osrs/EmptyFeatureState";
+import { IconGlyph } from "../components/osrs/IconGlyph";
 import { StatCard } from "../components/osrs/StatCard";
 import { StatusPill } from "../components/osrs/StatusPill";
 import { StonePanel } from "../components/osrs/StonePanel";
@@ -75,7 +76,7 @@ export function DashboardSurface({ data, liveStatus, loading, error, onRetry, on
               <ul className="dashboard-work-grid">
                 {dashboard.workItems.map((item) => (
                   <li key={item.key} className="dashboard-work-card">
-                    <span className="dashboard-work-icon" aria-hidden="true">{workIconForTone(item.tone)}</span>
+                    <IconGlyph name={workIconForTone(item.tone)} className="dashboard-work-icon" />
                     <div className="dashboard-work-copy">
                       <strong>{item.label}</strong>
                       <p>{item.detail || "No case detail available"}</p>
@@ -153,7 +154,7 @@ export function DashboardSurface({ data, liveStatus, loading, error, onRetry, on
 function StatusBlock({ item, icon, compact = false }) {
   return (
     <div className={compact ? "dashboard-status-block dashboard-status-block-compact" : "dashboard-status-block"}>
-      {icon ? <span className={`dashboard-status-icon dashboard-status-icon-${icon}`} aria-hidden="true" /> : null}
+      {icon ? <IconGlyph name={icon} className="dashboard-status-icon" /> : null}
       <div>
         <span>{item.label}</span>
         <strong>{item.value}</strong>
@@ -175,23 +176,23 @@ function toneLabel(tone) {
 function dashboardIconForKey(key) {
   const icons = {
     "tracked-members": "members",
-    "pending-promotions": "rank",
+    "pending-promotions": "promotion",
     "open-admin-cases": "review",
-    overall: "readiness",
+    overall: "health",
     api: "status",
     worker: "refresh",
-    "latest-sync": "activity",
-    "latest-event": "scroll",
+    "latest-sync": "user-refresh",
+    "latest-event": "recent",
   };
 
   return icons[key] ?? "default";
 }
 
 function workIconForTone(tone) {
-  if (tone === "danger") return "!";
-  if (tone === "warning") return "?";
-  if (tone === "success") return "✓";
-  return "•";
+  if (tone === "danger") return "danger";
+  if (tone === "warning") return "member-alert";
+  if (tone === "success") return "success";
+  return "review";
 }
 
 function SurfaceMessage({ title, text, tone, action = null, loading = false }) {

@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { BeveledButton } from "../components/osrs/BeveledButton";
 import { DataTable } from "../components/osrs/DataTable";
 import { EmptyFeatureState } from "../components/osrs/EmptyFeatureState";
+import { IconGlyph } from "../components/osrs/IconGlyph";
 import { StatCard } from "../components/osrs/StatCard";
 import { StatusPill } from "../components/osrs/StatusPill";
 import { StonePanel } from "../components/osrs/StonePanel";
@@ -70,7 +71,9 @@ export function PlayerProfileSurface({ player, loading, error, onRetry, onBackTo
   return (
     <div className="surface-grid profile-surface">
       <header className="profile-hero">
-        <div className="profile-avatar" aria-hidden="true">{profile.username.charAt(0).toUpperCase()}</div>
+        <div className="profile-avatar" aria-hidden="true">
+          <IconGlyph name="profile" className="profile-avatar-icon" />
+        </div>
         <div className="profile-title-block">
           <p className="eyebrow">Player Profile</p>
           <h2 title={profile.username}>{profile.username}</h2>
