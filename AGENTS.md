@@ -16,6 +16,8 @@ docs/FRONTEND_MVP_IMPLEMENTATION.md
 docs/CODEX_TASKS.md
 docs/swedes_clan_tracker_missing_features.md
 docs/swedes_clan_tracker_scope_review.md
+docs/FRONTEND_MVP_PAUSE_NOTES.md
+docs/OSRS_TEXTURE_RESEARCH.md
 ```
 
 Also inspect the reference images folder before implementing UI work.
