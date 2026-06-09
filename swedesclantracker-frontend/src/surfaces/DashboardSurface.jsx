@@ -63,87 +63,89 @@ export function DashboardSurface({ data, liveStatus, loading, error, onRetry, on
         ))}
       </section>
 
-      <section className="dashboard-operations-grid">
-        <StonePanel
-          title="Pending Admin Work"
-          icon="review"
-          variant="featured"
-          actions={<BeveledButton variant="secondary" icon="review" onClick={onOpenQueue}>Open Queue</BeveledButton>}
-        >
-          {dashboard.workItems.length ? (
-            <ul className="dashboard-work-grid">
-              {dashboard.workItems.map((item) => (
-                <li key={item.key} className="dashboard-work-card">
-                  <span className="dashboard-work-icon" aria-hidden="true">{workIconForTone(item.tone)}</span>
-                  <div className="dashboard-work-copy">
-                    <strong>{item.label}</strong>
-                    <p>{item.detail || "No case detail available"}</p>
-                  </div>
-                  <StatusPill tone={item.tone}>{item.risk}</StatusPill>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <EmptyFeatureState title="No admin work waiting" message="The current dashboard preview returned no open work items." />
-          )}
-        </StonePanel>
+      <section className="dashboard-live-grid">
+        <div className="dashboard-primary-stack">
+          <StonePanel
+            title="Pending Admin Work"
+            icon="review"
+            variant="featured"
+            actions={<BeveledButton variant="secondary" icon="review" onClick={onOpenQueue}>Open Queue</BeveledButton>}
+          >
+            {dashboard.workItems.length ? (
+              <ul className="dashboard-work-grid">
+                {dashboard.workItems.map((item) => (
+                  <li key={item.key} className="dashboard-work-card">
+                    <span className="dashboard-work-icon" aria-hidden="true">{workIconForTone(item.tone)}</span>
+                    <div className="dashboard-work-copy">
+                      <strong>{item.label}</strong>
+                      <p>{item.detail || "No case detail available"}</p>
+                    </div>
+                    <StatusPill tone={item.tone}>{item.risk}</StatusPill>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <EmptyFeatureState title="No admin work waiting" message="The current dashboard preview returned no open work items." />
+            )}
+          </StonePanel>
 
-        <StonePanel title="Tracker Health" icon="readiness" variant="featured">
-          <div className="dashboard-health-grid">
-            {dashboard.healthCards.map((item) => (
-              <StatusBlock key={item.key} item={item} icon={dashboardIconForKey(item.key)} />
-            ))}
-          </div>
-          {dashboard.liveStatus.loading ? <StatusPill tone="info" loading>Connecting to live status...</StatusPill> : null}
-          {dashboard.liveStatus.error ? (
-            <div className="live-status-note">
-              <StatusPill tone={dashboard.liveStatus.stale ? "warning" : "danger"}>
-                {dashboard.liveStatus.stale ? "Showing last known worker status." : "Live worker status unavailable."}
-              </StatusPill>
-              <BeveledButton variant="ghost" icon="refresh" onClick={onRetryLive}>Retry live status</BeveledButton>
-            </div>
-          ) : null}
-        </StonePanel>
-      </section>
+          <StonePanel title="Recent Clan Activity" icon="activity" variant="table">
+            <DataTable
+              className="dashboard-activity-table"
+              columns={[
+                { key: "event", header: "Event" },
+                { key: "category", header: "Category", render: (row) => <StatusPill tone={row.tone}>{row.category}</StatusPill> },
+                { key: "time", header: "Time" },
+              ]}
+              rows={dashboard.recentChanges}
+              emptyTitle="No recent changes"
+              emptyMessage="No meaningful clan changes were recorded in the current window."
+              footer={<span>Current dashboard feed from the existing home endpoint.</span>}
+            />
+          </StonePanel>
+        </div>
 
-      <section className="dashboard-support-grid">
-        <StonePanel title="Roster Posture" icon="members">
-          {dashboard.postureCards.length ? (
-            <div className="dashboard-posture-grid">
-              {dashboard.postureCards.map((item) => (
-                <StatusBlock key={item.key} item={item} compact />
+        <aside className="dashboard-side-stack" aria-label="Dashboard support sections">
+          <StonePanel title="Tracker Health" icon="readiness" variant="featured">
+            <div className="dashboard-health-grid">
+              {dashboard.healthCards.map((item) => (
+                <StatusBlock key={item.key} item={item} icon={dashboardIconForKey(item.key)} compact />
               ))}
             </div>
-          ) : (
-            <EmptyFeatureState title="No roster posture returned" message="The API did not return stale, missing, merge, or rank-mismatch counts." />
-          )}
-        </StonePanel>
+            {dashboard.liveStatus.loading ? <StatusPill tone="info" loading>Connecting to live status...</StatusPill> : null}
+            {dashboard.liveStatus.error ? (
+              <div className="live-status-note">
+                <StatusPill tone={dashboard.liveStatus.stale ? "warning" : "danger"}>
+                  {dashboard.liveStatus.stale ? "Showing last known worker status." : "Live worker status unavailable."}
+                </StatusPill>
+                <BeveledButton variant="ghost" icon="refresh" onClick={onRetryLive}>Retry live status</BeveledButton>
+              </div>
+            ) : null}
+          </StonePanel>
 
-        <StonePanel title="Future Telemetry" icon="future" variant="muted" compact>
-          <div className="dashboard-future-strip">
-            {dashboard.futureStats.map((card) => (
-              <UnavailableMetric key={card.key} label={card.label} reason={card.unavailableReason} />
-            ))}
-            <UnavailableMetric label="Drops and splits" reason="Requires a drops/splits source and persisted domain model." />
-            <UnavailableMetric label="Competitions" reason="Requires competition rules, participants, and scoring windows." />
-          </div>
-        </StonePanel>
+          <StonePanel title="Roster Posture" icon="members">
+            {dashboard.postureCards.length ? (
+              <div className="dashboard-posture-grid">
+                {dashboard.postureCards.map((item) => (
+                  <StatusBlock key={item.key} item={item} compact />
+                ))}
+              </div>
+            ) : (
+              <EmptyFeatureState title="No roster posture returned" message="The API did not return stale, missing, merge, or rank-mismatch counts." />
+            )}
+          </StonePanel>
+
+          <StonePanel title="Future Telemetry" icon="future" variant="muted" compact>
+            <div className="dashboard-future-strip">
+              {dashboard.futureStats.map((card) => (
+                <UnavailableMetric key={card.key} label={card.label} reason={card.unavailableReason} />
+              ))}
+              <UnavailableMetric label="Drops and splits" reason="Requires a drops/splits source and persisted domain model." />
+              <UnavailableMetric label="Competitions" reason="Requires competition rules, participants, and scoring windows." />
+            </div>
+          </StonePanel>
+        </aside>
       </section>
-
-      <StonePanel title="Recent Clan Activity" icon="activity" variant="table">
-        <DataTable
-          className="dashboard-activity-table"
-          columns={[
-            { key: "event", header: "Event" },
-            { key: "category", header: "Category", render: (row) => <StatusPill tone={row.tone}>{row.category}</StatusPill> },
-            { key: "time", header: "Time" },
-          ]}
-          rows={dashboard.recentChanges}
-          emptyTitle="No recent changes"
-          emptyMessage="No meaningful clan changes were recorded in the current window."
-          footer={<span>Current dashboard feed from the existing home endpoint.</span>}
-        />
-      </StonePanel>
     </div>
   );
 }

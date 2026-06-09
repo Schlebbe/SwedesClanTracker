@@ -2358,6 +2358,20 @@ select,
   align-items: start;
 }
 
+.dashboard-live-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(330px, 0.9fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+.dashboard-primary-stack,
+.dashboard-side-stack {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
+}
+
 .dashboard-support-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.35fr) minmax(300px, 0.85fr);
@@ -2417,7 +2431,7 @@ select,
 
 .dashboard-health-grid,
 .dashboard-posture-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
 }
 
 .dashboard-status-block {
@@ -2481,7 +2495,7 @@ select,
 }
 
 .dashboard-activity-table .osrs-data-table {
-  min-width: 760px;
+  min-width: 640px;
 }
 
 .members-summary-item {
@@ -2573,7 +2587,8 @@ select,
     position: static;
   }
 
-  .dashboard-stat-grid {
+  .dashboard-stat-grid,
+  .dashboard-kpi-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -2610,6 +2625,9 @@ select,
   .posture-grid,
   .dashboard-header,
   .dashboard-stat-grid,
+  .dashboard-kpi-row,
+  .dashboard-live-grid,
+  .dashboard-work-grid,
   .dashboard-health-grid,
   .dashboard-posture-grid,
   .members-toolbar,

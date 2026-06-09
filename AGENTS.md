@@ -50,7 +50,7 @@ For local frontend preview, use:
 
 ```powershell
 cd swedesclantracker-frontend
-$env:VITE_API_PROXY_TARGET="http://192.168.10.106"
+$env:VITE_API_PROXY_TARGET="http://<api-host-or-ip>"
 npm run dev -- --host 127.0.0.1 --port 5173
 ```
 
