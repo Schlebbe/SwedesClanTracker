@@ -1354,6 +1354,94 @@ select:focus-visible {
   gap: 0.72rem;
 }
 
+.activity-surface {
+  gap: 1.05rem;
+}
+
+.activity-header {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+}
+
+.activity-toolbar-panel {
+  padding-block: 0.78rem;
+}
+
+.activity-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.activity-filter-active {
+  color: var(--osrs-gold-bright);
+  border-color: var(--osrs-gold);
+  box-shadow: inset 0 0 0 1px rgba(241, 212, 134, 0.1);
+}
+
+.activity-table .osrs-data-table {
+  min-width: 920px;
+}
+
+.activity-table .osrs-data-table th:first-child,
+.activity-table .osrs-data-table td:first-child {
+  width: 8.5rem;
+}
+
+.activity-table .osrs-data-table th:last-child,
+.activity-table .osrs-data-table td:last-child {
+  width: 8rem;
+}
+
+.activity-time {
+  color: var(--osrs-text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.activity-event-cell {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.activity-event-cell strong {
+  color: var(--osrs-gold-bright);
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.activity-event-cell span {
+  color: var(--osrs-text-muted);
+  font-size: 0.82rem;
+}
+
+.activity-member {
+  color: var(--osrs-gold-bright);
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.activity-detail {
+  display: block;
+  max-width: 68ch;
+  color: var(--osrs-text);
+  line-height: 1.42;
+  overflow-wrap: anywhere;
+}
+
+.activity-action-link {
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+
+.activity-routine-note {
+  margin: 0;
+  color: var(--osrs-text-muted);
+}
+
 .log-item {
   align-items: flex-start;
   gap: 0.85rem;
@@ -1465,6 +1553,7 @@ select:focus-visible {
   .osrs-nav-list,
   .queue-columns,
   .review-header,
+  .activity-header,
   .review-card-grid,
   .review-detail-grid,
   .profile-hero,

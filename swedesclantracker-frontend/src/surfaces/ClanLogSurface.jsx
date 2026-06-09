@@ -1,83 +1,143 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
+import { BeveledButton } from "../components/osrs/BeveledButton";
+import { DataTable } from "../components/osrs/DataTable";
+import { EmptyFeatureState } from "../components/osrs/EmptyFeatureState";
+import { StatusPill } from "../components/osrs/StatusPill";
+import { StonePanel } from "../components/osrs/StonePanel";
+import { filterActivityRows, mapClanLogToActivityLogViewModel } from "../data/viewModels/activityLogViewModel";
 
 export function ClanLogSurface({ log, loading, error, onRetry }) {
   const [filter, setFilter] = useState("important");
-
-  const map = {
-    promotions: "Promotion",
-    roster: "Roster",
-    reviews: "Review",
-    "sync-system": "System",
-  };
-
-  const filters = Array.isArray(log?.filters) ? log.filters : ["important", "promotions", "roster", "reviews", "sync-system", "all"];
-  const important = Array.isArray(log?.important) ? log.important : [];
-  const routine = Array.isArray(log?.routine) ? log.routine : [];
-
-  const visibleImportant = filter === "all" || filter === "important"
-    ? important
-    : important.filter((item) => item.group === map[filter]);
-
-  const showRoutine = filter === "all" || filter === "important" || filter === "sync-system";
-  const toneByGroup = {
-    Promotion: "success",
-    Review: "warning",
-    Roster: "info",
-    System: "info",
-  };
+  const activity = useMemo(() => mapClanLogToActivityLogViewModel(log), [log]);
+  const rows = useMemo(() => filterActivityRows(activity, filter), [activity, filter]);
+  const columns = useMemo(() => buildColumns(activity), [activity]);
 
   return (
-    <div className="surface-grid">
-      <header className="surface-header">
-        <p className="eyebrow">Clan Log</p>
-        <h2>Meaningful History First, Routine Sync Noise Reduced</h2>
+    <div className="surface-grid activity-surface">
+      <header className="surface-header activity-header">
+        <div>
+          <p className="eyebrow">Activity Log</p>
+          <h2>{activity.title}</h2>
+          <p>{activity.subtitle}</p>
+        </div>
+        <StatusPill tone={activity.summary.important ? "info" : "neutral"}>
+          {activity.summary.important} important
+        </StatusPill>
       </header>
 
-      {loading ? <section className="panel"><p className="tone tone-info" data-loading="true">Loading clan log...</p></section> : null}
+      {loading ? (
+        <StonePanel>
+          <StatusPill tone="info" loading>Loading activity log...</StatusPill>
+        </StonePanel>
+      ) : null}
 
       {error ? (
-        <section className="panel">
-          <p className="tone tone-danger">Unable to load clan log: {error}</p>
-          <div className="message-action"><button className="btn-ghost" onClick={onRetry}>Retry</button></div>
-        </section>
+        <StonePanel tone="danger">
+          <EmptyFeatureState
+            title="Unable to load activity log"
+            message={error}
+            tone="danger"
+            action={<BeveledButton onClick={onRetry}>Retry</BeveledButton>}
+          />
+        </StonePanel>
       ) : null}
 
       {!loading && !error ? (
         <>
-          <section className="panel filter-row" aria-label="Clan log filters">
-            {filters.map((item) => (
-              <button key={item} className={filter === item ? "chip chip-active" : "chip"} onClick={() => setFilter(item)}>{item}</button>
-            ))}
-          </section>
+          <StonePanel className="activity-toolbar-panel">
+            <div className="activity-toolbar" aria-label="Activity log filters">
+              {activity.filters.map((item) => (
+                <BeveledButton
+                  key={item.id}
+                  variant={filter === item.id ? "secondary" : "ghost"}
+                  className={filter === item.id ? "activity-filter-active" : ""}
+                  onClick={() => setFilter(item.id)}
+                >
+                  {item.label}
+                </BeveledButton>
+              ))}
+            </div>
+          </StonePanel>
 
-          <section className="layout-two">
-            <article className="panel">
-              <h3>Important Events</h3>
-              <ul className="stack-list">
-                {visibleImportant.length ? visibleImportant.map((item) => (
-                  <li key={item.id} className="line-item log-item">
-                    <div className="log-main">
-                      <div className="log-heading">
-                        <span className={toneByGroup[item.group] ? `tone tone-${toneByGroup[item.group]}` : "tone tone-info"}>{item.group}</span>
-                        <strong>{item.title}</strong>
-                      </div>
-                      <p className="log-detail">{item.detail}</p>
-                    </div>
-                    <span className="log-time">{item.time ?? "unknown"}</span>
-                  </li>
-                )) : <li className="line-item"><span>No important events match this filter.</span></li>}
-              </ul>
-            </article>
+          <StonePanel
+            title="Clan Activity"
+            subtitle="Real lifecycle projections from the current app API"
+            actions={<StatusPill tone={rows.length ? "info" : "neutral"}>{rows.length} shown</StatusPill>}
+            className="activity-table-panel"
+          >
+            <DataTable
+              columns={columns}
+              rows={rows}
+              className="activity-table"
+              emptyTitle="No activity events"
+              emptyMessage="No clan-log rows match the current filter."
+            />
+          </StonePanel>
 
-            <article className="panel">
-              <h3>Routine Sync/System Bundle</h3>
-              <ul className="stack-list compact">
-                {showRoutine ? (routine.length ? routine.map((item) => <li key={item} className="line-item"><span>{item}</span></li>) : <li className="line-item"><span>No routine sync entries available.</span></li>) : <li className="line-item"><span>Routine bundle hidden for this filter.</span></li>}
-              </ul>
-            </article>
-          </section>
+          {activity.summary.routine ? (
+            <StonePanel title="Routine Bundle" subtitle="Condensed sync and system entries from the same API response">
+              <p className="activity-routine-note">
+                {activity.summary.routine} routine entries are included under Sync/System and All.
+              </p>
+            </StonePanel>
+          ) : null}
         </>
       ) : null}
     </div>
   );
+}
+
+function buildColumns(activity) {
+  const columns = [
+    {
+      key: "time",
+      header: "Time",
+      render: (row) => <span className="activity-time">{row.time}</span>,
+    },
+    {
+      key: "event",
+      header: "Event",
+      render: (row) => (
+        <div className="activity-event-cell">
+          <strong>{row.title}</strong>
+          <span>{row.typeLabel}</span>
+        </div>
+      ),
+    },
+  ];
+
+  if (activity.hasMemberColumn) {
+    columns.push({
+      key: "member",
+      header: "Member",
+      render: (row) => row.member ? <span className="activity-member">{row.member}</span> : "Not provided",
+    });
+  }
+
+  columns.push(
+    {
+      key: "detail",
+      header: "Details",
+      render: (row) => <span className="activity-detail">{row.detail}</span>,
+    },
+    {
+      key: "status",
+      header: "Status",
+      render: (row) => <StatusPill tone={row.tone}>{row.statusLabel}</StatusPill>,
+    }
+  );
+
+  if (activity.hasActionColumn) {
+    columns.push({
+      key: "action",
+      header: "Action",
+      render: (row) => row.action ? (
+        <a className="osrs-button osrs-button-ghost activity-action-link" href={row.action.target}>
+          {row.action.label}
+        </a>
+      ) : "None",
+    });
+  }
+
+  return columns;
 }
