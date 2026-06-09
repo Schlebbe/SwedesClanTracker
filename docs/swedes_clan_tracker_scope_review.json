@@ -1,0 +1,313 @@
+{
+  "repo": {
+    "fullName": "Schlebbe/SwedesClanTracker",
+    "branch": "feature/ui-overhaul",
+    "inspectedAtUtc": "2026-06-09T11:16:23+00:00",
+    "outputPurpose": "Gap analysis between the generated OSRS Clan Hub Admin mockups and the current frontend/backend implementation."
+  },
+  "generatedAtUtc": "2026-06-09T11:26:52+00:00",
+  "purpose": "Scope and rewrite-risk assessment for adapting the current SwedesClanTracker feature/ui-overhaul branch toward the OSRS Clan Hub Admin mockups.",
+  "scopeDefinitions": {
+    "likelyInScopeForMvp": "Can be implemented mostly in the frontend or by reshaping existing API DTOs without changing the core data model heavily.",
+    "heavyRewrite": "Requires new persisted domain entities, richer worker collection, app-facing mutation endpoints, or replacing generic lifecycle/event metadata with structured records.",
+    "likelyOutOfScope": "Expands the project into a different product area, depends on unavailable third-party/manual data sources, or is mostly decorative/admin functionality with unclear value."
+  },
+  "likelyInScopeForMvp": [
+    {
+      "feature": "OSRS visual shell and navigation",
+      "why": "Mostly frontend CSS/component work. Existing surfaces already exist and can be relabeled/restyled.",
+      "recommendedScope": "Implement app shell, sidebar labels, top sync bar, OSRS-style cards, table styling, and basic icons using safe custom assets.",
+      "backendNeed": "Optional shell metadata only; can start with existing /api/app/home and /api/status."
+    },
+    {
+      "feature": "Roster restyle using existing data",
+      "why": "The Members surface and /api/app/roster already exist.",
+      "recommendedScope": "Ship the OSRS table layout first with current fields, then add combat/total/build once backend supports them.",
+      "backendNeed": "No rewrite for visual phase; DTO extension later."
+    },
+    {
+      "feature": "Admin queue restyle using existing generic cases",
+      "why": "Existing admin queue and review endpoints can be reused visually.",
+      "recommendedScope": "Render current merge/missing cases as cards, but mark advanced confidence metrics as future backend work.",
+      "backendNeed": "Potential app-facing wrappers for existing review actions."
+    },
+    {
+      "feature": "Rank review UI from existing PromotionCandidate workflow",
+      "why": "Promotion endpoints already exist.",
+      "recommendedScope": "Create a dedicated tab/page backed by existing /api/promotions endpoints before inventing a new model.",
+      "backendNeed": "Light DTO improvements for reason, risk, and supporting evidence."
+    },
+    {
+      "feature": "Activity log polish",
+      "why": "LifecycleEvent data already exists and can be projected into a nicer table.",
+      "recommendedScope": "Normalize display mapping in frontend first; only later standardize event metadata.",
+      "backendNeed": "Optional normalized /api/app/activity/recent DTO."
+    }
+  ],
+  "heavyRewriteFeatures": [
+    {
+      "feature": "Rich OSRS stats model",
+      "mockupExamples": [
+        "Total XP",
+        "Combat Level",
+        "Skill Breakdown",
+        "Boss KC Logged",
+        "Weekly XP Gained"
+      ],
+      "whyHeavy": "Current PlayerSnapshot stores only TotalLevel, EHB, EHP, Collections, and PetCount. The mockups need per-skill snapshots, total XP, combat level, boss KC, and historical deltas.",
+      "workerSupportNeeded": [
+        "Collect total XP, combat level, per-skill levels/XP, and boss KC from a reliable source.",
+        "Persist historical snapshots often enough to compute weekly deltas.",
+        "Classify stale/not-found/synced states from sync outcomes."
+      ],
+      "coreSupportNeeded": [
+        "Add SkillSnapshot or PlayerSkillSnapshot table.",
+        "Add TotalXp and CombatLevel to snapshots or latest-player projection.",
+        "Add BossKcSnapshot for per-boss historical values.",
+        "Add sync/audit run records for freshness and failure reasons."
+      ],
+      "apiSupportNeeded": [
+        "Extend roster/profile/home DTOs with total XP, combat, skill summaries, boss KC, last gain, sync reason.",
+        "Support time-window aggregation for weekly XP and boss KC."
+      ],
+      "rewriteRisk": "High",
+      "recommendation": "Do not block UI overhaul on this. Add DTO placeholders or feature flags, then implement stats collection as a separate backend milestone."
+    },
+    {
+      "feature": "Structured RSN-change confidence engine",
+      "mockupExamples": [
+        "98% Match",
+        "Total XP Delta",
+        "Boss KC Match",
+        "HiScores Match",
+        "Link RSN"
+      ],
+      "whyHeavy": "Current merge suggestion appears to use simple snapshot deltas and generic metadata. The mockup requires repeatable confidence scoring and structured comparison components.",
+      "workerSupportNeeded": [
+        "Calculate confidence using multiple signals: total XP, total level, EHP/EHB, boss KC, collection count, pets, and source freshness.",
+        "Persist candidate comparisons rather than only emitting generic lifecycle events."
+      ],
+      "coreSupportNeeded": [
+        "Add RenameReviewCase / RsnChangeCandidate entity or structured metadata schema.",
+        "Persist confidence score, score breakdown, old/new player references, and decision status."
+      ],
+      "apiSupportNeeded": [
+        "Add structured GET /api/app/rsn-changes.",
+        "Add POST link/reject/reassign/ask-member endpoints or app-facing wrappers around existing review endpoints."
+      ],
+      "rewriteRisk": "High",
+      "recommendation": "Implement a basic card UI using current evidence first. Treat advanced confidence scoring as a dedicated backend feature."
+    },
+    {
+      "feature": "Dashboard KPI aggregation",
+      "mockupExamples": [
+        "Weekly XP Gained",
+        "Boss KC Logged",
+        "Collection Log Sync",
+        "Pending Admin Tasks"
+      ],
+      "whyHeavy": "Some counts can be derived now, but XP/KC/log accuracy requires richer historical snapshots and standardized worker events.",
+      "workerSupportNeeded": [
+        "Emit structured sync run events.",
+        "Persist historical stat deltas and collection-log freshness.",
+        "Optionally track API success/failure metrics."
+      ],
+      "coreSupportNeeded": [
+        "Add stat history models and SyncRun/AuditRun models.",
+        "Create aggregate query support for weekly windows."
+      ],
+      "apiSupportNeeded": [
+        "Return dashboardKpis and pendingTasks from /api/app/home.",
+        "Return status freshness and confidence/accuracy metadata."
+      ],
+      "rewriteRisk": "Medium-High",
+      "recommendation": "Start with KPIs derivable from existing data: tracked members, stale members, pending reviews, last sync. Add XP/KC cards once snapshots exist."
+    },
+    {
+      "feature": "Player profile timeline, notes, and rich recent activity",
+      "mockupExamples": [
+        "Rank History",
+        "Admin Notes",
+        "Recent Activity",
+        "Recent Drops"
+      ],
+      "whyHeavy": "Profile history is currently marked unavailable. Admin notes and rich drops are not present as first-class models.",
+      "workerSupportNeeded": [
+        "Emit durable rank-change and relevant player activity events.",
+        "Ingest drops only if a source exists."
+      ],
+      "coreSupportNeeded": [
+        "Add PlayerAdminNote entity.",
+        "Add RankHistory or durable rank lifecycle projection.",
+        "Add DropLog/SplitLog only if product scope includes drops."
+      ],
+      "apiSupportNeeded": [
+        "Add GET/PUT admin notes endpoint.",
+        "Add rank history and player activity endpoints.",
+        "Extend player profile DTO."
+      ],
+      "rewriteRisk": "Medium-High",
+      "recommendation": "Admin notes are a reasonable isolated addition. Drops/splits should not be bundled into the first profile rewrite."
+    },
+    {
+      "feature": "Action workflows and worker job queue",
+      "mockupExamples": [
+        "Update Roster",
+        "Run Audit",
+        "Sync HiScores",
+        "Clear Temp Cache",
+        "Add Member"
+      ],
+      "whyHeavy": "Buttons require reliable mutation endpoints, background job orchestration, progress reporting, idempotency, auth, and error handling.",
+      "workerSupportNeeded": [
+        "Accept priority sync/audit jobs.",
+        "Report job progress and completion.",
+        "Avoid duplicate/high-cost external API calls."
+      ],
+      "coreSupportNeeded": [
+        "Add Job/AuditRun/SyncRun records if actions are asynchronous.",
+        "Record who triggered actions and their result."
+      ],
+      "apiSupportNeeded": [
+        "Add mutation endpoints for sync, audit, add member, export, and cache clear only where real behavior exists.",
+        "Return job IDs and polling endpoints for long-running actions."
+      ],
+      "rewriteRisk": "Medium",
+      "recommendation": "Keep non-existing quick tools hidden or disabled. Wire only actions that already exist or are cheap to implement."
+    }
+  ],
+  "likelyOutOfScopeFeatures": [
+    {
+      "feature": "Drops and split accounting",
+      "reason": "This turns the tracker into a PvM loot ledger. It requires manual entry, Discord bot ingestion, or another external source, plus money/value normalization.",
+      "frontendImpact": "Recent drops/splits can be mocked visually, but real tables/forms would be a separate product module.",
+      "backendImpact": "Requires DropLogEntry/SplitLogEntry entities, APIs, validation, audit trail, and possibly item price data.",
+      "recommendation": "Out of scope for the UI overhaul. Revisit as a separate PvM module."
+    },
+    {
+      "feature": "Competitions / PvM leagues",
+      "reason": "Competitions require rules, participants, scoring windows, leaderboards, start/end states, and anti-abuse rules.",
+      "frontendImpact": "Dashboard can show a read-only 'active competition' placeholder later.",
+      "backendImpact": "Requires Competition, CompetitionParticipant, ScoreSnapshot, and leaderboard APIs.",
+      "recommendation": "Out of scope unless competitions are already a core project goal."
+    },
+    {
+      "feature": "Full item-level collection log sync",
+      "reason": "Current data appears to store collection count, not individual unlocked items. Item-level logs need a reliable source and much larger storage/projection surface.",
+      "frontendImpact": "Keep 'Collection Log Sync' as a high-level count/health KPI.",
+      "backendImpact": "Requires per-item collection-log schema, sync source, and potentially item metadata.",
+      "recommendation": "Keep count-level only for now."
+    },
+    {
+      "feature": "Messaging workflow for 'Ask Member'",
+      "reason": "The app has no clear messaging channel. Asking a member would require Discord, email, in-app notifications, or another communication integration.",
+      "frontendImpact": "Button can be hidden, disabled, or converted to 'Copy message'.",
+      "backendImpact": "Requires member contact mapping, message dispatch, delivery status, and privacy considerations.",
+      "recommendation": "Out of scope unless Discord integration is already planned."
+    },
+    {
+      "feature": "Multi-user RBAC and notification center",
+      "reason": "Useful, but not central to rendering the OSRS UI and could distract from tracker/domain work.",
+      "frontendImpact": "Top-right admin display can be static or sourced from existing auth session.",
+      "backendImpact": "Requires user/role/permission model and notification persistence.",
+      "recommendation": "Keep basic auth/logout. Defer notification center and fine-grained permissions."
+    },
+    {
+      "feature": "Clear Temp Cache quick tool",
+      "reason": "This is only meaningful if the app has a real cache that admins should clear. Otherwise it is cargo-cult admin UI.",
+      "frontendImpact": "Remove or hide the button.",
+      "backendImpact": "Should not add fake endpoint. Add only if a real cache and operational need exist.",
+      "recommendation": "Out of scope unless current infrastructure has a cache layer."
+    },
+    {
+      "feature": "Official-looking OSRS art/assets",
+      "reason": "The app should remain an unofficial tracker and avoid depending on official/copyrighted game UI art.",
+      "frontendImpact": "Use custom OSRS-inspired icons, CSS borders, and color language instead.",
+      "backendImpact": "None.",
+      "recommendation": "Out of scope. Keep the design inspired but original."
+    }
+  ],
+  "decisionMatrix": [
+    {
+      "area": "Visual OSRS restyle",
+      "classification": "In scope",
+      "shipInUiOverhaul": true,
+      "requiresWorker": false,
+      "requiresCoreSchema": false,
+      "requiresApiChange": "Optional"
+    },
+    {
+      "area": "Roster layout and filters",
+      "classification": "Partially in scope",
+      "shipInUiOverhaul": true,
+      "requiresWorker": "Later for richer fields",
+      "requiresCoreSchema": "Later for combat/build/XP",
+      "requiresApiChange": "Recommended"
+    },
+    {
+      "area": "Rank review UI",
+      "classification": "In scope",
+      "shipInUiOverhaul": true,
+      "requiresWorker": "Minimal",
+      "requiresCoreSchema": "Minimal",
+      "requiresApiChange": "Light wrappers/DTOs"
+    },
+    {
+      "area": "Advanced RSN confidence scoring",
+      "classification": "Heavy rewrite",
+      "shipInUiOverhaul": false,
+      "requiresWorker": true,
+      "requiresCoreSchema": true,
+      "requiresApiChange": true
+    },
+    {
+      "area": "Total XP/combat/skills/boss KC",
+      "classification": "Heavy rewrite",
+      "shipInUiOverhaul": false,
+      "requiresWorker": true,
+      "requiresCoreSchema": true,
+      "requiresApiChange": true
+    },
+    {
+      "area": "Drops/splits",
+      "classification": "Likely out of scope",
+      "shipInUiOverhaul": false,
+      "requiresWorker": "Depends on source",
+      "requiresCoreSchema": true,
+      "requiresApiChange": true
+    },
+    {
+      "area": "Competitions",
+      "classification": "Likely out of scope",
+      "shipInUiOverhaul": false,
+      "requiresWorker": true,
+      "requiresCoreSchema": true,
+      "requiresApiChange": true
+    }
+  ],
+  "recommendedScopeCutForFeatureUiOverhaul": {
+    "include": [
+      "OSRS visual shell and component design system",
+      "Dashboard restyle using currently derivable stats",
+      "Roster restyle with existing fields plus graceful placeholders",
+      "Admin queue card layout using existing evidence",
+      "Rank review UI using existing promotion endpoints",
+      "Activity log polish"
+    ],
+    "defer": [
+      "Total XP/combat/per-skill/boss KC collection",
+      "Structured RSN confidence engine",
+      "Player rank history and admin notes",
+      "Dashboard weekly XP/KC aggregates",
+      "Async job queue for full sync/audit actions"
+    ],
+    "excludeForNow": [
+      "Drops/split accounting",
+      "Competitions/leagues",
+      "Messaging workflow for Ask Member",
+      "Full collection-log item sync",
+      "Notification center/RBAC",
+      "Clear temp cache unless real cache exists"
+    ]
+  }
+}
