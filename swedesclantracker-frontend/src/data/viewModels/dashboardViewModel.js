@@ -99,56 +99,6 @@ export const dashboardVisualPlaceholders = {
     { key: "sync-hiscores", label: "Sync HiScores", icon: "sync", source: "placeholder" },
     { key: "clear-cache", label: "Clear Temp Cache", icon: "clean", source: "placeholder" },
   ],
-  activityRows: [
-    {
-      key: "placeholder-new-recruit",
-      time: "14:22:15",
-      event: "New Recruit",
-      member: "Swedes_Recruit",
-      detail: "Joined the clan",
-      status: "Success",
-      tone: "success",
-      action: "View",
-      icon: "add-member",
-      source: "placeholder",
-    },
-    {
-      key: "placeholder-rank-promotion",
-      time: "14:18:02",
-      event: "Rank Promotion",
-      member: "Vanguard_Slayer",
-      detail: "Promoted to Captain",
-      status: "General",
-      tone: "info",
-      action: "View",
-      icon: "promotion",
-      source: "placeholder",
-    },
-    {
-      key: "placeholder-manual-sync",
-      time: "14:05:44",
-      event: "Manual Sync",
-      member: "HCIM_BTW_99",
-      detail: "Hiscores updated",
-      status: "Updated",
-      tone: "warning",
-      action: "View",
-      icon: "sync",
-      source: "placeholder",
-    },
-    {
-      key: "placeholder-name-change",
-      time: "13:12:09",
-      event: "Name Change Detected",
-      member: "NoobBuster1",
-      detail: "Possible name change",
-      status: "Pending",
-      tone: "warning",
-      action: "Review",
-      icon: "scroll",
-      source: "placeholder",
-    },
-  ],
 };
 
 export function mapHomeToDashboardViewModel(home, liveStatus) {
@@ -339,48 +289,21 @@ function mergeTaskTargets(realTasks) {
 }
 
 function buildActivityRows(changes) {
-  const realRows = (Array.isArray(changes) ? changes : []).slice(0, 8).map((item, index) => {
-    const parsed = parseActivityTitle(item.title);
+  return (Array.isArray(changes) ? changes : []).slice(0, 8).map((item, index) => {
     const tone = normalizeTone(item.tone);
     return {
       key: item.id ?? `activity-${index}`,
-      time: item.time ?? "unknown",
-      event: parsed.event,
-      member: parsed.member,
-      detail: parsed.detail || item.category || "Tracker event",
-      status: item.category ?? "General",
+      time: item.time ?? "",
+      event: item.title ?? "",
+      member: item.member ?? item.player ?? "",
+      detail: item.detail ?? "",
+      status: item.category ?? "",
       tone,
-      action: item.category?.toLowerCase().includes("review") ? "Review" : "View",
-      icon: iconForActivity(parsed.event, item.category),
+      action: item.action ?? "",
+      icon: iconForActivity(item.title, item.category),
       source: "api",
     };
   });
-
-  const rows = [...realRows];
-  for (const placeholder of dashboardVisualPlaceholders.activityRows) {
-    if (rows.length >= 8) break;
-    rows.push(placeholder);
-  }
-
-  return rows;
-}
-
-function parseActivityTitle(title) {
-  if (typeof title !== "string" || !title.trim()) {
-    return {
-      event: "Tracker Event",
-      member: "Unavailable",
-      detail: "No event detail provided",
-    };
-  }
-
-  const [event, ...memberParts] = title.split(":");
-  const member = memberParts.join(":").trim();
-  return {
-    event: event.trim() || "Tracker Event",
-    member: member || "Member unavailable",
-    detail: member ? "Recorded by tracker" : "Member not included in API payload",
-  };
 }
 
 function iconForActivity(event, category) {

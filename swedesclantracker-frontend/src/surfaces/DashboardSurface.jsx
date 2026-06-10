@@ -99,17 +99,17 @@ export function DashboardSurface({ data, liveStatus, loading, error, onRetry, on
         <DataTable
           className="dashboard-activity-table"
           columns={[
-            { key: "time", header: "Time" },
+            { key: "time", header: "Time", render: (row) => <EmptyAwareText value={row.time} /> },
             { key: "event", header: "Event", render: (row) => <EventCell row={row} /> },
-            { key: "member", header: "Member", render: (row) => <span className="dashboard-member-cell">{row.member}</span> },
-            { key: "detail", header: "Details", render: (row) => <span className="dashboard-detail-cell">{row.detail}</span> },
-            { key: "status", header: "Status", render: (row) => <StatusPill tone={row.tone}>{row.status}</StatusPill> },
-            { key: "admin", header: "Admin", render: (row) => <button type="button" className="dashboard-row-action" disabled>{row.action}</button> },
+            { key: "member", header: "Member", render: (row) => <span className="dashboard-member-cell"><EmptyAwareText value={row.member} /></span> },
+            { key: "detail", header: "Details", render: (row) => <span className="dashboard-detail-cell"><EmptyAwareText value={row.detail} /></span> },
+            { key: "status", header: "Status", render: (row) => row.status ? <StatusPill tone={row.tone}>{row.status}</StatusPill> : <EmptyAwareText /> },
+            { key: "admin", header: "Admin", render: (row) => row.action ? <button type="button" className="dashboard-row-action" disabled>{row.action}</button> : <EmptyAwareText /> },
           ]}
           rows={dashboard.activityRows}
           getRowKey={(row) => row.key}
-          emptyTitle="No recent changes"
-          emptyMessage="No meaningful clan changes were recorded in the current window."
+          emptyTitle="No recent clan activity available"
+          emptyMessage="The current API response did not include recent dashboard activity rows."
         />
       </StonePanel>
 
@@ -156,9 +156,13 @@ function EventCell({ row }) {
   return (
     <span className="dashboard-event-cell">
       <IconGlyph name={row.icon} className="dashboard-event-icon" />
-      <span>{row.event}</span>
+      <EmptyAwareText value={row.event} />
     </span>
   );
+}
+
+function EmptyAwareText({ value }) {
+  return value ? <span>{value}</span> : <span aria-label="Unavailable">-</span>;
 }
 
 function SurfaceMessage({ title, text, tone, action = null, loading = false }) {
