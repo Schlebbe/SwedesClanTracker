@@ -17,7 +17,13 @@
   --osrs-blue: #7d9fc7;
   --osrs-shadow: rgba(0, 0, 0, 0.45);
   --osrs-focus: #f1d486;
+  --osrs-font-display: Georgia, "Times New Roman", ui-serif, serif;
+  --osrs-font-body: "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
   --osrs-noise-svg: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='64' viewBox='0 0 64 64'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.78' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='64' height='64' filter='url(%23n)' opacity='.24'/%3E%3C/svg%3E");
+  --osrs-recessed-surface:
+    linear-gradient(180deg, rgba(255, 239, 182, 0.035), rgba(0, 0, 0, 0.22) 76%),
+    radial-gradient(circle at 50% 0%, rgba(111, 84, 38, 0.14), transparent 42%),
+    #120f0b;
   --osrs-panel-texture:
     linear-gradient(180deg, rgba(255, 239, 182, 0.045), rgba(0, 0, 0, 0.18) 76%),
     radial-gradient(circle at 18% 0%, rgba(215, 181, 109, 0.08), transparent 30%),
@@ -60,18 +66,17 @@ html {
 body {
   margin: 0;
   color: var(--osrs-text);
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--osrs-font-body);
   line-height: 1.5;
   overflow-wrap: anywhere;
   background:
-    radial-gradient(90% 70% at 62% 0%, rgba(215, 181, 109, 0.09), transparent 42%),
-    radial-gradient(90% 85% at 0% 48%, rgba(60, 45, 24, 0.22), transparent 54%),
-    linear-gradient(90deg, rgba(111, 84, 38, 0.12) 1px, transparent 1px),
-    linear-gradient(180deg, rgba(111, 84, 38, 0.08) 1px, transparent 1px),
+    radial-gradient(90% 70% at 62% 0%, rgba(215, 181, 109, 0.11), transparent 42%),
+    radial-gradient(80% 80% at 0% 44%, rgba(60, 45, 24, 0.26), transparent 55%),
+    radial-gradient(100% 110% at 50% 120%, rgba(0, 0, 0, 0.5), transparent 46%),
     var(--osrs-noise-svg),
     radial-gradient(120% 100% at 50% -20%, #2b2115 0%, #17130e 38%, #0f0d0a 100%);
-  background-size: auto, auto, 28px 28px, 28px 28px, 64px 64px, auto;
-  background-blend-mode: normal, normal, normal, normal, soft-light, normal;
+  background-size: auto, auto, auto, 64px 64px, auto;
+  background-blend-mode: normal, normal, multiply, soft-light, normal;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -1662,15 +1667,18 @@ select,
 .osrs-sidebar,
 .app-nav {
   padding: 0;
+  border-right: 2px solid rgba(111, 84, 38, 0.72);
   background:
-    linear-gradient(90deg, rgba(0, 0, 0, 0.18), transparent 24%, rgba(0, 0, 0, 0.46)),
+    linear-gradient(90deg, rgba(255, 239, 182, 0.045), transparent 12%, rgba(0, 0, 0, 0.52)),
+    linear-gradient(180deg, rgba(111, 84, 38, 0.18), transparent 1.1rem, transparent calc(100% - 1.1rem), rgba(0, 0, 0, 0.38)),
     radial-gradient(circle at 52% 0%, rgba(215, 181, 109, 0.09), transparent 26%),
     var(--osrs-noise-svg),
     linear-gradient(180deg, #201a12 0%, #14110c 48%, #0d0c09 100%);
-  background-blend-mode: normal, soft-light, multiply, normal;
+  background-blend-mode: normal, normal, soft-light, multiply, normal;
   box-shadow:
-    inset -1px 0 0 rgba(255, 239, 182, 0.08),
-    inset -9px 0 22px rgba(0, 0, 0, 0.42),
+    inset -1px 0 0 rgba(255, 239, 182, 0.1),
+    inset -10px 0 26px rgba(0, 0, 0, 0.52),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.54),
     10px 0 30px rgba(0, 0, 0, 0.26);
 }
 
@@ -1764,40 +1772,46 @@ select,
 
 .osrs-nav-item,
 .nav-item {
-  min-height: 58px;
-  grid-template-columns: 38px minmax(0, 1fr) auto;
-  padding: 0 1.05rem;
-  gap: 0.72rem;
+  min-height: 62px;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  padding: 0 0.95rem;
+  gap: 0.78rem;
   color: #d7c9a9;
   border-block-color: rgba(111, 84, 38, 0.18);
-  font-family: Georgia, "Times New Roman", ui-serif, serif;
+  font-family: var(--osrs-font-display);
   font-size: 1rem;
 }
 
 .osrs-nav-item:hover,
 .nav-item:hover {
   background:
-    linear-gradient(90deg, rgba(215, 181, 109, 0.12), rgba(215, 181, 109, 0.025)),
+    linear-gradient(90deg, rgba(215, 181, 109, 0.16), rgba(215, 181, 109, 0.035)),
     rgba(0, 0, 0, 0.12);
 }
 
 .osrs-nav-item-active,
 .nav-item-active {
   color: var(--osrs-gold-bright);
-  border-color: rgba(215, 181, 109, 0.48);
+  border-color: rgba(215, 181, 109, 0.68);
   background:
-    linear-gradient(90deg, rgba(215, 181, 109, 0.26), rgba(215, 181, 109, 0.055) 76%),
+    linear-gradient(180deg, rgba(255, 239, 182, 0.11), rgba(0, 0, 0, 0.24)),
+    linear-gradient(90deg, rgba(215, 181, 109, 0.26), rgba(215, 181, 109, 0.07) 76%),
     var(--osrs-noise-svg),
     rgba(0, 0, 0, 0.2);
   box-shadow:
-    inset 0 1px 0 rgba(255, 239, 182, 0.12),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.58),
-    inset 0 0 0 1px rgba(215, 181, 109, 0.08);
+    inset 0 1px 0 rgba(255, 239, 182, 0.2),
+    inset 0 -2px 0 rgba(0, 0, 0, 0.72),
+    inset 0 0 0 1px rgba(215, 181, 109, 0.18),
+    0 0 0 1px rgba(53, 35, 14, 0.62);
 }
 
 .osrs-nav-item-active::before {
   content: "";
   position: absolute;
+  inset: 7px 8px;
+  border: 1px solid rgba(241, 212, 134, 0.22);
+  border-radius: 6px;
+  pointer-events: none;
 }
 
 .osrs-nav-item {
@@ -1852,8 +1866,8 @@ select,
   pointer-events: none;
   user-select: none;
   filter:
-    drop-shadow(0 1px 0 rgba(255, 239, 182, 0.16))
-    drop-shadow(0 3px 5px rgba(0, 0, 0, 0.45));
+    drop-shadow(0 1px 0 rgba(255, 239, 182, 0.18))
+    drop-shadow(0 4px 6px rgba(0, 0, 0, 0.52));
 }
 
 .osrs-image-icon > span {
@@ -1866,21 +1880,24 @@ select,
 }
 
 .osrs-nav-icon.osrs-image-icon > img {
-  width: 29px;
-  height: 29px;
+  width: 31px;
+  height: 31px;
 }
 
 .osrs-nav-icon.osrs-glyph {
-  width: 34px;
-  height: 34px;
-  border: 1px solid rgba(111, 84, 38, 0.7);
-  border-radius: 6px;
+  width: 40px;
+  height: 40px;
+  border: 1px solid rgba(111, 84, 38, 0.84);
+  border-radius: 7px;
   background:
-    linear-gradient(180deg, rgba(255, 239, 182, 0.08), rgba(0, 0, 0, 0.24)),
-    #15120d;
+    linear-gradient(180deg, rgba(255, 239, 182, 0.1), rgba(0, 0, 0, 0.32)),
+    radial-gradient(circle at 50% 18%, rgba(215, 181, 109, 0.12), transparent 44%),
+    #120f0b;
   box-shadow:
-    inset 0 1px 0 rgba(255, 239, 182, 0.12),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.48);
+    inset 0 1px 0 rgba(255, 239, 182, 0.16),
+    inset 0 -2px 0 rgba(0, 0, 0, 0.68),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.44),
+    0 3px 8px rgba(0, 0, 0, 0.24);
 }
 
 .osrs-nav-item-active .osrs-nav-icon {
@@ -2057,14 +2074,19 @@ select,
 }
 
 .osrs-topbar {
-  min-height: 78px;
-  padding: 0.75rem 1.55rem;
-  border-bottom-color: rgba(111, 84, 38, 0.84);
+  min-height: 82px;
+  padding: 0.72rem 1.55rem;
+  border-bottom: 2px solid rgba(111, 84, 38, 0.84);
   background:
-    linear-gradient(180deg, rgba(255, 239, 182, 0.065), rgba(0, 0, 0, 0.28)),
+    linear-gradient(180deg, rgba(255, 239, 182, 0.085), rgba(0, 0, 0, 0.34)),
+    radial-gradient(70% 150% at 28% 0%, rgba(111, 84, 38, 0.18), transparent 45%),
     var(--osrs-noise-svg),
     #12100c;
-  background-blend-mode: normal, multiply, normal;
+  background-blend-mode: normal, soft-light, multiply, normal;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 239, 182, 0.12),
+    inset 0 -3px 0 rgba(0, 0, 0, 0.58),
+    0 8px 20px rgba(0, 0, 0, 0.24);
 }
 
 .osrs-topbar-status {
@@ -2083,12 +2105,14 @@ select,
   gap: 0.65rem;
   min-height: 44px;
   padding: 0.35rem 0.6rem;
-  border: 1px solid rgba(111, 84, 38, 0.58);
+  border: 1px solid rgba(111, 84, 38, 0.72);
   border-radius: 7px;
   background:
     linear-gradient(180deg, rgba(255, 239, 182, 0.055), rgba(0, 0, 0, 0.22)),
     rgba(17, 14, 10, 0.75);
-  box-shadow: var(--osrs-inset-depth);
+  box-shadow:
+    var(--osrs-inset-depth),
+    0 0 0 1px rgba(0, 0, 0, 0.38);
 }
 
 .osrs-topbar-admin strong {
@@ -2104,8 +2128,15 @@ select,
 }
 
 .osrs-topbar-emblem .osrs-glyph {
-  width: 26px;
-  height: 26px;
+  width: 34px;
+  height: 34px;
+  padding: 0.2rem;
+  border: 1px solid rgba(111, 84, 38, 0.72);
+  border-radius: 7px;
+  background: var(--osrs-recessed-surface);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 239, 182, 0.12),
+    inset 0 -2px 0 rgba(0, 0, 0, 0.58);
 }
 
 .osrs-content,
@@ -2118,7 +2149,7 @@ select,
 
 .surface-header h2,
 .dashboard-command-header h2 {
-  font-family: Georgia, "Times New Roman", ui-serif, serif;
+  font-family: var(--osrs-font-display);
   color: #f5e8c9;
   font-size: clamp(1.65rem, 2.2vw, 2.2rem);
   text-shadow: 0 2px 0 rgba(0, 0, 0, 0.48);
@@ -2126,34 +2157,53 @@ select,
 
 .surface-header p,
 .dashboard-command-header p {
-  font-family: Georgia, "Times New Roman", ui-serif, serif;
+  font-family: var(--osrs-font-display);
 }
 
 .osrs-stone-panel,
 .panel {
   position: relative;
-  border-color: rgba(111, 84, 38, 0.72);
+  border: 2px solid rgba(111, 84, 38, 0.78);
+  border-radius: 8px;
   background:
-    linear-gradient(180deg, rgba(255, 239, 182, 0.052), rgba(0, 0, 0, 0.2) 78%),
+    linear-gradient(180deg, rgba(255, 239, 182, 0.062), rgba(0, 0, 0, 0.25) 78%),
     radial-gradient(circle at 16% 0%, rgba(215, 181, 109, 0.085), transparent 32%),
     var(--osrs-noise-svg),
-    #1a1510;
+    #17120d;
   background-blend-mode: normal, soft-light, multiply, normal;
   box-shadow:
-    inset 0 1px 0 rgba(255, 239, 182, 0.13),
-    inset 0 -2px 0 rgba(0, 0, 0, 0.62),
-    inset 0 0 0 1px rgba(0, 0, 0, 0.5),
-    0 10px 24px rgba(0, 0, 0, 0.24);
+    inset 0 1px 0 rgba(255, 239, 182, 0.16),
+    inset 0 -3px 0 rgba(0, 0, 0, 0.7),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.58),
+    0 12px 30px rgba(0, 0, 0, 0.3);
 }
 
 .osrs-stone-panel::before,
 .panel::before {
   content: "";
   position: absolute;
-  inset: 4px;
-  border: 1px solid rgba(111, 84, 38, 0.34);
+  inset: 5px;
+  border: 1px solid rgba(111, 84, 38, 0.4);
   border-radius: 5px;
   pointer-events: none;
+}
+
+.osrs-stone-panel::after,
+.panel::after {
+  content: "";
+  position: absolute;
+  inset: 8px;
+  pointer-events: none;
+  background:
+    linear-gradient(var(--osrs-gold), var(--osrs-gold)) left top / 18px 1px no-repeat,
+    linear-gradient(var(--osrs-gold), var(--osrs-gold)) left top / 1px 18px no-repeat,
+    linear-gradient(var(--osrs-gold), var(--osrs-gold)) right top / 18px 1px no-repeat,
+    linear-gradient(var(--osrs-gold), var(--osrs-gold)) right top / 1px 18px no-repeat,
+    linear-gradient(var(--osrs-gold), var(--osrs-gold)) left bottom / 18px 1px no-repeat,
+    linear-gradient(var(--osrs-gold), var(--osrs-gold)) left bottom / 1px 18px no-repeat,
+    linear-gradient(var(--osrs-gold), var(--osrs-gold)) right bottom / 18px 1px no-repeat,
+    linear-gradient(var(--osrs-gold), var(--osrs-gold)) right bottom / 1px 18px no-repeat;
+  opacity: 0.25;
 }
 
 .osrs-stone-panel-featured {
@@ -2185,11 +2235,15 @@ select,
 }
 
 .osrs-panel-header {
-  min-height: 48px;
+  min-height: 52px;
   align-items: center;
-  margin: -0.15rem -0.1rem 0.9rem;
-  padding: 0 0 0.7rem;
-  border-bottom-color: rgba(111, 84, 38, 0.54);
+  margin: -0.25rem -0.15rem 1rem;
+  padding: 0.18rem 0.28rem 0.76rem;
+  border-bottom: 1px solid rgba(111, 84, 38, 0.68);
+  background:
+    linear-gradient(180deg, rgba(255, 239, 182, 0.035), transparent 70%),
+    linear-gradient(90deg, rgba(215, 181, 109, 0.06), transparent 66%);
+  box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.6);
 }
 
 .osrs-panel-title {
@@ -2200,13 +2254,27 @@ select,
 }
 
 .osrs-panel-icon {
+  width: 34px;
+  height: 34px;
+  padding: 0.22rem;
+  border: 1px solid rgba(111, 84, 38, 0.76);
+  border-radius: 7px;
   color: var(--osrs-gold);
+  background: var(--osrs-recessed-surface);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 239, 182, 0.12),
+    inset 0 -2px 0 rgba(0, 0, 0, 0.58);
+}
+
+.osrs-panel-icon.osrs-image-icon > img {
+  width: 28px;
+  height: 28px;
 }
 
 .osrs-panel-header h3,
 .panel h3 {
   color: #ead7ae;
-  font-family: Georgia, "Times New Roman", ui-serif, serif;
+  font-family: var(--osrs-font-display);
   font-size: 1.15rem;
   line-height: 1.2;
   text-shadow: 0 2px 0 rgba(0, 0, 0, 0.44);
@@ -2264,15 +2332,21 @@ select,
 
 .osrs-stat-card {
   position: relative;
-  min-height: 158px;
-  border-color: rgba(111, 84, 38, 0.75);
-  border-radius: 7px;
-  padding: 1.05rem;
+  min-height: 166px;
+  border: 2px solid rgba(111, 84, 38, 0.78);
+  border-radius: 8px;
+  padding: 1.1rem;
+  background:
+    linear-gradient(180deg, rgba(255, 239, 182, 0.06), rgba(0, 0, 0, 0.24) 78%),
+    radial-gradient(circle at 14% 0%, rgba(215, 181, 109, 0.11), transparent 34%),
+    var(--osrs-noise-svg),
+    #17120d;
+  background-blend-mode: normal, soft-light, multiply, normal;
   box-shadow:
-    inset 0 1px 0 rgba(255, 239, 182, 0.14),
-    inset 0 -2px 0 rgba(0, 0, 0, 0.6),
-    inset 0 0 0 1px rgba(0, 0, 0, 0.42),
-    0 8px 18px rgba(0, 0, 0, 0.22);
+    inset 0 1px 0 rgba(255, 239, 182, 0.16),
+    inset 0 -3px 0 rgba(0, 0, 0, 0.7),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.5),
+    0 10px 24px rgba(0, 0, 0, 0.28);
 }
 
 .osrs-stat-card::before {
@@ -2285,23 +2359,39 @@ select,
 }
 
 .osrs-stat-card-hero {
-  min-height: 176px;
+  min-height: 184px;
 }
 
 .osrs-stat-card header {
   color: #dec89a;
-  font-family: Georgia, "Times New Roman", ui-serif, serif;
+  font-family: var(--osrs-font-display);
   font-size: 1rem;
+  gap: 0.7rem;
 }
 
 .osrs-stat-icon {
+  width: 46px;
+  height: 46px;
+  padding: 0.28rem;
+  border: 1px solid rgba(111, 84, 38, 0.78);
+  border-radius: 8px;
   color: var(--osrs-gold);
+  background: var(--osrs-recessed-surface);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 239, 182, 0.12),
+    inset 0 -2px 0 rgba(0, 0, 0, 0.6),
+    0 4px 10px rgba(0, 0, 0, 0.26);
+}
+
+.osrs-stat-icon.osrs-image-icon > img {
+  width: 38px;
+  height: 38px;
 }
 
 .osrs-stat-card strong {
   margin-top: 0.5rem;
   color: var(--osrs-green);
-  font-family: Georgia, "Times New Roman", ui-serif, serif;
+  font-family: var(--osrs-font-display);
   font-size: clamp(2rem, 3vw, 2.65rem);
   text-shadow: 0 2px 0 rgba(0, 0, 0, 0.48);
 }
@@ -2316,19 +2406,27 @@ select,
 }
 
 .osrs-table-wrap {
-  border: 1px solid rgba(111, 84, 38, 0.6);
-  border-radius: 7px;
-  background: rgba(12, 11, 8, 0.48);
+  border: 2px solid rgba(111, 84, 38, 0.64);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, rgba(255, 239, 182, 0.025), rgba(0, 0, 0, 0.14)),
+    rgba(12, 11, 8, 0.62);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 239, 182, 0.075),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.48);
 }
 
 .osrs-data-table th,
 .roster-table th {
   color: #dec89a;
-  font-family: Georgia, "Times New Roman", ui-serif, serif;
+  font-family: var(--osrs-font-display);
   font-size: 0.86rem;
   background:
-    linear-gradient(180deg, rgba(255, 239, 182, 0.07), rgba(0, 0, 0, 0.28)),
+    linear-gradient(180deg, rgba(255, 239, 182, 0.11), rgba(0, 0, 0, 0.34)),
+    var(--osrs-noise-svg),
     #15110c;
+  background-blend-mode: normal, multiply, normal;
+  border-bottom: 1px solid rgba(111, 84, 38, 0.55);
 }
 
 .osrs-data-table td,
@@ -2346,22 +2444,35 @@ select,
 }
 
 .dashboard-command-header {
-  min-height: 118px;
+  position: relative;
+  min-height: 126px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 1rem;
-  padding: 1.1rem 1.2rem;
-  border: 1px solid rgba(111, 84, 38, 0.64);
+  padding: 1.22rem 1.35rem;
+  border: 2px solid rgba(111, 84, 38, 0.78);
   border-radius: 8px;
   background:
-    linear-gradient(180deg, rgba(255, 239, 182, 0.045), rgba(0, 0, 0, 0.2)),
+    radial-gradient(55% 120% at 12% 0%, rgba(215, 181, 109, 0.14), transparent 48%),
+    linear-gradient(180deg, rgba(255, 239, 182, 0.065), rgba(0, 0, 0, 0.25)),
     var(--osrs-noise-svg),
-    #15120d;
-  background-blend-mode: normal, multiply, normal;
+    #14110c;
+  background-blend-mode: soft-light, normal, multiply, normal;
   box-shadow:
-    inset 0 1px 0 rgba(255, 239, 182, 0.11),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.58);
+    inset 0 1px 0 rgba(255, 239, 182, 0.16),
+    inset 0 -3px 0 rgba(0, 0, 0, 0.64),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.48),
+    0 12px 26px rgba(0, 0, 0, 0.25);
+}
+
+.dashboard-command-header::before {
+  content: "";
+  position: absolute;
+  inset: 7px;
+  border: 1px solid rgba(111, 84, 38, 0.38);
+  border-radius: 5px;
+  pointer-events: none;
 }
 
 .dashboard-command-header h2,
@@ -2384,7 +2495,7 @@ select,
 .dashboard-kpi-row {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 1rem;
+  gap: 1.05rem;
 }
 
 .dashboard-operations-grid {
@@ -2397,7 +2508,7 @@ select,
 .dashboard-live-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.55fr) minmax(330px, 0.9fr);
-  gap: 1rem;
+  gap: 1.05rem;
   align-items: start;
 }
 
@@ -2421,46 +2532,51 @@ select,
   padding: 0;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0.75rem;
+  gap: 0.82rem;
 }
 
 .dashboard-work-card {
-  min-height: 150px;
+  min-height: 158px;
   display: grid;
   grid-template-rows: auto 1fr auto;
   gap: 0.55rem;
-  padding: 0.82rem;
-  border: 1px solid rgba(111, 84, 38, 0.54);
+  padding: 0.88rem;
+  border: 1px solid rgba(111, 84, 38, 0.68);
   border-radius: 7px;
   background:
-    linear-gradient(180deg, rgba(255, 239, 182, 0.04), rgba(0, 0, 0, 0.2)),
-    #17130e;
+    linear-gradient(180deg, rgba(255, 239, 182, 0.055), rgba(0, 0, 0, 0.24)),
+    radial-gradient(circle at 26% 0%, rgba(111, 84, 38, 0.14), transparent 42%),
+    #14100c;
   box-shadow:
-    inset 0 1px 0 rgba(255, 239, 182, 0.07),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.52);
+    inset 0 1px 0 rgba(255, 239, 182, 0.09),
+    inset 0 -2px 0 rgba(0, 0, 0, 0.58),
+    0 5px 12px rgba(0, 0, 0, 0.18);
 }
 
 .dashboard-work-icon {
-  width: 34px;
-  height: 34px;
+  width: 42px;
+  height: 42px;
   display: grid;
   place-items: center;
-  border: 1px solid rgba(215, 181, 109, 0.48);
-  border-radius: 6px;
+  border: 1px solid rgba(215, 181, 109, 0.62);
+  border-radius: 7px;
   color: var(--osrs-gold-bright);
-  background: rgba(0, 0, 0, 0.25);
+  background: var(--osrs-recessed-surface);
   font: 700 1rem/1 "Segoe UI", system-ui, sans-serif;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 239, 182, 0.12),
+    inset 0 -2px 0 rgba(0, 0, 0, 0.58);
 }
 
 .dashboard-work-icon.osrs-image-icon {
-  width: 38px;
-  height: 38px;
-  padding: 0.22rem;
+  width: 42px;
+  height: 42px;
+  padding: 0.26rem;
 }
 
 .dashboard-work-copy strong {
   color: #ead7ae;
-  font-family: Georgia, "Times New Roman", ui-serif, serif;
+  font-family: var(--osrs-font-display);
   font-size: 1.02rem;
   line-height: 1.22;
 }
@@ -2471,21 +2587,50 @@ select,
   font-size: 0.84rem;
 }
 
-.dashboard-health-grid,
 .dashboard-posture-grid {
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
 }
 
+.dashboard-health-panel {
+  display: grid;
+  gap: 0.66rem;
+}
+
+.dashboard-health-list {
+  display: grid;
+  gap: 0.48rem;
+}
+
 .dashboard-status-block {
-  min-height: 92px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: 82px;
   align-items: start;
   position: relative;
-  padding: 0.7rem;
-  padding-left: 3rem;
+  padding: 0.62rem 0.68rem;
+  padding-left: 2.9rem;
+  border-color: rgba(111, 84, 38, 0.45);
+  background:
+    linear-gradient(180deg, rgba(255, 239, 182, 0.032), rgba(0, 0, 0, 0.16)),
+    rgba(12, 10, 7, 0.34);
+}
+
+.dashboard-status-block-primary {
+  min-height: 104px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 0.82rem;
+  padding-left: 3.45rem;
+  border-color: rgba(215, 181, 109, 0.58);
+  background:
+    linear-gradient(180deg, rgba(255, 239, 182, 0.07), rgba(0, 0, 0, 0.22)),
+    radial-gradient(circle at 20% 0%, rgba(215, 181, 109, 0.12), transparent 42%),
+    rgba(18, 14, 10, 0.72);
 }
 
 .dashboard-status-block-compact {
-  min-height: 76px;
+  min-height: auto;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding-left: 0.68rem;
 }
 
 .dashboard-status-icon {
@@ -2499,6 +2644,17 @@ select,
   background:
     linear-gradient(180deg, rgba(255, 239, 182, 0.08), rgba(0, 0, 0, 0.2)),
     #15110c;
+}
+
+.dashboard-status-block-compact .dashboard-status-icon {
+  display: none;
+}
+
+.dashboard-status-block-primary .dashboard-status-icon {
+  left: 0.86rem;
+  top: 0.9rem;
+  width: 1.9rem;
+  height: 1.9rem;
 }
 
 .dashboard-status-icon::after {
@@ -2529,7 +2685,7 @@ select,
 
 .dashboard-status-block strong {
   color: #f0dfbc;
-  font-family: Georgia, "Times New Roman", ui-serif, serif;
+  font-family: var(--osrs-font-display);
   font-size: 1.05rem;
 }
 
@@ -2539,10 +2695,11 @@ select,
 }
 
 .dashboard-future-strip .osrs-unavailable-metric {
-  padding: 0.45rem 0.55rem;
+  padding: 0.42rem 0.52rem;
   border: 1px solid rgba(111, 84, 38, 0.24);
   border-radius: 5px;
   background: rgba(0, 0, 0, 0.16);
+  opacity: 0.72;
 }
 
 .dashboard-activity-table .osrs-data-table {

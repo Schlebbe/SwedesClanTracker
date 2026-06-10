@@ -108,10 +108,19 @@ export function DashboardSurface({ data, liveStatus, loading, error, onRetry, on
 
         <aside className="dashboard-side-stack" aria-label="Dashboard support sections">
           <StonePanel title="Tracker Health" icon="readiness" variant="featured">
-            <div className="dashboard-health-grid">
-              {dashboard.healthCards.map((item) => (
-                <StatusBlock key={item.key} item={item} icon={dashboardIconForKey(item.key)} compact />
-              ))}
+            <div className="dashboard-health-panel">
+              {dashboard.healthCards[0] ? (
+                <StatusBlock
+                  item={dashboard.healthCards[0]}
+                  icon={dashboardIconForKey(dashboard.healthCards[0].key)}
+                  className="dashboard-status-block-primary"
+                />
+              ) : null}
+              <div className="dashboard-health-list">
+                {dashboard.healthCards.slice(1).map((item) => (
+                  <StatusBlock key={item.key} item={item} compact />
+                ))}
+              </div>
             </div>
             {dashboard.liveStatus.loading ? <StatusPill tone="info" loading>Connecting to live status...</StatusPill> : null}
             {dashboard.liveStatus.error ? (
@@ -151,9 +160,15 @@ export function DashboardSurface({ data, liveStatus, loading, error, onRetry, on
   );
 }
 
-function StatusBlock({ item, icon, compact = false }) {
+function StatusBlock({ item, icon, compact = false, className = "" }) {
+  const classes = [
+    "dashboard-status-block",
+    compact ? "dashboard-status-block-compact" : "",
+    className,
+  ].filter(Boolean).join(" ");
+
   return (
-    <div className={compact ? "dashboard-status-block dashboard-status-block-compact" : "dashboard-status-block"}>
+    <div className={classes}>
       {icon ? <IconGlyph name={icon} className="dashboard-status-icon" /> : null}
       <div>
         <span>{item.label}</span>
