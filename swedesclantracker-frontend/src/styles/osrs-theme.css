@@ -1,11 +1,11 @@
 :root {
-  --osrs-bg: #0f0d0a;
-  --osrs-bg-soft: #17130e;
-  --osrs-panel: #1d1710;
-  --osrs-panel-2: #241c13;
-  --osrs-panel-3: #2b2115;
-  --osrs-border: #6f5426;
-  --osrs-border-muted: #3c2d18;
+  --osrs-bg: #090a08;
+  --osrs-bg-soft: #10100d;
+  --osrs-panel: #12110d;
+  --osrs-panel-2: #18160f;
+  --osrs-panel-3: #211b12;
+  --osrs-border: #7b612d;
+  --osrs-border-muted: #3b3020;
   --osrs-gold: #d7b56d;
   --osrs-gold-bright: #f1d486;
   --osrs-text: #f3ead2;
@@ -17,7 +17,7 @@
   --osrs-blue: #7d9fc7;
   --osrs-shadow: rgba(0, 0, 0, 0.45);
   --osrs-focus: #f1d486;
-  --osrs-font-display: Georgia, "Times New Roman", ui-serif, serif;
+  --osrs-font-display: "Bahnschrift", "Trebuchet MS", "Segoe UI", system-ui, sans-serif;
   --osrs-font-body: "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
   --osrs-noise-svg: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='64' viewBox='0 0 64 64'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.78' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='64' height='64' filter='url(%23n)' opacity='.24'/%3E%3C/svg%3E");
   --osrs-recessed-surface:
@@ -36,6 +36,13 @@
     inset 0 -1px 0 rgba(0, 0, 0, 0.62),
     inset 1px 0 0 rgba(255, 239, 182, 0.035),
     inset -1px 0 0 rgba(0, 0, 0, 0.42);
+  --kenney-texture-stone-depth: url("../assets/textures/kenney-fantasy-wall-stone-depth.png");
+  --kenney-texture-brick-depth: url("../assets/textures/kenney-fantasy-wall-brick-small-stone-depth.png");
+  --kenney-texture-wood-depth: url("../assets/textures/kenney-fantasy-floor-wood-planks-depth.png");
+  --kenney-frame-panel-brown: url("../assets/frames/kenney-rpg-panel-brown.png");
+  --kenney-frame-panel-inset-brown: url("../assets/frames/kenney-rpg-panel-inset-brown.png");
+  --kenney-frame-button-brown: url("../assets/frames/kenney-rpg-button-long-brown.png");
+  --kenney-frame-trim-yellow: url("../assets/frames/kenney-rpg-bar-yellow-horizontal-mid.png");
   --primary-accent: var(--osrs-gold);
   --primary-accent-border: var(--osrs-border);
   --primary-accent-hover: var(--osrs-gold-bright);
@@ -78,6 +85,83 @@ body {
   background-size: auto, auto, auto, 64px 64px, auto;
   background-blend-mode: normal, normal, multiply, soft-light, normal;
   -webkit-font-smoothing: antialiased;
+}
+
+/* Kenney texture/frame evaluation primitives. Opt in per surface after visual QA. */
+.osrs-kenney-stone-interior {
+  background-image:
+    linear-gradient(180deg, rgba(255, 239, 182, 0.035), rgba(0, 0, 0, 0.48)),
+    var(--kenney-texture-stone-depth);
+  background-size: auto, 96px 128px;
+  background-blend-mode: normal, multiply;
+}
+
+.osrs-kenney-sidebar-texture {
+  background-image:
+    linear-gradient(90deg, rgba(255, 239, 182, 0.035), transparent 24%, rgba(0, 0, 0, 0.34)),
+    linear-gradient(180deg, rgba(36, 28, 19, 0.94), rgba(15, 13, 10, 0.98)),
+    var(--kenney-texture-brick-depth);
+  background-size: auto, auto, 112px 192px;
+  background-blend-mode: normal, normal, multiply;
+}
+
+.osrs-kenney-panel-frame {
+  border: 12px solid transparent;
+  border-image-source: var(--kenney-frame-panel-brown);
+  border-image-slice: 12 fill;
+  border-image-width: 12px;
+  border-image-repeat: stretch;
+  background:
+    linear-gradient(180deg, rgba(255, 239, 182, 0.035), rgba(0, 0, 0, 0.35)),
+    #17110c;
+}
+
+.osrs-kenney-inset-frame {
+  border: 12px solid transparent;
+  border-image-source: var(--kenney-frame-panel-inset-brown);
+  border-image-slice: 12 fill;
+  border-image-width: 12px;
+  border-image-repeat: stretch;
+}
+
+.osrs-kenney-header-plate {
+  background-image:
+    linear-gradient(180deg, rgba(241, 212, 134, 0.22), rgba(78, 52, 22, 0.42)),
+    var(--kenney-texture-wood-depth),
+    var(--kenney-frame-trim-yellow);
+  background-size: auto, 96px 96px, auto 9px;
+  background-position: center, center, left bottom;
+  background-repeat: repeat, repeat, repeat-x;
+  background-blend-mode: normal, multiply, normal;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 239, 182, 0.2),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.62),
+    0 1px 0 rgba(0, 0, 0, 0.5);
+}
+
+.osrs-kenney-button-face {
+  border: 10px solid transparent;
+  border-image-source: var(--kenney-frame-button-brown);
+  border-image-slice: 10 fill;
+  border-image-width: 10px;
+  border-image-repeat: stretch;
+  background:
+    linear-gradient(180deg, rgba(241, 212, 134, 0.18), rgba(0, 0, 0, 0.24)),
+    #6d4b25;
+  box-shadow:
+    0 2px 0 rgba(0, 0, 0, 0.55),
+    inset 0 1px 0 rgba(255, 239, 182, 0.18);
+}
+
+.osrs-kenney-table-header-surface {
+  background-image:
+    linear-gradient(180deg, rgba(255, 239, 182, 0.12), rgba(0, 0, 0, 0.22)),
+    var(--kenney-texture-wood-depth);
+  background-size: auto, 80px 80px;
+  background-blend-mode: normal, multiply;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 239, 182, 0.14),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.7);
 }
 
 button,
@@ -2754,6 +2838,927 @@ select,
   display: none;
 }
 
+body {
+  color: var(--osrs-text);
+  font-family: var(--osrs-font-body);
+  background:
+    radial-gradient(86% 62% at 58% -18%, rgba(142, 102, 44, 0.12), transparent 44%),
+    radial-gradient(72% 66% at 0% 36%, rgba(44, 34, 18, 0.18), transparent 58%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.5), rgba(5, 6, 5, 0.74)),
+    var(--kenney-texture-brick-depth),
+    var(--osrs-noise-svg),
+    #090a08;
+  background-size: auto, auto, auto, 176px 300px, 80px 80px, auto;
+  background-blend-mode: normal, normal, normal, multiply, soft-light, normal;
+}
+
+.surface-header h2,
+.dashboard-command-header h2,
+.osrs-panel-header h3,
+.panel h3,
+.osrs-stat-card strong,
+.dashboard-status-block strong,
+.dashboard-work-copy strong,
+.members-summary-item strong {
+  font-family: var(--osrs-font-display);
+}
+
+.surface-header h2,
+.dashboard-command-header h2 {
+  font-size: 1.88rem;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+}
+
+.surface-header p,
+.dashboard-command-header p,
+.osrs-panel-header p {
+  font-family: var(--osrs-font-body);
+}
+
+.osrs-app-shell {
+  background:
+    linear-gradient(90deg, rgba(123, 97, 45, 0.36), transparent 1px) 259px 0 / 1px 100% no-repeat,
+    radial-gradient(72% 54% at 50% 0%, rgba(215, 181, 109, 0.06), transparent 48%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.32), transparent 11rem),
+    #090a08;
+}
+
+.osrs-sidebar.osrs-kenney-sidebar-texture,
+.app-nav {
+  border-right-color: rgba(123, 97, 45, 0.78);
+  background:
+    linear-gradient(90deg, rgba(241, 212, 134, 0.045), transparent 14%, rgba(0, 0, 0, 0.62)),
+    linear-gradient(180deg, rgba(18, 17, 13, 0.9), rgba(6, 7, 6, 0.98)),
+    var(--kenney-texture-brick-depth),
+    var(--osrs-noise-svg),
+    #0b0c0a;
+  background-size: auto, auto, 116px 192px, 72px 72px, auto;
+  background-blend-mode: normal, normal, multiply, soft-light, normal;
+}
+
+.osrs-sidebar-brand {
+  min-height: 172px;
+  background:
+    linear-gradient(180deg, rgba(241, 212, 134, 0.075), transparent 42%, rgba(0, 0, 0, 0.32)),
+    var(--kenney-texture-stone-depth),
+    #0d0e0b;
+  background-size: auto, 116px 156px, auto;
+  background-blend-mode: normal, multiply, normal;
+}
+
+.osrs-brand-mark {
+  width: 78px;
+  height: 88px;
+  background:
+    radial-gradient(circle at 48% 18%, rgba(241, 212, 134, 0.2), transparent 34%),
+    linear-gradient(145deg, rgba(123, 97, 45, 0.62), rgba(8, 9, 7, 0.96) 50%, rgba(40, 31, 16, 0.8));
+}
+
+.osrs-sidebar-brand strong {
+  font-size: 1.14rem;
+  text-transform: uppercase;
+  letter-spacing: 0.045em;
+}
+
+.osrs-sidebar-brand span {
+  font-family: var(--osrs-font-body);
+  font-size: 0.88rem;
+}
+
+.osrs-nav-item,
+.nav-item {
+  min-height: 54px;
+  font-family: var(--osrs-font-body);
+  font-size: 0.94rem;
+  font-weight: 650;
+}
+
+.osrs-nav-icon {
+  width: 36px;
+  height: 36px;
+  padding: 0.25rem;
+  border: 1px solid rgba(123, 97, 45, 0.62);
+  border-radius: 6px;
+  background:
+    linear-gradient(180deg, rgba(241, 212, 134, 0.08), rgba(0, 0, 0, 0.42)),
+    var(--kenney-texture-stone-depth),
+    #0e0f0c;
+  background-size: auto, 76px 104px, auto;
+  background-blend-mode: normal, multiply, normal;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 239, 182, 0.12),
+    inset 0 -2px 0 rgba(0, 0, 0, 0.72),
+    0 3px 8px rgba(0, 0, 0, 0.26);
+}
+
+.osrs-nav-icon.osrs-image-icon > img {
+  width: 28px;
+  height: 28px;
+}
+
+.osrs-nav-item-active,
+.nav-item-active {
+  background:
+    linear-gradient(180deg, rgba(241, 212, 134, 0.12), rgba(0, 0, 0, 0.34)),
+    linear-gradient(90deg, rgba(215, 181, 109, 0.26), rgba(215, 181, 109, 0.055) 78%),
+    var(--kenney-texture-wood-depth),
+    #0d0d0a;
+  background-size: auto, auto, 90px 90px, auto;
+  background-blend-mode: normal, normal, multiply, normal;
+}
+
+.osrs-nav-item-active .osrs-nav-icon {
+  border-color: rgba(241, 212, 134, 0.7);
+  background:
+    linear-gradient(180deg, rgba(241, 212, 134, 0.2), rgba(0, 0, 0, 0.38)),
+    var(--kenney-texture-wood-depth),
+    #17120b;
+  background-size: auto, 72px 72px, auto;
+  background-blend-mode: normal, multiply, normal;
+}
+
+.osrs-topbar.osrs-kenney-header-plate {
+  min-height: 58px;
+  padding: 0.55rem 1.1rem;
+  border-bottom: 2px solid rgba(123, 97, 45, 0.74);
+  background:
+    linear-gradient(180deg, rgba(241, 212, 134, 0.07), rgba(0, 0, 0, 0.42)),
+    var(--kenney-texture-stone-depth),
+    var(--kenney-frame-trim-yellow),
+    #0b0c0a;
+  background-size: auto, 120px 160px, auto 7px, auto;
+  background-position: center, center, left bottom, center;
+  background-repeat: repeat, repeat, repeat-x, repeat;
+  background-blend-mode: normal, multiply, normal, normal;
+}
+
+.osrs-topbar-status {
+  gap: 0.65rem;
+}
+
+.osrs-topbar-admin {
+  min-height: 40px;
+  padding: 0.22rem 0.58rem;
+  border: 1px solid rgba(123, 97, 45, 0.46);
+  border-radius: 6px;
+  background:
+    linear-gradient(180deg, rgba(241, 212, 134, 0.045), rgba(0, 0, 0, 0.28)),
+    rgba(7, 8, 7, 0.56);
+}
+
+.osrs-content,
+.app-stage {
+  padding: 1.12rem;
+  background:
+    radial-gradient(64% 42% at 45% 0%, rgba(123, 97, 45, 0.12), transparent 60%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.28), transparent 11rem);
+}
+
+.osrs-stone-panel,
+.panel,
+.osrs-stat-card {
+  border-color: rgba(123, 97, 45, 0.76);
+  background:
+    linear-gradient(180deg, rgba(241, 212, 134, 0.045), rgba(0, 0, 0, 0.38) 78%),
+    radial-gradient(circle at 14% 0%, rgba(215, 181, 109, 0.06), transparent 32%),
+    var(--kenney-texture-stone-depth),
+    var(--osrs-noise-svg),
+    #10110d;
+  background-size: auto, auto, 116px 156px, 72px 72px, auto;
+  background-blend-mode: normal, normal, multiply, soft-light, normal;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 239, 182, 0.14),
+    inset 0 -3px 0 rgba(0, 0, 0, 0.76),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.66),
+    0 14px 30px rgba(0, 0, 0, 0.32);
+}
+
+.osrs-stone-panel-featured {
+  background:
+    linear-gradient(180deg, rgba(241, 212, 134, 0.06), rgba(0, 0, 0, 0.4) 78%),
+    radial-gradient(circle at 8% 0%, rgba(215, 181, 109, 0.09), transparent 36%),
+    var(--kenney-texture-stone-depth),
+    var(--osrs-noise-svg),
+    #11110d;
+  background-size: auto, auto, 116px 156px, 72px 72px, auto;
+  background-blend-mode: normal, normal, multiply, soft-light, normal;
+}
+
+.osrs-panel-header {
+  min-height: 46px;
+  margin-bottom: 0.72rem;
+  padding-bottom: 0.58rem;
+  background:
+    linear-gradient(180deg, rgba(241, 212, 134, 0.08), rgba(0, 0, 0, 0.2)),
+    var(--kenney-frame-trim-yellow);
+  background-size: auto, auto 5px;
+  background-position: center, left bottom;
+  background-repeat: repeat, repeat-x;
+}
+
+.osrs-panel-header h3,
+.panel h3 {
+  font-size: 1rem;
+  font-weight: 800;
+  letter-spacing: 0.025em;
+  text-transform: uppercase;
+}
+
+.osrs-panel-icon,
+.osrs-stat-icon,
+.dashboard-work-icon,
+.dashboard-status-icon {
+  background:
+    linear-gradient(180deg, rgba(241, 212, 134, 0.09), rgba(0, 0, 0, 0.44)),
+    var(--kenney-texture-stone-depth),
+    #0d0e0b;
+  background-size: auto, 76px 104px, auto;
+  background-blend-mode: normal, multiply, normal;
+}
+
+.osrs-button-primary,
+.btn-primary {
+  border-color: rgba(241, 212, 134, 0.74);
+  background:
+    linear-gradient(180deg, rgba(255, 244, 190, 0.44), rgba(120, 81, 23, 0.46)),
+    var(--kenney-texture-wood-depth),
+    linear-gradient(180deg, #f0cd75, #a87428);
+  background-size: auto, 80px 80px, auto;
+  background-blend-mode: normal, multiply, normal;
+}
+
+.osrs-button-secondary,
+.btn-ghost {
+  border: 8px solid transparent;
+  border-image-source: var(--kenney-frame-button-brown);
+  border-image-slice: 8 fill;
+  border-image-width: 8px;
+  border-image-repeat: stretch;
+  background:
+    linear-gradient(180deg, rgba(241, 212, 134, 0.09), rgba(0, 0, 0, 0.36)),
+    var(--kenney-texture-wood-depth),
+    #17120c;
+  background-size: auto, 76px 76px, auto;
+  background-blend-mode: normal, multiply, normal;
+}
+
+.osrs-table-wrap {
+  background:
+    linear-gradient(180deg, rgba(241, 212, 134, 0.02), rgba(0, 0, 0, 0.2)),
+    rgba(7, 8, 7, 0.74);
+}
+
+.osrs-data-table th,
+.roster-table th {
+  font-family: var(--osrs-font-body);
+  font-size: 0.74rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  background:
+    linear-gradient(180deg, rgba(241, 212, 134, 0.12), rgba(0, 0, 0, 0.38)),
+    var(--kenney-texture-wood-depth),
+    #0e0f0b;
+  background-size: auto, 80px 80px, auto;
+  background-blend-mode: normal, multiply, normal;
+}
+
+.dashboard-surface {
+  gap: 0.9rem;
+}
+
+.dashboard-command-header {
+  min-height: 108px;
+  padding: 1rem 1.15rem;
+  background:
+    radial-gradient(55% 120% at 12% 0%, rgba(215, 181, 109, 0.09), transparent 48%),
+    linear-gradient(180deg, rgba(241, 212, 134, 0.048), rgba(0, 0, 0, 0.42)),
+    var(--kenney-texture-stone-depth),
+    #0d0e0b;
+  background-size: auto, auto, 128px 170px, auto;
+  background-blend-mode: soft-light, normal, multiply, normal;
+}
+
+.dashboard-command-panel {
+  display: flex;
+  align-items: center;
+  justify-content: end;
+  gap: 0.7rem;
+  min-width: min(100%, 360px);
+}
+
+.dashboard-command-status {
+  min-height: 44px;
+  display: grid;
+  gap: 0.14rem;
+  justify-items: end;
+  padding: 0.34rem 0.58rem;
+  border: 1px solid rgba(123, 97, 45, 0.5);
+  border-radius: 6px;
+  background:
+    linear-gradient(180deg, rgba(241, 212, 134, 0.035), rgba(0, 0, 0, 0.24)),
+    rgba(5, 6, 5, 0.46);
+}
+
+.dashboard-command-status span {
+  color: var(--osrs-text-muted);
+  font-size: 0.74rem;
+  line-height: 1.2;
+}
+
+.dashboard-kpi-row {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.82rem;
+}
+
+.osrs-stat-card {
+  min-height: 138px;
+  padding: 0.88rem;
+}
+
+.osrs-stat-card-hero {
+  min-height: 146px;
+}
+
+.osrs-stat-card header {
+  font-family: var(--osrs-font-body);
+  font-size: 0.83rem;
+  font-weight: 800;
+  letter-spacing: 0.035em;
+  text-transform: uppercase;
+}
+
+.osrs-stat-icon {
+  width: 40px;
+  height: 40px;
+}
+
+.osrs-stat-icon.osrs-image-icon > img {
+  width: 32px;
+  height: 32px;
+}
+
+.osrs-stat-card strong {
+  margin-top: 0.22rem;
+  font-size: 2.1rem;
+  font-weight: 800;
+  color: #8fc679;
+}
+
+.dashboard-latest-sync-card strong {
+  color: #f0dfbc;
+  font-family: var(--osrs-font-body);
+  font-size: 1rem;
+  line-height: 1.28;
+}
+
+.dashboard-admin-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.46fr) minmax(320px, 0.9fr);
+  gap: 0.9rem;
+  align-items: stretch;
+}
+
+.dashboard-reference-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(310px, 0.85fr);
+  gap: 0.9rem;
+  align-items: start;
+}
+
+.dashboard-work-panel,
+.dashboard-activity-panel,
+.dashboard-health-compact-panel {
+  min-height: 100%;
+}
+
+.dashboard-work-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.68rem;
+}
+
+.dashboard-work-card {
+  min-height: 138px;
+  gap: 0.46rem;
+  padding: 0.74rem;
+  background:
+    linear-gradient(180deg, rgba(241, 212, 134, 0.04), rgba(0, 0, 0, 0.32)),
+    var(--kenney-texture-stone-depth),
+    #0e0f0b;
+  background-size: auto, 108px 144px, auto;
+  background-blend-mode: normal, multiply, normal;
+}
+
+.dashboard-work-copy strong {
+  font-size: 0.94rem;
+  letter-spacing: 0.01em;
+}
+
+.dashboard-health-panel {
+  gap: 0.46rem;
+}
+
+.dashboard-health-list {
+  gap: 0.38rem;
+}
+
+.dashboard-status-block {
+  min-height: 66px;
+  padding-block: 0.5rem;
+  background:
+    linear-gradient(180deg, rgba(241, 212, 134, 0.025), rgba(0, 0, 0, 0.22)),
+    rgba(5, 6, 5, 0.4);
+}
+
+.dashboard-status-block-primary {
+  min-height: 86px;
+}
+
+.dashboard-status-block strong {
+  font-family: var(--osrs-font-body);
+  font-size: 0.96rem;
+  font-weight: 750;
+}
+
+.dashboard-posture-grid {
+  grid-template-columns: 1fr;
+  gap: 0.44rem;
+}
+
+.dashboard-future-panel {
+  opacity: 0.76;
+}
+
+.dashboard-future-strip {
+  gap: 0.38rem;
+}
+
+.dashboard-future-strip .osrs-unavailable-metric {
+  padding: 0.34rem 0.46rem;
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.dashboard-focus-grid {
+  display: grid;
+  gap: 0.9rem;
+  align-items: stretch;
+}
+
+.dashboard-focus-grid-work {
+  grid-template-columns: minmax(360px, 1fr) minmax(0, 1.05fr);
+}
+
+.dashboard-focus-grid-clear {
+  grid-template-columns: minmax(0, 1.62fr) minmax(286px, 0.58fr);
+}
+
+.dashboard-primary-panel {
+  min-height: 100%;
+}
+
+.dashboard-activity-panel {
+  min-width: 0;
+}
+
+.dashboard-focus-grid-clear .dashboard-activity-panel .osrs-table-wrap {
+  min-height: 308px;
+}
+
+.dashboard-focus-grid-work .dashboard-activity-panel .osrs-data-table {
+  min-width: 520px;
+}
+
+.dashboard-focus-grid-work .dashboard-work-grid {
+  grid-template-columns: 1fr;
+}
+
+.dashboard-focus-grid-work .dashboard-work-card {
+  min-height: 114px;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  grid-template-rows: auto;
+  align-items: center;
+}
+
+.dashboard-quiet-rail {
+  display: grid;
+  gap: 0.72rem;
+  align-content: start;
+  min-width: 0;
+}
+
+.dashboard-clear-work-panel .osrs-panel-header {
+  margin-bottom: 0.58rem;
+}
+
+.dashboard-clear-work-card {
+  display: grid;
+  gap: 0.62rem;
+  align-items: start;
+}
+
+.dashboard-clear-work-card strong {
+  display: block;
+  color: #f0dfbc;
+  font-weight: 800;
+}
+
+.dashboard-clear-work-card p {
+  margin: 0.2rem 0 0;
+  color: var(--osrs-text-muted);
+  font-size: 0.84rem;
+}
+
+.dashboard-clear-work-icon {
+  width: 42px;
+  height: 42px;
+  padding: 0.26rem;
+  border: 1px solid rgba(123, 97, 45, 0.62);
+  border-radius: 7px;
+  background:
+    linear-gradient(180deg, rgba(241, 212, 134, 0.08), rgba(0, 0, 0, 0.42)),
+    var(--kenney-texture-stone-depth),
+    #0e0f0c;
+  background-size: auto, 76px 104px, auto;
+  background-blend-mode: normal, multiply, normal;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 239, 182, 0.12),
+    inset 0 -2px 0 rgba(0, 0, 0, 0.72),
+    0 3px 8px rgba(0, 0, 0, 0.26);
+}
+
+.dashboard-clear-work-icon.osrs-image-icon > img {
+  width: 34px;
+  height: 34px;
+}
+
+.dashboard-roster-watch-panel {
+  opacity: 0.92;
+}
+
+.dashboard-secondary-strip {
+  display: grid;
+}
+
+.dashboard-posture-grid-inline {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.osrs-app-shell {
+  grid-template-columns: 192px minmax(0, 1fr);
+  background:
+    linear-gradient(90deg, rgba(123, 97, 45, 0.44), transparent 1px) 191px 0 / 1px 100% no-repeat,
+    radial-gradient(72% 54% at 50% 0%, rgba(215, 181, 109, 0.055), transparent 48%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.34), transparent 10rem),
+    #080907;
+}
+
+.osrs-sidebar.osrs-kenney-sidebar-texture,
+.app-nav {
+  border-right-width: 2px;
+  box-shadow:
+    inset -1px 0 0 rgba(255, 239, 182, 0.08),
+    inset -9px 0 22px rgba(0, 0, 0, 0.58),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.62),
+    8px 0 22px rgba(0, 0, 0, 0.26);
+}
+
+.osrs-sidebar-brand {
+  min-height: 182px;
+  padding: 1rem 0.7rem 1.05rem;
+  border-bottom: 2px solid rgba(123, 97, 45, 0.62);
+}
+
+.osrs-brand-mark {
+  width: 76px;
+  height: 86px;
+}
+
+.osrs-sidebar-brand strong {
+  font-size: 1.05rem;
+  line-height: 1.16;
+}
+
+.osrs-sidebar-brand span {
+  font-size: 0.82rem;
+}
+
+.osrs-nav-list,
+.nav-list {
+  padding: 0;
+}
+
+.osrs-nav-item,
+.nav-item {
+  min-height: 56px;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  gap: 0.56rem;
+  padding: 0 0.72rem;
+  border-block-color: rgba(123, 97, 45, 0.22);
+  font-size: 0.86rem;
+}
+
+.osrs-nav-icon {
+  width: 31px;
+  height: 31px;
+  padding: 0.18rem;
+}
+
+.osrs-nav-icon.osrs-image-icon > img {
+  width: 25px;
+  height: 25px;
+}
+
+.osrs-nav-item-active,
+.nav-item-active {
+  box-shadow:
+    inset 4px 0 0 rgba(241, 212, 134, 0.96),
+    inset 0 1px 0 rgba(255, 239, 182, 0.18),
+    inset 0 -2px 0 rgba(0, 0, 0, 0.76),
+    inset 0 0 0 1px rgba(215, 181, 109, 0.18);
+}
+
+.osrs-nav-item-active::before {
+  inset: 7px 7px 7px 10px;
+}
+
+.osrs-sidebar-bottom {
+  display: grid;
+  gap: 0;
+  padding: 0;
+  border-top: 2px solid rgba(123, 97, 45, 0.56);
+}
+
+.osrs-sidebar-bottom .osrs-nav-item:first-child {
+  margin: 0.7rem 0.55rem;
+  width: calc(100% - 1.1rem);
+  border: 1px solid rgba(123, 97, 45, 0.64);
+  border-radius: 6px;
+  opacity: 0.72;
+  background:
+    linear-gradient(180deg, rgba(241, 212, 134, 0.06), rgba(0, 0, 0, 0.32)),
+    var(--kenney-texture-wood-depth),
+    #11100c;
+  background-size: auto, 76px 76px, auto;
+  background-blend-mode: normal, multiply, normal;
+}
+
+.osrs-topbar.osrs-kenney-header-plate {
+  min-height: 80px;
+  padding: 0.8rem 1.55rem;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.osrs-topbar-status {
+  gap: 1.05rem;
+}
+
+.osrs-topbar-sync {
+  font-size: 0.9rem;
+  color: #d6c39b;
+}
+
+.osrs-topbar-admin {
+  min-height: 48px;
+  gap: 0.55rem;
+}
+
+.osrs-content,
+.app-stage {
+  padding: 0;
+}
+
+.dashboard-target-surface {
+  gap: 0;
+  min-height: calc(100vh - 80px);
+  padding: 1.35rem 1.55rem 0;
+  border-left: 1px solid rgba(0, 0, 0, 0.76);
+  background:
+    linear-gradient(180deg, rgba(255, 239, 182, 0.018), rgba(0, 0, 0, 0.28) 55%, rgba(0, 0, 0, 0.4)),
+    var(--kenney-texture-stone-depth),
+    #080907;
+  background-size: auto, 140px 190px, auto;
+  background-blend-mode: normal, multiply, normal;
+}
+
+.dashboard-target-surface > * + * {
+  margin-top: 1rem;
+}
+
+.dashboard-command-header {
+  min-height: 102px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  margin: 0;
+  padding: 1.05rem 1.25rem;
+  border-radius: 6px;
+}
+
+.dashboard-command-header h2 {
+  font-size: 1.54rem;
+}
+
+.dashboard-command-header p {
+  max-width: 58ch;
+  font-size: 0.88rem;
+}
+
+.dashboard-command-panel {
+  min-width: 0;
+  display: flex;
+  gap: 0.75rem;
+}
+
+.dashboard-command-panel .osrs-button {
+  min-width: 150px;
+}
+
+.dashboard-kpi-row {
+  gap: 1rem;
+}
+
+.dashboard-target-surface .osrs-stat-card {
+  min-height: 176px;
+  padding: 1rem;
+}
+
+.dashboard-target-surface .osrs-stat-card header {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 0.72rem;
+  align-items: center;
+  min-height: 44px;
+  font-size: 0.86rem;
+  color: #ead7ae;
+  text-transform: none;
+  letter-spacing: 0.01em;
+}
+
+.dashboard-target-surface .osrs-stat-icon {
+  width: 42px;
+  height: 42px;
+}
+
+.dashboard-target-surface .osrs-stat-card strong {
+  margin-top: 0.48rem;
+  font-size: 2.45rem;
+  line-height: 1.05;
+}
+
+.dashboard-target-surface .osrs-stat-card p {
+  margin-top: 0.15rem;
+  font-size: 0.88rem;
+}
+
+.dashboard-target-surface .dashboard-latest-sync-card strong {
+  font-size: 1.02rem;
+  line-height: 1.35;
+}
+
+.dashboard-target-operations {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 225px;
+  gap: 1rem;
+  align-items: stretch;
+}
+
+.dashboard-target-operations .osrs-stone-panel {
+  min-height: 306px;
+}
+
+.dashboard-work-panel .osrs-panel-header,
+.dashboard-tools-panel .osrs-panel-header,
+.dashboard-activity-panel .osrs-panel-header {
+  min-height: 42px;
+  margin-bottom: 0.8rem;
+}
+
+.dashboard-work-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.68rem;
+}
+
+.dashboard-work-card {
+  min-height: 210px;
+  display: grid;
+  grid-template-rows: auto auto 1fr auto;
+  align-content: start;
+  gap: 0.58rem;
+  padding: 0.8rem;
+}
+
+.dashboard-work-card .osrs-button {
+  align-self: end;
+  width: 100%;
+}
+
+.dashboard-work-copy strong {
+  display: block;
+  font-size: 0.98rem;
+  color: #ead7ae;
+}
+
+.dashboard-work-copy p {
+  font-size: 0.82rem;
+}
+
+.dashboard-work-empty {
+  min-height: 216px;
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem;
+  border: 1px solid rgba(123, 97, 45, 0.54);
+  border-radius: 6px;
+  background:
+    linear-gradient(180deg, rgba(241, 212, 134, 0.035), rgba(0, 0, 0, 0.28)),
+    var(--kenney-texture-stone-depth),
+    #0e0f0b;
+  background-size: auto, 108px 144px, auto;
+  background-blend-mode: normal, multiply, normal;
+}
+
+.dashboard-work-empty strong {
+  display: block;
+  color: #f0dfbc;
+  font-weight: 800;
+}
+
+.dashboard-work-empty p {
+  margin: 0.2rem 0 0;
+  color: var(--osrs-text-muted);
+  font-size: 0.86rem;
+}
+
+.dashboard-tools-panel {
+  min-width: 0;
+}
+
+.dashboard-tools-list {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.dashboard-tools-list .osrs-button {
+  width: 100%;
+  justify-content: flex-start;
+  min-height: 52px;
+}
+
+.dashboard-activity-panel {
+  min-height: 430px;
+}
+
+.dashboard-activity-panel .osrs-table-wrap {
+  min-height: 350px;
+}
+
+.dashboard-activity-table .osrs-data-table {
+  min-width: 720px;
+}
+
+.dashboard-activity-table .osrs-data-table th,
+.dashboard-activity-table .osrs-data-table td {
+  padding-block: 0.78rem;
+}
+
+.dashboard-activity-table .osrs-data-table td:first-child {
+  width: 110px;
+  color: var(--osrs-text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.dashboard-activity-table .osrs-data-table td:nth-child(2) {
+  color: #f0dfbc;
+  font-weight: 750;
+}
+
+.dashboard-target-footer {
+  min-height: 58px;
+  margin-inline: -1.55rem;
+  margin-top: 1rem;
+  border-top: 2px solid rgba(123, 97, 45, 0.64);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1.4rem;
+  color: var(--osrs-text-dim);
+  font-size: 0.8rem;
+  background:
+    linear-gradient(180deg, rgba(241, 212, 134, 0.035), rgba(0, 0, 0, 0.38)),
+    var(--kenney-texture-stone-depth),
+    #080907;
+  background-size: auto, 130px 170px, auto;
+  background-blend-mode: normal, multiply, normal;
+}
+
+.dashboard-target-footer span + span {
+  padding-left: 1.4rem;
+  border-left: 1px solid rgba(123, 97, 45, 0.4);
+}
+
 @media (max-width: 1180px) {
   .osrs-app-shell,
   .app-shell {
@@ -2786,7 +3791,10 @@ select,
   .review-layout,
   .profile-main-grid,
   .layout-two,
-  .dashboard-main-grid {
+  .dashboard-main-grid,
+  .dashboard-admin-grid,
+  .dashboard-reference-grid,
+  .dashboard-focus-grid {
     grid-template-columns: 1fr;
   }
 
@@ -2835,9 +3843,13 @@ select,
   .dashboard-stat-grid,
   .dashboard-kpi-row,
   .dashboard-live-grid,
+  .dashboard-admin-grid,
+  .dashboard-reference-grid,
+  .dashboard-focus-grid,
   .dashboard-work-grid,
   .dashboard-health-grid,
   .dashboard-posture-grid,
+  .dashboard-posture-grid-inline,
   .members-toolbar,
   .members-summary {
     grid-template-columns: 1fr;
@@ -2845,6 +3857,19 @@ select,
 
   .dashboard-header {
     align-items: start;
+  }
+
+  .dashboard-command-header {
+    grid-template-columns: 1fr;
+  }
+
+  .dashboard-command-panel {
+    justify-content: start;
+    flex-wrap: wrap;
+  }
+
+  .dashboard-command-status {
+    justify-items: start;
   }
 
   .panel,

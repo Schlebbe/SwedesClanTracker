@@ -5,7 +5,7 @@ export function TopStatusBar({ home, liveStatus }) {
   const status = buildStatusView(home, liveStatus);
 
   return (
-    <header className="osrs-topbar">
+    <header className="osrs-topbar osrs-kenney-header-plate">
       <div className="osrs-topbar-status">
         <StatusPill tone={status.tone} loading={status.loading}>{status.label}</StatusPill>
         {status.detail ? <span className="osrs-topbar-sync">{status.detail}</span> : null}

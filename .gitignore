@@ -42,3 +42,7 @@ docs/LOCAL_DEV_PRIVATE.md
 !*.env.example
 deploy/env/discord-profiles.json
 deploy/env/discord-profiles.local.json
+
+# Local reference/source asset packs
+docs/reference/rpg-textures/
+docs/reference/fantasy-textures/

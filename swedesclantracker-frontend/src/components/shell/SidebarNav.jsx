@@ -1,13 +1,14 @@
 import { IconGlyph } from "../osrs/IconGlyph";
 
 const defaultBottomItems = [
+  { id: "new-event", label: "New Event", icon: "add", disabled: true },
   { id: "settings", label: "Settings", icon: "settings", disabled: true },
   { id: "support", label: "Support", icon: "support", disabled: true },
 ];
 
 export function SidebarNav({ items, activeItem, onSelect, bottomItems = defaultBottomItems }) {
   return (
-    <aside className="osrs-sidebar">
+    <aside className="osrs-sidebar osrs-kenney-sidebar-texture">
       <div className="osrs-sidebar-brand">
         <div className="osrs-brand-mark" aria-hidden="true">
           <IconGlyph name="crest" className="osrs-brand-shield" />

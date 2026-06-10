@@ -364,20 +364,6 @@ export default function App() {
                 setHomeState({ loading: false, error: handleRequestError(error, "Failed loading dashboard."), data: null });
               }
             }}
-            onRetryLive={async () => {
-              setLiveStatusState((prev) => ({ ...prev, loading: !prev.data, error: "" }));
-              try {
-                const data = await fetchLiveStatus();
-                setLiveStatusState({ loading: false, error: "", data, stale: false });
-              } catch (error) {
-                setLiveStatusState((prev) => ({
-                  ...prev,
-                  loading: false,
-                  error: handleRequestError(error, "Live status update failed."),
-                  stale: Boolean(prev.data),
-                }));
-              }
-            }}
             onOpenQueue={() => setSurface("Admin Queue")}
           />
         ) : null}
