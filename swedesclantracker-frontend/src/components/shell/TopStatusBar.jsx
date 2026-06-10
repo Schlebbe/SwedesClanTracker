@@ -10,13 +10,27 @@ export function TopStatusBar({ home, liveStatus }) {
         <StatusPill tone={status.tone} loading={status.loading}>{status.label}</StatusPill>
         {status.detail ? <span className="osrs-topbar-sync">{status.detail}</span> : null}
       </div>
-      <div className="osrs-topbar-admin" aria-label="Current session">
-        <span className="osrs-topbar-emblem" aria-hidden="true">
+
+      <div className="osrs-topbar-search" role="search" aria-label="Member search preview">
+        <span>Search members or hiscores...</span>
+        <IconGlyph name="search" />
+      </div>
+
+      <div className="osrs-topbar-actions" aria-label="Session tools">
+        <button type="button" className="osrs-topbar-icon-button" disabled title="Notifications are not wired yet.">
+          <IconGlyph name="bell" />
+        </button>
+        <button type="button" className="osrs-topbar-icon-button" disabled title="Rank guard tools are not wired yet.">
           <IconGlyph name="shield" />
-        </span>
-        <div>
-          <strong>Admin session</strong>
-          <span>Cookie auth active</span>
+        </button>
+        <div className="osrs-topbar-admin" aria-label="Current session">
+          <span className="osrs-topbar-avatar" aria-hidden="true">
+            <IconGlyph name="admin" />
+          </span>
+          <div>
+            <strong>SwedesAdmin</strong>
+            <span>Clan Leader</span>
+          </div>
         </div>
       </div>
     </header>
@@ -53,9 +67,9 @@ function buildStatusView(home, liveStatus) {
     const isOffline = Boolean(worker.isOffline);
     const isStale = Boolean(worker.isStale);
     const tone = isOffline ? "danger" : isStale ? "warning" : "success";
-    const label = isOffline ? "Worker offline" : isStale ? "Worker stale" : "Tracker stable";
+    const label = isOffline ? "HiScores Sync: Offline" : isStale ? "HiScores Sync: Stale" : "HiScores Sync: Stable";
     const detail = latestSync?.currentPlayer
-      ? `Latest sync: ${latestSync.currentPlayer}`
+      ? `Last Snapshot: ${latestSync.currentPlayer}`
       : worker.message ?? "";
 
     return { label, detail, tone };
@@ -66,10 +80,10 @@ function buildStatusView(home, liveStatus) {
     const overall = health.overall ?? "unknown";
     const tone = overall === "critical" ? "danger" : overall === "warning" ? "warning" : overall === "healthy" ? "success" : "info";
     const detail = health.sync?.lastPlayer
-      ? `Latest sync: ${health.sync.lastPlayer} ${health.sync.syncedAgo ?? ""}`.trim()
+      ? `Last Snapshot: ${health.sync.lastPlayer} ${health.sync.syncedAgo ?? ""}`.trim()
       : health.worker?.lastHeartbeatAgo ? `Worker heartbeat: ${health.worker.lastHeartbeatAgo}` : "";
 
-    return { label: `Tracker ${overall}`, detail, tone };
+    return { label: `HiScores Sync: ${formatStatusLabel(overall)}`, detail, tone };
   }
 
   return {
@@ -77,4 +91,17 @@ function buildStatusView(home, liveStatus) {
     detail: "",
     tone: "neutral",
   };
+}
+
+function formatStatusLabel(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    return "Unknown";
+  }
+
+  return value
+    .trim()
+    .split(/[\s_-]+/)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .join(" ");
 }

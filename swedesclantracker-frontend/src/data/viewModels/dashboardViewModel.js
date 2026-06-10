@@ -11,6 +11,144 @@ export const dashboardFeatureAvailability = {
     available: false,
     reason: "Requires collection-log sync accuracy data.",
   },
+  rosterExport: {
+    available: false,
+    reason: "Requires a roster export endpoint.",
+  },
+  rosterUpdate: {
+    available: false,
+    reason: "Requires a safe app-facing sync trigger.",
+  },
+  adminTools: {
+    available: false,
+    reason: "Visual target placeholder only; no mutation endpoint is wired.",
+  },
+};
+
+export const dashboardVisualPlaceholders = {
+  unsupportedKpis: {
+    weeklyXp: {
+      key: "weekly-xp",
+      label: "Weekly XP Gained",
+      value: "184.2M",
+      detail: "Total XP",
+      trend: "+32.6M vs last week",
+      icon: "stats",
+      tone: "success",
+      source: "placeholder",
+      unavailableReason: dashboardFeatureAvailability.weeklyXp.reason,
+    },
+    bossKc: {
+      key: "boss-kc",
+      label: "Boss KC Logged",
+      value: "3,421",
+      detail: "This week",
+      trend: "+512 vs last week",
+      icon: "rank",
+      tone: "success",
+      source: "placeholder",
+      unavailableReason: dashboardFeatureAvailability.bossKc.reason,
+    },
+    collectionLog: {
+      key: "collection-log",
+      label: "Collection Log Sync",
+      value: "118",
+      detail: "Items synced",
+      trend: "99.1% accuracy",
+      icon: "scroll",
+      tone: "success",
+      source: "placeholder",
+      unavailableReason: dashboardFeatureAvailability.collectionLogSync.reason,
+    },
+  },
+  adminTasks: [
+    {
+      key: "possible-rsn-changes",
+      label: "Possible RSN Changes",
+      count: 5,
+      detail: "Members with names that may have changed.",
+      icon: "name-change",
+      tone: "danger",
+      risk: "High",
+      source: "placeholder",
+    },
+    {
+      key: "stale-members",
+      label: "Stale Members",
+      count: 12,
+      detail: "Members inactive for 30+ days.",
+      icon: "member-alert",
+      tone: "warning",
+      risk: "Medium",
+      source: "placeholder",
+    },
+    {
+      key: "rank-reviews",
+      label: "Rank Reviews",
+      count: 8,
+      detail: "Promotions or demotions awaiting approval.",
+      icon: "shield",
+      tone: "warning",
+      risk: "Medium",
+      source: "placeholder",
+    },
+  ],
+  quickTools: [
+    { key: "add-member", label: "Add Member", icon: "add-member", source: "placeholder" },
+    { key: "run-audit", label: "Run Audit", icon: "checklist", source: "placeholder" },
+    { key: "sync-hiscores", label: "Sync HiScores", icon: "sync", source: "placeholder" },
+    { key: "clear-cache", label: "Clear Temp Cache", icon: "clean", source: "placeholder" },
+  ],
+  activityRows: [
+    {
+      key: "placeholder-new-recruit",
+      time: "14:22:15",
+      event: "New Recruit",
+      member: "Swedes_Recruit",
+      detail: "Joined the clan",
+      status: "Success",
+      tone: "success",
+      action: "View",
+      icon: "add-member",
+      source: "placeholder",
+    },
+    {
+      key: "placeholder-rank-promotion",
+      time: "14:18:02",
+      event: "Rank Promotion",
+      member: "Vanguard_Slayer",
+      detail: "Promoted to Captain",
+      status: "General",
+      tone: "info",
+      action: "View",
+      icon: "promotion",
+      source: "placeholder",
+    },
+    {
+      key: "placeholder-manual-sync",
+      time: "14:05:44",
+      event: "Manual Sync",
+      member: "HCIM_BTW_99",
+      detail: "Hiscores updated",
+      status: "Updated",
+      tone: "warning",
+      action: "View",
+      icon: "sync",
+      source: "placeholder",
+    },
+    {
+      key: "placeholder-name-change",
+      time: "13:12:09",
+      event: "Name Change Detected",
+      member: "NoobBuster1",
+      detail: "Possible name change",
+      status: "Pending",
+      tone: "warning",
+      action: "Review",
+      icon: "scroll",
+      source: "placeholder",
+    },
+  ],
 };
 
 export function mapHomeToDashboardViewModel(home, liveStatus) {
@@ -21,126 +159,238 @@ export function mapHomeToDashboardViewModel(home, liveStatus) {
   const trackedMembers = toNumberOrNull(overview.activeMembers);
   const totalMembers = toNumberOrNull(overview.totalMembers);
   const pendingPromotions = toNumberOrNull(overview.pendingPromotions);
-  const openAdminCases = toNumberOrNull(overview.openAdminCases);
+  const staleSyncCount = findPostureValue(home?.rosterPosture, "stale");
+  const missingReviewCount = findPostureValue(home?.rosterPosture, "missing");
+  const mergeReviewCount = findPostureValue(home?.rosterPosture, "merge");
+  const rankMismatchCount = findPostureValue(home?.rosterPosture, "rank");
+
+  const trackerStatus = buildTrackerStatus(health, live);
+  const realTasks = buildAdminTasks({
+    workItems: home?.workPreview,
+    pendingPromotions,
+    staleSyncCount,
+    missingReviewCount,
+    mergeReviewCount,
+    rankMismatchCount,
+  });
 
   return {
     title: "Operational Dashboard",
-    subtitle: "Tracker health, roster posture, recent changes, and waiting admin work.",
-    statCards: [
+    subtitle: "Real-time overview of Swedes clan activity, hiscores tracking, and administrative status.",
+    trackerStatus,
+    kpis: [
       {
         key: "tracked-members",
         label: "Tracked Members",
         value: formatTrackedMembers(trackedMembers, totalMembers),
-        detail: totalMembers !== null ? `${totalMembers.toLocaleString()} total members` : "Total member count unavailable",
+        detail: totalMembers !== null ? `${formatTrackedPercent(trackedMembers, totalMembers)} tracked` : "Total member count unavailable",
+        trend: formatMemberTrend(staleSyncCount),
+        icon: "members",
         tone: "success",
+        source: "api",
         available: trackedMembers !== null || totalMembers !== null,
       },
-      {
-        key: "pending-promotions",
-        label: "Pending Promotions",
-        value: formatNumber(pendingPromotions),
-        detail: "Promotion candidates awaiting review",
-        tone: pendingPromotions > 0 ? "warning" : "success",
-        available: pendingPromotions !== null,
-      },
-      {
-        key: "open-admin-cases",
-        label: "Open Admin Cases",
-        value: formatNumber(openAdminCases),
-        detail: "Review cases currently open",
-        tone: openAdminCases > 0 ? "warning" : "success",
-        available: openAdminCases !== null,
-      },
+      dashboardVisualPlaceholders.unsupportedKpis.weeklyXp,
+      dashboardVisualPlaceholders.unsupportedKpis.bossKc,
+      dashboardVisualPlaceholders.unsupportedKpis.collectionLog,
     ],
-    futureStats: [
-      {
-        key: "weekly-xp",
-        label: "Weekly XP Gained",
-        icon: "XP",
-        available: dashboardFeatureAvailability.weeklyXp.available,
-        unavailableReason: dashboardFeatureAvailability.weeklyXp.reason,
-      },
-      {
-        key: "boss-kc",
-        label: "Boss KC Logged",
-        icon: "KC",
-        available: dashboardFeatureAvailability.bossKc.available,
-        unavailableReason: dashboardFeatureAvailability.bossKc.reason,
-      },
-      {
-        key: "collection-log",
-        label: "Collection Log Sync",
-        icon: "CL",
-        available: dashboardFeatureAvailability.collectionLogSync.available,
-        unavailableReason: dashboardFeatureAvailability.collectionLogSync.reason,
-      },
-    ],
-    healthCards: [
-      {
-        key: "overall",
-        label: "Tracker Health",
-        value: formatStatusLabel(health.overall),
-        detail: "Combined API and worker posture",
-        tone: healthTone(health.overall),
-      },
-      {
-        key: "api",
-        label: "API",
-        value: formatStatusLabel(health.api?.state),
-        detail: typeof health.api?.latencyMs === "number" && health.api.latencyMs > 0 ? `${health.api.latencyMs}ms latency` : "Latency unavailable",
-        tone: health.api?.state === "failed" ? "danger" : "success",
-      },
-      {
-        key: "worker",
-        label: "Worker",
-        value: live.hasLive ? live.label : formatStatusLabel(health.worker?.state),
-        detail: live.hasLive
-          ? live.currentTask
-          : [health.worker?.currentPlayer, health.worker?.lastHeartbeatAgo].filter(Boolean).join(" | ") || "Worker detail unavailable",
-        tone: live.hasLive ? live.tone : workerTone(health.worker?.state),
-      },
-      {
-        key: "latest-sync",
-        label: "Latest Sync",
-        value: live.hasLive ? live.latestSync : formatLatestSync(health.sync),
-        detail: "Most recent completed player sync",
-        tone: "neutral",
-      },
-      {
-        key: "latest-event",
-        label: "Latest Event",
-        value: live.hasLive ? live.latestEvent : "No recent worker event yet",
-        detail: "Live worker event stream",
-        tone: "info",
-      },
+    adminTasks: mergeTaskTargets(realTasks),
+    quickTools: dashboardVisualPlaceholders.quickTools.map((item) => ({
+      ...item,
+      disabled: true,
+      reason: dashboardFeatureAvailability.adminTools.reason,
+    })),
+    activityRows: buildActivityRows(home?.meaningfulChanges),
+    footerItems: [
+      "SwedesClanTracker",
+      "Unofficial OSRS Clan Tracker",
+      "Existing API data with marked visual placeholders",
     ],
     liveStatus: {
       loading: Boolean(liveStatus?.loading && !liveStatus?.data),
       error: liveStatus?.error ?? "",
       stale: Boolean(liveStatus?.stale),
     },
+    healthCards: [
+      {
+        key: "overall",
+        label: "Tracker Health",
+        value: trackerStatus.label,
+        detail: trackerStatus.detail,
+        tone: trackerStatus.tone,
+        source: trackerStatus.source,
+      },
+      {
+        key: "latest-sync",
+        label: "Latest Snapshot",
+        value: trackerStatus.snapshot,
+        detail: "Most recent completed player sync",
+        tone: "neutral",
+        source: trackerStatus.source,
+      },
+    ],
+    statCards: [],
+    futureStats: Object.values(dashboardVisualPlaceholders.unsupportedKpis),
     postureCards: (Array.isArray(home?.rosterPosture) ? home.rosterPosture : []).map((item) => ({
       key: item.label,
       label: item.label ?? "Unknown",
       value: formatNumber(toNumberOrNull(item.value)),
       detail: item.hint ?? "",
       tone: normalizeTone(item.tone),
+      source: "api",
     })),
-    workItems: (Array.isArray(home?.workPreview) ? home.workPreview : []).map((item) => ({
-      key: item.caseId ?? item.label,
-      label: item.label ?? "Admin case",
-      detail: [item.caseId, item.age ? `age ${item.age}` : ""].filter(Boolean).join(" | "),
+    workItems: realTasks,
+    recentChanges: buildActivityRows(home?.meaningfulChanges),
+  };
+}
+
+function buildTrackerStatus(health, live) {
+  if (live.hasLive) {
+    return {
+      label: live.label,
+      detail: live.currentTask,
+      snapshot: live.latestSync,
+      tone: live.tone,
+      source: "api",
+    };
+  }
+
+  const overall = formatStatusLabel(health?.overall);
+  return {
+    label: `Tracker ${overall}`,
+    detail: health?.worker?.lastHeartbeatAgo ? `Worker heartbeat ${health.worker.lastHeartbeatAgo}` : "Worker detail unavailable",
+    snapshot: formatLatestSync(health?.sync),
+    tone: healthTone(health?.overall),
+    source: "api",
+  };
+}
+
+function buildAdminTasks({ workItems, pendingPromotions, staleSyncCount, missingReviewCount, mergeReviewCount, rankMismatchCount }) {
+  const tasks = [];
+  const reviewTotal = sumKnown([missingReviewCount, mergeReviewCount]);
+  if (reviewTotal !== null) {
+    tasks.push({
+      key: "possible-rsn-changes",
+      label: "Possible RSN Changes",
+      count: reviewTotal,
+      detail: "Members with names or membership state needing review.",
+      icon: "name-change",
+      tone: reviewTotal > 0 ? "danger" : "success",
+      risk: reviewTotal > 0 ? "Open" : "Clear",
+      source: "api",
+    });
+  }
+
+  if (staleSyncCount !== null) {
+    tasks.push({
+      key: "stale-members",
+      label: "Stale Members",
+      count: staleSyncCount,
+      detail: "Members with sync data older than the current freshness window.",
+      icon: "member-alert",
+      tone: staleSyncCount > 0 ? "warning" : "success",
+      risk: staleSyncCount > 0 ? "Open" : "Clear",
+      source: "api",
+    });
+  }
+
+  const rankReviewTotal = sumKnown([pendingPromotions, rankMismatchCount]);
+  if (rankReviewTotal !== null) {
+    tasks.push({
+      key: "rank-reviews",
+      label: "Rank Reviews",
+      count: rankReviewTotal,
+      detail: "Promotions or rank mismatches awaiting approval.",
+      icon: "shield",
+      tone: rankReviewTotal > 0 ? "warning" : "success",
+      risk: rankReviewTotal > 0 ? "Open" : "Clear",
+      source: "api",
+    });
+  }
+
+  if (!tasks.length && Array.isArray(workItems)) {
+    return workItems.slice(0, 3).map((item, index) => ({
+      key: item.caseId ?? `case-${index}`,
+      label: item.label ?? "Admin Case",
+      count: index + 1,
+      detail: [item.caseId, item.age ? `age ${item.age}` : ""].filter(Boolean).join(" | ") || "Review case available.",
+      icon: "review",
       tone: riskTone(item.risk),
       risk: item.risk ?? "unknown",
-    })),
-    recentChanges: (Array.isArray(home?.meaningfulChanges) ? home.meaningfulChanges : []).map((item) => ({
-      key: item.id ?? `${item.title}-${item.time}`,
-      event: item.title ?? "Untitled event",
-      category: item.category ?? "system",
-      tone: normalizeTone(item.tone),
+      source: "api",
+    }));
+  }
+
+  return tasks;
+}
+
+function mergeTaskTargets(realTasks) {
+  return dashboardVisualPlaceholders.adminTasks.map((placeholder) => {
+    const real = realTasks.find((item) => item.key === placeholder.key);
+    if (!real) return placeholder;
+    return {
+      ...placeholder,
+      ...real,
+      label: placeholder.label,
+      icon: placeholder.icon,
+      source: "api",
+    };
+  });
+}
+
+function buildActivityRows(changes) {
+  const realRows = (Array.isArray(changes) ? changes : []).slice(0, 8).map((item, index) => {
+    const parsed = parseActivityTitle(item.title);
+    const tone = normalizeTone(item.tone);
+    return {
+      key: item.id ?? `activity-${index}`,
       time: item.time ?? "unknown",
-    })),
+      event: parsed.event,
+      member: parsed.member,
+      detail: parsed.detail || item.category || "Tracker event",
+      status: item.category ?? "General",
+      tone,
+      action: item.category?.toLowerCase().includes("review") ? "Review" : "View",
+      icon: iconForActivity(parsed.event, item.category),
+      source: "api",
+    };
+  });
+
+  const rows = [...realRows];
+  for (const placeholder of dashboardVisualPlaceholders.activityRows) {
+    if (rows.length >= 8) break;
+    rows.push(placeholder);
+  }
+
+  return rows;
+}
+
+function parseActivityTitle(title) {
+  if (typeof title !== "string" || !title.trim()) {
+    return {
+      event: "Tracker Event",
+      member: "Unavailable",
+      detail: "No event detail provided",
+    };
+  }
+
+  const [event, ...memberParts] = title.split(":");
+  const member = memberParts.join(":").trim();
+  return {
+    event: event.trim() || "Tracker Event",
+    member: member || "Member unavailable",
+    detail: member ? "Recorded by tracker" : "Member not included in API payload",
   };
+}
+
+function iconForActivity(event, category) {
+  const text = `${event ?? ""} ${category ?? ""}`.toLowerCase();
+  if (text.includes("promotion")) return "promotion";
+  if (text.includes("name") || text.includes("merge")) return "scroll";
+  if (text.includes("sync")) return "sync";
+  if (text.includes("new") || text.includes("recruit")) return "add-member";
+  if (text.includes("rank")) return "rank";
+  return "activity";
 }
 
 function buildLiveWorkerView(payload) {
@@ -148,7 +398,7 @@ function buildLiveWorkerView(payload) {
     return {
       hasLive: false,
       tone: "warning",
-      label: "Waiting for worker heartbeat",
+      label: "HiScores Sync Pending",
       currentTask: "Waiting for worker heartbeat",
       latestSync: "No completed sync reported yet",
       latestEvent: "No recent worker event yet",
@@ -173,22 +423,22 @@ function buildLiveWorkerView(payload) {
   const isOffline = Boolean(worker?.isOffline);
   const isStale = Boolean(worker?.isStale);
 
-  let label = "Worker idle";
-  let tone = "info";
+  let label = "HiScores Sync: Stable";
+  let tone = "success";
   if (!worker) {
-    label = "Waiting for worker heartbeat";
+    label = "HiScores Sync Pending";
     tone = "warning";
   } else if (isOffline) {
-    label = "Worker offline";
+    label = "HiScores Sync: Offline";
     tone = "danger";
   } else if (isStale) {
-    label = "Worker stale";
+    label = "HiScores Sync: Stale";
     tone = "warning";
   } else if (isRateLimited) {
-    label = "Waiting for rate limit";
+    label = "HiScores Sync: Waiting";
     tone = "warning";
   } else if (workerPlayer) {
-    label = `Worker syncing ${workerPlayer}`;
+    label = `HiScores Sync: ${workerPlayer}`;
     tone = "info";
   }
 
@@ -207,8 +457,8 @@ function buildLiveWorkerView(payload) {
 
   if (workerPlayer && latestSyncPlayer && workerPlayer === latestSyncPlayer) {
     latestSyncText = isRateLimited
-      ? `Last completed sync also ${workerPlayer} (awaiting rate limit)`
-      : `Still on ${workerPlayer} since latest completed sync`;
+      ? `Last completed sync also ${workerPlayer}`
+      : `Still on ${workerPlayer}`;
   }
 
   const latestEventText = latestEvent?.state
@@ -249,6 +499,26 @@ function formatTrackedMembers(activeMembers, totalMembers) {
   return "-";
 }
 
+function formatTrackedPercent(activeMembers, totalMembers) {
+  if (activeMembers === null || totalMembers === null || totalMembers <= 0) {
+    return "Tracking percentage unavailable";
+  }
+
+  return `${((activeMembers / totalMembers) * 100).toFixed(1)}%`;
+}
+
+function formatMemberTrend(staleSyncCount) {
+  if (staleSyncCount === null) {
+    return "Roster freshness unavailable";
+  }
+
+  if (staleSyncCount === 0) {
+    return "All tracked members fresh";
+  }
+
+  return `${staleSyncCount.toLocaleString()} need sync review`;
+}
+
 function formatLatestSync(sync) {
   if (!sync) {
     return "No sync reported";
@@ -263,6 +533,18 @@ function formatNumber(value) {
 
 function toNumberOrNull(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function findPostureValue(items, keyword) {
+  if (!Array.isArray(items)) return null;
+  const found = items.find((item) => String(item?.label ?? "").toLowerCase().includes(keyword));
+  return toNumberOrNull(found?.value);
+}
+
+function sumKnown(values) {
+  const known = values.filter((value) => value !== null);
+  if (!known.length) return null;
+  return known.reduce((total, value) => total + value, 0);
 }
 
 function formatStatusLabel(value) {
@@ -283,13 +565,6 @@ function healthTone(value) {
   if (value === "warning") return "warning";
   if (value === "healthy") return "success";
   return "neutral";
-}
-
-function workerTone(value) {
-  if (value === "offline") return "danger";
-  if (value === "stale") return "warning";
-  if (value === "online") return "success";
-  return "info";
 }
 
 function riskTone(value) {
