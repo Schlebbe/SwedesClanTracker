@@ -64,6 +64,8 @@ public class DiscordPromotionBotWorker(
     private static readonly TimeSpan DiscordMemberWarmupDownloadTimeout = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan DiscordMemberSearchTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan DiscordMemberSearchTotalTimeout = TimeSpan.FromSeconds(8);
+    private static readonly TimeSpan TempleNameChangeDetectionWindow = TimeSpan.FromHours(6);
+    private static readonly TimeSpan TempleNameChangeReminderInterval = TimeSpan.FromHours(2);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -115,6 +117,7 @@ public class DiscordPromotionBotWorker(
             await RunDiscordStep("ProcessMergeActionUpdates", () => ProcessMergeActionUpdates(stoppingToken), stoppingToken);
             await RunDiscordStep("ProcessScheduledDeletes", () => ProcessScheduledDeletes(stoppingToken), stoppingToken);
             await RunDiscordStep("PostPendingPromotionCandidates", () => PostPendingPromotionCandidates(stoppingToken), stoppingToken);
+            await RunDiscordStep("PostTempleNameChangeNeededMessages", () => PostTempleNameChangeNeededMessages(stoppingToken), stoppingToken);
             await RunDiscordStep("PostTempleMissingActionMessages", () => PostTempleMissingActionMessages(stoppingToken), stoppingToken);
             await RunDiscordStep("PostWomMissingActionMessages", () => PostWomMissingActionMessages(stoppingToken), stoppingToken);
             await RunDiscordStep("PostWomOnlyActionMessages", () => PostWomOnlyActionMessages(stoppingToken), stoppingToken);
@@ -200,6 +203,7 @@ public class DiscordPromotionBotWorker(
         return stepName switch
         {
             "PostPendingPromotionCandidates" => "Checking pending promotions for Discord posts.",
+            "PostTempleNameChangeNeededMessages" => "Checking possible Temple name-change setup.",
             "PostTempleMissingActionMessages" => "Checking Temple missing-player review messages.",
             "PostWomMissingActionMessages" => "Checking Wise Old Man missing-player review messages.",
             "PostWomOnlyActionMessages" => "Checking Wise Old Man only-player review messages.",
@@ -736,6 +740,16 @@ public class DiscordPromotionBotWorker(
                 return;
             }
             await HandleWomOnlyButtonAsync(component, parts);
+            return;
+        }
+        if (parts[0] == "templename")
+        {
+            if (parts.Length != 3)
+            {
+                await RespondToComponentAsync(component, "Unknown action.", ephemeral: true);
+                return;
+            }
+            await HandleTempleNameChangeButtonAsync(component, parts);
             return;
         }
         if (parts[0] == "merge")
@@ -1298,6 +1312,122 @@ public class DiscordPromotionBotWorker(
                 MessageDescription = $"WOM-only review card for {normalizedUsername}"
             });
 
+        await db.SaveChangesAsync();
+    }
+
+    private async Task HandleTempleNameChangeButtonAsync(SocketMessageComponent component, string[] parts)
+    {
+        var action = parts[1];
+        if (action is not ("confirm" or "decline"))
+        {
+            await RespondToComponentAsync(component, "Unknown action.", ephemeral: true);
+            return;
+        }
+        if (!int.TryParse(parts[2], out var requiredEventId))
+        {
+            await RespondToComponentAsync(component, "Unknown action.", ephemeral: true);
+            return;
+        }
+
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        var requiredEvent = await db.LifecycleEvents.FirstOrDefaultAsync(x =>
+            x.Id == requiredEventId &&
+            x.EventType == TempleNameChangeReviewEventTypes.Required);
+        if (requiredEvent is null)
+        {
+            await RespondToComponentAsync(component, "This Temple name-change review no longer exists.", ephemeral: true);
+            return;
+        }
+        if (requiredEvent.Status != "OPEN")
+        {
+            await RespondToComponentAsync(component, "This Temple name-change review was already handled.", ephemeral: true);
+            return;
+        }
+
+        var metadata = ReadLifecycleMetadata(requiredEvent.MetadataJson);
+        var previousUsername = NormalizeUsername(PickLifecycleValue(metadata, "PreviousUsername") ?? "");
+        var newUsername = NormalizeUsername(PickLifecycleValue(metadata, "NewUsername") ?? "");
+        var previousPlayerId = ExtractInt(requiredEvent.MetadataJson, "PreviousPlayerId") ?? requiredEvent.PlayerId;
+        if (string.IsNullOrWhiteSpace(previousUsername) || string.IsNullOrWhiteSpace(newUsername))
+        {
+            requiredEvent.Status = "DONE";
+            await db.SaveChangesAsync();
+            await RespondToComponentAsync(component, "This Temple name-change review was malformed and has been closed.", ephemeral: true);
+            return;
+        }
+
+        if (action == "confirm")
+        {
+            await CloseOpenLifecycleEventsAsync(db, previousPlayerId,
+                "MISSING_IN_ROSTER",
+                "TEMPLE_MISSING_ACTION_REQUIRED",
+                "WOM_MISSING_ACTION_REQUIRED");
+            await CloseOpenWomOnlyRequiredEventsAsync(db, newUsername);
+
+            requiredEvent.MetadataJson = JsonUtil.Serialize(new
+            {
+                PreviousUsername = previousUsername,
+                NewUsername = newUsername,
+                PreviousPlayerId = previousPlayerId,
+                Rank = PickLifecycleValue(metadata, "Rank"),
+                WomRole = PickLifecycleValue(metadata, "WomRole"),
+                WomMissingEventId = ExtractInt(requiredEvent.MetadataJson, "WomMissingEventId"),
+                TempleMissingEventId = ExtractInt(requiredEvent.MetadataJson, "TempleMissingEventId"),
+                WomOnlyEventId = ExtractInt(requiredEvent.MetadataJson, "WomOnlyEventId"),
+                ConfirmedAt = DateTimeOffset.UtcNow,
+                ConfirmedBy = component.User.Username,
+                ConfirmedByDiscordUserId = component.User.Id,
+                Source = "discord"
+            });
+        }
+        else
+        {
+            requiredEvent.Status = "DONE";
+        }
+
+        db.LifecycleEvents.Add(new LifecycleEvent
+        {
+            PlayerId = previousPlayerId,
+            EventType = TempleNameChangeReviewEventTypes.ActionApplied,
+            MetadataJson = JsonUtil.Serialize(new
+            {
+                PreviousUsername = previousUsername,
+                NewUsername = newUsername,
+                Action = action,
+                RequiredEventId = requiredEvent.Id,
+                HandledBy = component.User.Username,
+                HandledByDiscordUserId = component.User.Id,
+                Source = "discord",
+                ChannelId = component.Channel.Id,
+                DiscordMessageId = component.Message.Id
+            }),
+            Status = "DONE",
+            CreatedAt = DateTimeOffset.UtcNow
+        });
+
+        await db.SaveChangesAsync();
+
+        var handledText = action == "confirm"
+            ? $"Confirmed by {component.User.Username}; TempleOSRS manual name update is now expected."
+            : $"Declined by {component.User.Username}; normal review cards will resume.";
+        await UpdateComponentMessageAsync(
+            component,
+            BuildHandledEmbed(component.Message.Embeds.FirstOrDefault(), handledText, action == "confirm" ? "approve" : "dismiss"));
+
+        ScheduleChannelMessageDelete(
+            db,
+            previousPlayerId,
+            component.Channel.Id,
+            component.Message.Id,
+            "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED",
+            new
+            {
+                Reason = "temple-name-change-action-handled",
+                Action = action,
+                PreviousUsername = previousUsername,
+                NewUsername = newUsername
+            });
         await db.SaveChangesAsync();
     }
 
@@ -3305,6 +3435,37 @@ public class DiscordPromotionBotWorker(
         return string.Equals(value, "true", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static bool IsTempleNameChangeConfirmed(Dictionary<string, string> metadata)
+    {
+        return !string.IsNullOrWhiteSpace(PickLifecycleValue(metadata, "ConfirmedAt"));
+    }
+
+    private static bool IsOpenTempleNameChangeForPreviousUsername(IEnumerable<LifecycleEvent> requirements, string username)
+    {
+        var normalized = NormalizeUsername(username);
+        return requirements.Any(x =>
+        {
+            var metadata = ReadLifecycleMetadata(x.MetadataJson);
+            return string.Equals(
+                NormalizeUsername(PickLifecycleValue(metadata, "PreviousUsername") ?? ""),
+                normalized,
+                StringComparison.OrdinalIgnoreCase);
+        });
+    }
+
+    private static bool IsOpenTempleNameChangeForNewUsername(IEnumerable<LifecycleEvent> requirements, string username)
+    {
+        var normalized = NormalizeUsername(username);
+        return requirements.Any(x =>
+        {
+            var metadata = ReadLifecycleMetadata(x.MetadataJson);
+            return string.Equals(
+                NormalizeUsername(PickLifecycleValue(metadata, "NewUsername") ?? ""),
+                normalized,
+                StringComparison.OrdinalIgnoreCase);
+        });
+    }
+
     private static Dictionary<string, string> ReadLifecycleMetadata(string metadataJson)
     {
         var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -3334,6 +3495,15 @@ public class DiscordPromotionBotWorker(
             }
         }
         return null;
+    }
+
+    private static DateTimeOffset? PickLifecycleDateTimeOffset(Dictionary<string, string> metadata, params string[] keys)
+    {
+        var value = PickLifecycleValue(metadata, keys);
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        return DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var parsed)
+            ? parsed
+            : null;
     }
 
     private static string JsonValueToString(JsonElement value)
@@ -3573,6 +3743,9 @@ public class DiscordPromotionBotWorker(
 
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        var openTempleNameChanges = await db.LifecycleEvents
+            .Where(x => x.EventType == TempleNameChangeReviewEventTypes.Required && x.Status == "OPEN")
+            .ToListAsync(ct);
 
         // Self-heal: ensure every missing player has an actionable lifecycle event.
         var missingPlayers = await db.Players
@@ -3624,6 +3797,10 @@ public class DiscordPromotionBotWorker(
             if (player is null)
             {
                 ev.Status = "DONE";
+                continue;
+            }
+            if (IsOpenTempleNameChangeForPreviousUsername(openTempleNameChanges, player.Username))
+            {
                 continue;
             }
             if (await HasOpenMergePendingForPreviousUsernameAsync(db, player.Username, ct))
@@ -3762,6 +3939,9 @@ public class DiscordPromotionBotWorker(
 
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        var openTempleNameChanges = await db.LifecycleEvents
+            .Where(x => x.EventType == TempleNameChangeReviewEventTypes.Required && x.Status == "OPEN")
+            .ToListAsync(ct);
 
         // Self-heal: ensure WOM-missing players have actionable events.
         var womGroupIdForSelfHeal = configuration.GetValue<int?>("WiseOldMan:GroupId") ?? 7173;
@@ -3809,6 +3989,10 @@ public class DiscordPromotionBotWorker(
             if (player is null)
             {
                 ev.Status = "DONE";
+                continue;
+            }
+            if (IsOpenTempleNameChangeForPreviousUsername(openTempleNameChanges, player.Username))
+            {
                 continue;
             }
 
@@ -4016,6 +4200,9 @@ public class DiscordPromotionBotWorker(
 
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        var openTempleNameChanges = await db.LifecycleEvents
+            .Where(x => x.EventType == TempleNameChangeReviewEventTypes.Required && x.Status == "OPEN")
+            .ToListAsync(ct);
 
         var pending = await db.LifecycleEvents
             .Where(x => x.EventType == "WOM_ONLY_ACTION_REQUIRED" && x.Status == "OPEN")
@@ -4054,6 +4241,10 @@ public class DiscordPromotionBotWorker(
             if (ignoredUsernames.Contains(normalizedUsername))
             {
                 ev.Status = "DONE";
+                continue;
+            }
+            if (IsOpenTempleNameChangeForNewUsername(openTempleNameChanges, normalizedUsername))
+            {
                 continue;
             }
 
@@ -4510,6 +4701,631 @@ public class DiscordPromotionBotWorker(
         await db.SaveChangesAsync(ct);
     }
 
+    private async Task PostTempleNameChangeNeededMessages(CancellationToken ct)
+    {
+        if (_client is null) return;
+        var channel = await ResolveMessageChannelAsync(_options.ChannelId);
+        if (channel is null) return;
+
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+
+        var detectionInput = await BuildTempleNameChangeDetectionInputAsync(db, ct);
+        var detection = TempleNameChangeDetector.Detect(detectionInput);
+        if (detection is null)
+        {
+            var openRequirements = await db.LifecycleEvents
+                .Where(x => x.EventType == TempleNameChangeReviewEventTypes.Required && x.Status == "OPEN")
+                .ToListAsync(ct);
+            foreach (var openRequirement in openRequirements)
+            {
+                await SuppressTempleNameChangeNoisyCardsAsync(db, openRequirement, ct);
+            }
+            await PostDueConfirmedTempleNameChangeRemindersAsync(db, channel, openRequirements, ct);
+            if (openRequirements.Count > 0) await db.SaveChangesAsync(ct);
+            return;
+        }
+
+        var requiredEvent = await UpsertTempleNameChangeRequiredEventAsync(db, detection, ct);
+        if (requiredEvent is null) return;
+
+        await db.SaveChangesAsync(ct);
+        await SuppressTempleNameChangeNoisyCardsAsync(db, requiredEvent, ct);
+
+        var requiredMetadata = ReadLifecycleMetadata(requiredEvent.MetadataJson);
+        if (IsTempleNameChangeConfirmed(requiredMetadata))
+        {
+            await db.SaveChangesAsync(ct);
+            return;
+        }
+
+        var renderFingerprint = ComputeRenderFingerprint(new
+        {
+            Type = "temple-name-change-needed-card",
+            RequiredEventId = requiredEvent.Id,
+            detection.PreviousPlayerId,
+            detection.PreviousUsername,
+            detection.NewUsername,
+            detection.Rank,
+            detection.WomRole,
+            detection.WomMissingEventId,
+            detection.TempleMissingEventId,
+            detection.WomOnlyEventId
+        });
+
+        var postedEvents = await db.LifecycleEvents
+            .Where(x => x.EventType == TempleNameChangeReviewEventTypes.DiscordPosted)
+            .OrderByDescending(x => x.CreatedAt)
+            .ToListAsync(ct);
+        var postedEvent = postedEvents.FirstOrDefault(x => MetadataIntEquals(x.MetadataJson, "RequiredEventId", requiredEvent.Id));
+        var previousDiscordGuess = await GuessDiscordMemberForNamesAsync([detection.PreviousUsername], ct);
+        var newDiscordGuess = await GuessDiscordMemberForNamesAsync([detection.NewUsername], ct);
+        renderFingerprint = ComputeRenderFingerprint(new
+        {
+            Type = "temple-name-change-needed-card",
+            RequiredEventId = requiredEvent.Id,
+            detection.PreviousPlayerId,
+            detection.PreviousUsername,
+            detection.NewUsername,
+            detection.Rank,
+            detection.WomRole,
+            detection.WomMissingEventId,
+            detection.TempleMissingEventId,
+            detection.WomOnlyEventId,
+            PreviousDiscordGuess = FormatDiscordGuessForFingerprint(previousDiscordGuess),
+            NewDiscordGuess = FormatDiscordGuessForFingerprint(newDiscordGuess)
+        });
+        var embed = BuildTempleNameChangeNeededEmbed(
+            detection.PreviousUsername,
+            detection.NewUsername,
+            detection.Rank,
+            detection.WomRole,
+            previousDiscordGuess,
+            newDiscordGuess);
+        var components = BuildTempleNameChangeNeededComponents(requiredEvent.Id);
+
+        if (postedEvent is not null)
+        {
+            var lookupKey = $"temple-name-change:{requiredEvent.Id}";
+            if (IsLookupBackoffActive(lookupKey)) return;
+            var (lookupState, liveDiscordMessage, channelId, messageId) = await TryGetPostedUserMessageAsync(postedEvent, lookupKey);
+            if (lookupState == PostedMessageLookupState.Unknown)
+            {
+                SetLookupBackoff(lookupKey);
+                return;
+            }
+            if (lookupState == PostedMessageLookupState.Malformed)
+            {
+                postedEvent.Status = "DONE";
+            }
+            else if (lookupState == PostedMessageLookupState.Found && liveDiscordMessage is not null)
+            {
+                if (!ShouldSkipMessagePatch(liveDiscordMessage.Id, renderFingerprint))
+                {
+                    await liveDiscordMessage.ModifyAsync(props =>
+                    {
+                        props.Embed = embed;
+                        props.Components = components;
+                    });
+                    RecordMessagePatched(liveDiscordMessage.Id, renderFingerprint);
+                }
+                postedEvent.MetadataJson = JsonUtil.Serialize(new
+                {
+                    RequiredEventId = requiredEvent.Id,
+                    PreviousUsername = detection.PreviousUsername,
+                    NewUsername = detection.NewUsername,
+                    PreviousDiscordGuess = FormatDiscordGuessForFingerprint(previousDiscordGuess),
+                    NewDiscordGuess = FormatDiscordGuessForFingerprint(newDiscordGuess),
+                    ChannelId = liveDiscordMessage.Channel.Id,
+                    DiscordMessageId = liveDiscordMessage.Id,
+                    RenderFingerprint = renderFingerprint
+                });
+                await db.SaveChangesAsync(ct);
+                return;
+            }
+            else if (lookupState == PostedMessageLookupState.Missing)
+            {
+                await RecordMissingTrackedMessageEventAsync(
+                    db,
+                    requiredEvent.PlayerId,
+                    "temple-name-change",
+                    postedEvent.Id,
+                    requiredEvent.Id,
+                    channelId,
+                    messageId,
+                    "post-temple-name-change",
+                    ct);
+            }
+        }
+
+        var lease = await TryAcquirePostLeaseAsync(db, requiredEvent.PlayerId, $"temple-name-change:{requiredEvent.Id}", ct);
+        if (lease is null) return;
+        try
+        {
+            await db.Entry(requiredEvent).ReloadAsync(ct);
+            if (requiredEvent.Status != "OPEN") return;
+            var latestMetadata = ReadLifecycleMetadata(requiredEvent.MetadataJson);
+            if (IsTempleNameChangeConfirmed(latestMetadata)) return;
+
+            var msg = await channel.SendMessageAsync(embed: embed, components: components);
+            db.LifecycleEvents.Add(new LifecycleEvent
+            {
+                PlayerId = requiredEvent.PlayerId,
+                EventType = TempleNameChangeReviewEventTypes.DiscordPosted,
+                MetadataJson = JsonUtil.Serialize(new
+                {
+                    RequiredEventId = requiredEvent.Id,
+                    PreviousUsername = detection.PreviousUsername,
+                    NewUsername = detection.NewUsername,
+                    PreviousDiscordGuess = FormatDiscordGuessForFingerprint(previousDiscordGuess),
+                    NewDiscordGuess = FormatDiscordGuessForFingerprint(newDiscordGuess),
+                    ChannelId = _options.ChannelId,
+                    DiscordMessageId = msg.Id,
+                    RenderFingerprint = renderFingerprint
+                }),
+                Status = "DONE",
+                CreatedAt = DateTimeOffset.UtcNow
+            });
+            RecordMessagePatched(msg.Id, renderFingerprint);
+        }
+        finally
+        {
+            lease.Status = "DONE";
+            await db.SaveChangesAsync(ct);
+        }
+    }
+
+    private async Task PostDueConfirmedTempleNameChangeRemindersAsync(
+        TrackerDbContext db,
+        IMessageChannel channel,
+        IReadOnlyList<LifecycleEvent> openRequirements,
+        CancellationToken ct)
+    {
+        if (openRequirements.Count == 0) return;
+
+        var now = DateTimeOffset.UtcNow;
+        var postedEvents = await db.LifecycleEvents
+            .Where(x => x.EventType == TempleNameChangeReviewEventTypes.DiscordPosted)
+            .OrderByDescending(x => x.CreatedAt)
+            .ToListAsync(ct);
+
+        foreach (var requiredEvent in openRequirements)
+        {
+            var metadata = ReadLifecycleMetadata(requiredEvent.MetadataJson);
+            var confirmedAt = PickLifecycleDateTimeOffset(metadata, "ConfirmedAt");
+            if (!confirmedAt.HasValue) continue;
+
+            var latestPostedEvent = postedEvents.FirstOrDefault(x => MetadataIntEquals(x.MetadataJson, "RequiredEventId", requiredEvent.Id));
+            var latestPostedMetadata = latestPostedEvent is null ? [] : ReadLifecycleMetadata(latestPostedEvent.MetadataJson);
+            var reminderPostedAt = PickLifecycleDateTimeOffset(latestPostedMetadata, "ReminderPostedAt");
+            var lastVisibleReminderAt = new DateTimeOffset?[]
+                {
+                    confirmedAt.Value,
+                    latestPostedEvent is not null && latestPostedEvent.CreatedAt > confirmedAt.Value ? latestPostedEvent.CreatedAt : null,
+                    reminderPostedAt
+                }
+                .Where(x => x.HasValue)
+                .Select(x => x!.Value)
+                .Max();
+            if (now - lastVisibleReminderAt < TempleNameChangeReminderInterval)
+            {
+                continue;
+            }
+
+            var previousUsername = NormalizeUsername(PickLifecycleValue(metadata, "PreviousUsername") ?? "");
+            var newUsername = NormalizeUsername(PickLifecycleValue(metadata, "NewUsername") ?? "");
+            if (string.IsNullOrWhiteSpace(previousUsername) || string.IsNullOrWhiteSpace(newUsername)) continue;
+
+            var rank = PickLifecycleValue(metadata, "Rank") ?? "Unknown";
+            var womRole = PickLifecycleValue(metadata, "WomRole") ?? "Unknown";
+            var previousDiscordGuess = await GuessDiscordMemberForNamesAsync([previousUsername], ct);
+            var newDiscordGuess = await GuessDiscordMemberForNamesAsync([newUsername], ct);
+            var renderFingerprint = ComputeRenderFingerprint(new
+            {
+                Type = "temple-name-change-needed-card",
+                Reminder = true,
+                RequiredEventId = requiredEvent.Id,
+                PreviousUsername = previousUsername,
+                NewUsername = newUsername,
+                Rank = rank,
+                WomRole = womRole,
+                ConfirmedAt = confirmedAt.Value,
+                PreviousDiscordGuess = FormatDiscordGuessForFingerprint(previousDiscordGuess),
+                NewDiscordGuess = FormatDiscordGuessForFingerprint(newDiscordGuess)
+            });
+            var embed = BuildTempleNameChangeNeededEmbed(
+                previousUsername,
+                newUsername,
+                rank,
+                womRole,
+                previousDiscordGuess,
+                newDiscordGuess);
+            var components = BuildTempleNameChangeNeededComponents(requiredEvent.Id);
+
+            if (latestPostedEvent is not null)
+            {
+                var lookupKey = $"temple-name-change-reminder:{requiredEvent.Id}";
+                if (IsLookupBackoffActive(lookupKey)) continue;
+                var (lookupState, liveDiscordMessage, channelId, messageId) = await TryGetPostedUserMessageAsync(latestPostedEvent, lookupKey);
+                if (lookupState == PostedMessageLookupState.Unknown)
+                {
+                    SetLookupBackoff(lookupKey);
+                    continue;
+                }
+                if (lookupState == PostedMessageLookupState.Malformed)
+                {
+                    latestPostedEvent.Status = "DONE";
+                    continue;
+                }
+                if (lookupState == PostedMessageLookupState.Found && liveDiscordMessage is not null)
+                {
+                    if (!ShouldSkipMessagePatch(liveDiscordMessage.Id, renderFingerprint))
+                    {
+                        await liveDiscordMessage.ModifyAsync(props =>
+                        {
+                            props.Embed = embed;
+                            props.Components = components;
+                        });
+                        RecordMessagePatched(liveDiscordMessage.Id, renderFingerprint);
+                    }
+                    latestPostedEvent.MetadataJson = JsonUtil.Serialize(new
+                    {
+                        RequiredEventId = requiredEvent.Id,
+                        PreviousUsername = previousUsername,
+                        NewUsername = newUsername,
+                        Reminder = true,
+                        ReminderForConfirmedAt = confirmedAt.Value,
+                        ReminderPostedAt = DateTimeOffset.UtcNow,
+                        PreviousDiscordGuess = FormatDiscordGuessForFingerprint(previousDiscordGuess),
+                        NewDiscordGuess = FormatDiscordGuessForFingerprint(newDiscordGuess),
+                        ChannelId = liveDiscordMessage.Channel.Id,
+                        DiscordMessageId = liveDiscordMessage.Id,
+                        RenderFingerprint = renderFingerprint
+                    });
+                    continue;
+                }
+                if (lookupState == PostedMessageLookupState.Missing)
+                {
+                    await RecordMissingTrackedMessageEventAsync(
+                        db,
+                        requiredEvent.PlayerId,
+                        "temple-name-change-reminder",
+                        latestPostedEvent.Id,
+                        requiredEvent.Id,
+                        channelId,
+                        messageId,
+                        "post-temple-name-change-reminder",
+                        ct);
+                }
+            }
+
+            var lease = await TryAcquirePostLeaseAsync(db, requiredEvent.PlayerId, $"temple-name-change-reminder:{requiredEvent.Id}", ct);
+            if (lease is null) continue;
+            try
+            {
+                await db.Entry(requiredEvent).ReloadAsync(ct);
+                if (requiredEvent.Status != "OPEN") continue;
+                var latestMetadata = ReadLifecycleMetadata(requiredEvent.MetadataJson);
+                if (!IsTempleNameChangeConfirmed(latestMetadata)) continue;
+                var latestConfirmedAt = PickLifecycleDateTimeOffset(latestMetadata, "ConfirmedAt");
+                if (!latestConfirmedAt.HasValue || DateTimeOffset.UtcNow - latestConfirmedAt.Value < TempleNameChangeReminderInterval)
+                {
+                    continue;
+                }
+
+                var msg = await channel.SendMessageAsync(embed: embed, components: components);
+                db.LifecycleEvents.Add(new LifecycleEvent
+                {
+                    PlayerId = requiredEvent.PlayerId,
+                    EventType = TempleNameChangeReviewEventTypes.DiscordPosted,
+                    MetadataJson = JsonUtil.Serialize(new
+                    {
+                        RequiredEventId = requiredEvent.Id,
+                        PreviousUsername = previousUsername,
+                        NewUsername = newUsername,
+                        Reminder = true,
+                        ReminderForConfirmedAt = latestConfirmedAt.Value,
+                        ReminderPostedAt = DateTimeOffset.UtcNow,
+                        PreviousDiscordGuess = FormatDiscordGuessForFingerprint(previousDiscordGuess),
+                        NewDiscordGuess = FormatDiscordGuessForFingerprint(newDiscordGuess),
+                        ChannelId = _options.ChannelId,
+                        DiscordMessageId = msg.Id,
+                        RenderFingerprint = renderFingerprint
+                    }),
+                    Status = "DONE",
+                    CreatedAt = DateTimeOffset.UtcNow
+                });
+                RecordMessagePatched(msg.Id, renderFingerprint);
+            }
+            finally
+            {
+                lease.Status = "DONE";
+                await db.SaveChangesAsync(ct);
+            }
+        }
+    }
+
+    private async Task<TempleNameChangeDetectionInput> BuildTempleNameChangeDetectionInputAsync(TrackerDbContext db, CancellationToken ct)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var recentCutoff = now - TempleNameChangeDetectionWindow;
+        var openEvents = await db.LifecycleEvents
+            .Where(x =>
+                x.Status == "OPEN" &&
+                (x.EventType == "WOM_MISSING_ACTION_REQUIRED" ||
+                 x.EventType == "TEMPLE_MISSING_ACTION_REQUIRED" ||
+                 x.EventType == "WOM_ONLY_ACTION_REQUIRED" ||
+                 x.EventType == "MERGE_ACTION_REQUIRED"))
+            .ToListAsync(ct);
+
+        var playerIds = openEvents
+            .Where(x => x.EventType is "WOM_MISSING_ACTION_REQUIRED" or "TEMPLE_MISSING_ACTION_REQUIRED")
+            .Select(x => x.PlayerId)
+            .Distinct()
+            .ToList();
+        var players = await db.Players
+            .Where(x => playerIds.Contains(x.Id))
+            .Select(x => new { x.Id, x.Username, x.CurrentRank, x.Status })
+            .ToListAsync(ct);
+
+        var oldCandidates = players
+            .Where(x => x.Status == PlayerStatus.MISSING_PENDING_REVIEW)
+            .Select(x =>
+            {
+                var womMissing = openEvents
+                    .Where(ev => ev.PlayerId == x.Id && ev.EventType == "WOM_MISSING_ACTION_REQUIRED")
+                    .OrderByDescending(ev => ev.CreatedAt)
+                    .FirstOrDefault();
+                var templeMissing = openEvents
+                    .Where(ev => ev.PlayerId == x.Id && ev.EventType == "TEMPLE_MISSING_ACTION_REQUIRED")
+                    .OrderByDescending(ev => ev.CreatedAt)
+                    .FirstOrDefault();
+                return new TempleNameChangeOldCandidate(
+                    x.Id,
+                    x.Username,
+                    x.CurrentRank,
+                    womMissing?.Id,
+                    womMissing?.CreatedAt,
+                    templeMissing?.Id,
+                    templeMissing?.CreatedAt);
+            })
+            .Where(x =>
+                (x.WomMissingCreatedAt.HasValue && x.WomMissingCreatedAt >= recentCutoff) ||
+                (x.TempleMissingCreatedAt.HasValue && x.TempleMissingCreatedAt >= recentCutoff))
+            .ToList();
+
+        var womOnlyCandidates = openEvents
+            .Where(x => x.EventType == "WOM_ONLY_ACTION_REQUIRED")
+            .Select(x =>
+            {
+                var metadata = ReadLifecycleMetadata(x.MetadataJson);
+                var username = PickLifecycleValue(metadata, "Username", "Player") ?? "";
+                var role = PickLifecycleValue(metadata, "ActualWomRole") ?? "";
+                return new TempleNameChangeWomOnlyCandidate(x.Id, username, role, x.CreatedAt);
+            })
+            .Where(x => !string.IsNullOrWhiteSpace(x.Username))
+            .ToList();
+
+        var openMerges = openEvents
+            .Where(x => x.EventType == "MERGE_ACTION_REQUIRED")
+            .Select(x =>
+            {
+                var metadata = ReadLifecycleMetadata(x.MetadataJson);
+                return new TempleNameChangeOpenMerge(
+                    PickLifecycleValue(metadata, "SuggestedPrevious", "PreviousPlayer"),
+                    PickLifecycleValue(metadata, "NewPlayer", "Username", "Player"));
+            })
+            .ToList();
+
+        var handledEvents = await db.LifecycleEvents
+            .Where(x => x.EventType == TempleNameChangeReviewEventTypes.ActionApplied && x.CreatedAt >= recentCutoff)
+            .OrderByDescending(x => x.CreatedAt)
+            .ToListAsync(ct);
+        var handledPairs = handledEvents
+            .Select(x =>
+            {
+                var metadata = ReadLifecycleMetadata(x.MetadataJson);
+                return new TempleNameChangeHandledPair(
+                    PickLifecycleValue(metadata, "PreviousUsername") ?? "",
+                    PickLifecycleValue(metadata, "NewUsername") ?? "",
+                    PickLifecycleValue(metadata, "Action") ?? "",
+                    x.CreatedAt);
+            })
+            .Where(x => !string.IsNullOrWhiteSpace(x.PreviousUsername) && !string.IsNullOrWhiteSpace(x.NewUsername))
+            .ToList();
+
+        return new TempleNameChangeDetectionInput(
+            now,
+            TempleNameChangeDetectionWindow,
+            oldCandidates,
+            womOnlyCandidates,
+            openMerges,
+            handledPairs);
+    }
+
+    private async Task<LifecycleEvent?> UpsertTempleNameChangeRequiredEventAsync(
+        TrackerDbContext db,
+        TempleNameChangeDetection detection,
+        CancellationToken ct)
+    {
+        var openRequirements = await db.LifecycleEvents
+            .Where(x => x.EventType == TempleNameChangeReviewEventTypes.Required && x.Status == "OPEN")
+            .OrderBy(x => x.CreatedAt)
+            .ThenBy(x => x.Id)
+            .ToListAsync(ct);
+        var matching = openRequirements.FirstOrDefault(x =>
+        {
+            var metadata = ReadLifecycleMetadata(x.MetadataJson);
+            return string.Equals(NormalizeUsername(PickLifecycleValue(metadata, "PreviousUsername") ?? ""), NormalizeUsername(detection.PreviousUsername), StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(NormalizeUsername(PickLifecycleValue(metadata, "NewUsername") ?? ""), NormalizeUsername(detection.NewUsername), StringComparison.OrdinalIgnoreCase);
+        });
+
+        if (matching is null && openRequirements.Count > 0) return null;
+
+        var metadataJson = JsonUtil.Serialize(new
+        {
+            detection.PreviousUsername,
+            detection.NewUsername,
+            detection.PreviousPlayerId,
+            detection.Rank,
+            detection.WomRole,
+            detection.WomMissingEventId,
+            detection.TempleMissingEventId,
+            WomOnlyEventId = detection.WomOnlyEventId,
+            RelatedRequirementEventIds = new[] { detection.WomMissingEventId, detection.TempleMissingEventId, detection.WomOnlyEventId }
+                .Where(x => x.HasValue)
+                .Select(x => x!.Value)
+                .Distinct()
+                .OrderBy(x => x)
+                .ToArray(),
+            Source = "discord-worker-conservative-detection",
+            DetectedAt = DateTimeOffset.UtcNow
+        });
+
+        if (matching is not null)
+        {
+            var existingMetadata = ReadLifecycleMetadata(matching.MetadataJson);
+            if (!IsTempleNameChangeConfirmed(existingMetadata))
+            {
+                matching.MetadataJson = metadataJson;
+            }
+            return matching;
+        }
+
+        var required = new LifecycleEvent
+        {
+            PlayerId = detection.PreviousPlayerId,
+            EventType = TempleNameChangeReviewEventTypes.Required,
+            MetadataJson = metadataJson,
+            Status = "OPEN",
+            CreatedAt = DateTimeOffset.UtcNow
+        };
+        db.LifecycleEvents.Add(required);
+        return required;
+    }
+
+    private async Task SuppressTempleNameChangeNoisyCardsAsync(TrackerDbContext db, LifecycleEvent requiredEvent, CancellationToken ct)
+    {
+        var metadata = ReadLifecycleMetadata(requiredEvent.MetadataJson);
+        var previousUsername = NormalizeUsername(PickLifecycleValue(metadata, "PreviousUsername") ?? "");
+        var newUsername = NormalizeUsername(PickLifecycleValue(metadata, "NewUsername") ?? "");
+        var previousPlayerId = ExtractInt(requiredEvent.MetadataJson, "PreviousPlayerId") ?? requiredEvent.PlayerId;
+        var womOnlyEventId = ExtractInt(requiredEvent.MetadataJson, "WomOnlyEventId");
+        if (string.IsNullOrWhiteSpace(previousUsername) || string.IsNullOrWhiteSpace(newUsername)) return;
+
+        var postedEvents = await db.LifecycleEvents
+            .Where(x =>
+                (x.PlayerId == previousPlayerId &&
+                    (x.EventType == "WOM_MISSING_DISCORD_POSTED" ||
+                     x.EventType == "TEMPLE_MISSING_DISCORD_POSTED")) ||
+                x.EventType == "WOM_ONLY_DISCORD_POSTED")
+            .OrderByDescending(x => x.CreatedAt)
+            .Take(100)
+            .ToListAsync(ct);
+
+        foreach (var posted in postedEvents)
+        {
+            if (posted.EventType == "WOM_ONLY_DISCORD_POSTED")
+            {
+                var postedMetadata = ReadLifecycleMetadata(posted.MetadataJson);
+                var postedUsername = NormalizeUsername(PickLifecycleValue(postedMetadata, "Username", "Player") ?? "");
+                var postedRequiredId = ExtractInt(posted.MetadataJson, "RequiredEventId");
+                if (!string.Equals(postedUsername, newUsername, StringComparison.OrdinalIgnoreCase) &&
+                    (!womOnlyEventId.HasValue || postedRequiredId != womOnlyEventId.Value))
+                {
+                    continue;
+                }
+            }
+
+            await SuppressTempleNameChangeNoisyCardAsync(db, requiredEvent, posted, previousUsername, newUsername, ct);
+        }
+    }
+
+    private async Task SuppressTempleNameChangeNoisyCardAsync(
+        TrackerDbContext db,
+        LifecycleEvent requiredEvent,
+        LifecycleEvent postedEvent,
+        string previousUsername,
+        string newUsername,
+        CancellationToken ct)
+    {
+        var alreadySuppressed = await db.LifecycleEvents
+            .Where(x => x.EventType == TempleNameChangeReviewEventTypes.SuppressedCard)
+            .ToListAsync(ct);
+        if (alreadySuppressed.Any(x => ExtractInt(x.MetadataJson, "PostedEventId") == postedEvent.Id)) return;
+
+        var channelId = ExtractUlong(postedEvent.MetadataJson, "ChannelId");
+        var messageId = ExtractUlong(postedEvent.MetadataJson, "DiscordMessageId");
+        var lookupKey = $"temple-name-change-suppress:{postedEvent.Id}";
+        var (lookupState, liveDiscordMessage, resolvedChannelId, resolvedMessageId) = await TryGetPostedUserMessageAsync(postedEvent, lookupKey);
+        if (lookupState == PostedMessageLookupState.Unknown)
+        {
+            SetLookupBackoff(lookupKey);
+            return;
+        }
+        if (lookupState == PostedMessageLookupState.Malformed)
+        {
+            postedEvent.Status = "DONE";
+            return;
+        }
+
+        if (lookupState == PostedMessageLookupState.Found && liveDiscordMessage is not null)
+        {
+            await liveDiscordMessage.ModifyAsync(props =>
+            {
+                props.Components = new ComponentBuilder().Build();
+                props.Embed = BuildHandledEmbed(
+                    liveDiscordMessage.Embeds.FirstOrDefault(),
+                    $"Suppressed by Temple name change review: {previousUsername} -> {newUsername}",
+                    "rename");
+            });
+            resolvedChannelId = liveDiscordMessage.Channel.Id;
+            resolvedMessageId = liveDiscordMessage.Id;
+        }
+
+        var finalChannelId = resolvedChannelId ?? channelId;
+        var finalMessageId = resolvedMessageId ?? messageId;
+        if (finalChannelId.HasValue && finalMessageId.HasValue)
+        {
+            var now = DateTimeOffset.UtcNow;
+            ScheduleChannelMessageDelete(
+                db,
+                requiredEvent.PlayerId,
+                finalChannelId.Value,
+                finalMessageId.Value,
+                "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED",
+                new
+                {
+                    Reason = "temple-name-change-suppressed-card",
+                    PostedEventId = postedEvent.Id,
+                    postedEvent.EventType,
+                    PreviousUsername = previousUsername,
+                    NewUsername = newUsername
+                },
+                now.AddSeconds(10),
+                now.AddMinutes(1),
+                dedupeCompletedSchedules: false);
+        }
+
+        db.LifecycleEvents.Add(new LifecycleEvent
+        {
+            PlayerId = requiredEvent.PlayerId,
+            EventType = TempleNameChangeReviewEventTypes.SuppressedCard,
+            MetadataJson = JsonUtil.Serialize(new
+            {
+                RequiredEventId = requiredEvent.Id,
+                PostedEventId = postedEvent.Id,
+                postedEvent.EventType,
+                PreviousUsername = previousUsername,
+                NewUsername = newUsername,
+                ChannelId = finalChannelId,
+                DiscordMessageId = finalMessageId
+            }),
+            Status = "DONE",
+            CreatedAt = DateTimeOffset.UtcNow
+        });
+    }
+
     private async Task PostMergeActionMessages(CancellationToken ct)
     {
         if (_client is null) return;
@@ -4537,6 +5353,7 @@ public class DiscordPromotionBotWorker(
             var suggested = PickLifecycleValue(metadata, "SuggestedPrevious") ?? "Unknown";
             if (!string.IsNullOrWhiteSpace(suggested))
             {
+                await CloseOpenTempleNameChangeForMergeAsync(db, suggested, newPlayer, ev.PlayerId, ct);
                 await SuppressTempleMissingForMergeAsync(db, suggested, ev.PlayerId, ct);
             }
             var newPlayerDiscordGuess = await GuessDiscordMemberForNamesAsync([newPlayer], ct);
@@ -4608,6 +5425,48 @@ public class DiscordPromotionBotWorker(
         }
 
         return false;
+    }
+
+    private static async Task CloseOpenTempleNameChangeForMergeAsync(
+        TrackerDbContext db,
+        string previousUsername,
+        string newUsername,
+        int mergePlayerId,
+        CancellationToken ct)
+    {
+        var normalizedPrevious = NormalizeUsername(previousUsername);
+        var normalizedNew = NormalizeUsername(newUsername);
+        var openRequirements = await db.LifecycleEvents
+            .Where(x => x.EventType == TempleNameChangeReviewEventTypes.Required && x.Status == "OPEN")
+            .ToListAsync(ct);
+        foreach (var requirement in openRequirements)
+        {
+            var metadata = ReadLifecycleMetadata(requirement.MetadataJson);
+            var previous = NormalizeUsername(PickLifecycleValue(metadata, "PreviousUsername") ?? "");
+            var current = NormalizeUsername(PickLifecycleValue(metadata, "NewUsername") ?? "");
+            if (!string.Equals(previous, normalizedPrevious, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(current, normalizedNew, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            requirement.Status = "DONE";
+            db.LifecycleEvents.Add(new LifecycleEvent
+            {
+                PlayerId = mergePlayerId,
+                EventType = "TEMPLE_NAME_CHANGE_RESOLVED_BY_MERGE",
+                MetadataJson = JsonUtil.Serialize(new
+                {
+                    PreviousUsername = previousUsername,
+                    NewUsername = newUsername,
+                    RequiredEventId = requirement.Id,
+                    MergePlayerId = mergePlayerId,
+                    Source = "merge-review-created"
+                }),
+                Status = "DONE",
+                CreatedAt = DateTimeOffset.UtcNow
+            });
+        }
     }
 
     private async Task SuppressTempleMissingForMergeAsync(TrackerDbContext db, string previousUsername, int mergePlayerId, CancellationToken ct)
@@ -5858,6 +6717,7 @@ Visar alla spelare som just nu är ignorerade i:
              string.Equals(prefix, "wommissing", StringComparison.OrdinalIgnoreCase) ||
              string.Equals(prefix, "womonly", StringComparison.OrdinalIgnoreCase) ||
              string.Equals(prefix, "womrank", StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(prefix, "templename", StringComparison.OrdinalIgnoreCase) ||
              string.Equals(prefix, "merge", StringComparison.OrdinalIgnoreCase));
     }
 
@@ -6363,6 +7223,42 @@ Visar alla spelare som just nu är ignorerade i:
             .AddField("Player", username, true)
             .AddField("WiseOldMan Rank", role, true)
             .WithTimestamp(DateTimeOffset.Now)
+            .Build();
+    }
+
+    private static Embed BuildTempleNameChangeNeededEmbed(
+        string previousUsername,
+        string newUsername,
+        string rank,
+        string womRole,
+        DiscordMemberGuessResult previousDiscordGuess,
+        DiscordMemberGuessResult newDiscordGuess)
+    {
+        var description =
+            $"Previous name: `{previousUsername}`\n" +
+            $"New name: `{newUsername}`\n\n" +
+            "Next step: manually confirm/update the name change on TempleOSRS so the new profile receives the old Temple history.\n\n" +
+            "Do not remove the player from DB or add/remove plain group membership as the primary fix.";
+
+        var builder = new EmbedBuilder()
+            .WithTitle("Temple Name Change Needed")
+            .WithColor(new Color(234, 179, 8))
+            .WithDescription(description)
+            .AddField("Previous name", previousUsername, true)
+            .AddField("New name", newUsername, true)
+            .AddField("Rank signal", $"{rank} / WOM {womRole}", true);
+        AddDiscordGuessField(builder, "Previous name", previousDiscordGuess);
+        AddDiscordGuessField(builder, "New name", newDiscordGuess);
+        return builder
+            .WithTimestamp(DateTimeOffset.Now)
+            .Build();
+    }
+
+    private static MessageComponent BuildTempleNameChangeNeededComponents(int requiredEventId)
+    {
+        return new ComponentBuilder()
+            .WithButton("Confirm", $"templename:confirm:{requiredEventId}", ButtonStyle.Success)
+            .WithButton("Decline", $"templename:decline:{requiredEventId}", ButtonStyle.Danger)
             .Build();
     }
 

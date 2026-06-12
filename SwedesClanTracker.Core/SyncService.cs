@@ -432,17 +432,19 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
         if (stats is null) return;
         var apiPets = await templeClient.GetPetsAsync(player.Username, ct);
 
-        if (apiPets.HasValue && apiPets.Value > player.StoredPetCount)
+        var candidateStoredPetCount = player.StoredPetCount;
+        if (apiPets.HasValue && apiPets.Value > candidateStoredPetCount)
         {
-            player.StoredPetCount = apiPets.Value;
+            candidateStoredPetCount = apiPets.Value;
         }
 
-        var updatedPets = player.StoredPetCount;
+        var updatedPets = candidateStoredPetCount;
+        int? updatedManualPetOverride = player.ManualPetOverride;
         if (player.ManualPetOverride.HasValue)
         {
-            if (player.StoredPetCount >= player.ManualPetOverride.Value)
+            if (candidateStoredPetCount >= player.ManualPetOverride.Value)
             {
-                player.ManualPetOverride = null;
+                updatedManualPetOverride = null;
             }
             else
             {
@@ -465,6 +467,33 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
             .Where(x => x.PlayerId == player.Id)
             .OrderByDescending(x => x.Timestamp)
             .FirstOrDefaultAsync(ct);
+        var contamination = PlayerSnapshotContaminationGuard.Evaluate(latestSnapshot, snapshot);
+        if (contamination.IsContaminated)
+        {
+            await UpsertOpenLifecycleEventAsync(player.Id, PlayerSnapshotContaminationGuard.EventType, new
+            {
+                player.Username,
+                LatestSnapshotId = latestSnapshot!.Id,
+                LatestSnapshotAt = latestSnapshot.Timestamp,
+                PreviousTotalLevel = latestSnapshot.TotalLevel,
+                NewTotalLevel = snapshot.TotalLevel,
+                PreviousEhb = latestSnapshot.Ehb,
+                NewEhb = snapshot.Ehb,
+                PreviousEhp = latestSnapshot.Ehp,
+                NewEhp = snapshot.Ehp,
+                contamination.TotalLevelDrop,
+                contamination.EhbDrop,
+                contamination.EhpDrop,
+                contamination.Reasons,
+                Source = "sync-snapshot-guard",
+                DetectedAt = syncedAt
+            }, ct);
+            return;
+        }
+
+        player.StoredPetCount = candidateStoredPetCount;
+        player.ManualPetOverride = updatedManualPetOverride;
+        await CloseOpenLifecycleEventsAsync(player.Id, ct, PlayerSnapshotContaminationGuard.EventType);
         if (latestSnapshot is null || !snapshot.HasSameStats(latestSnapshot))
         {
             db.PlayerSnapshots.Add(snapshot);
