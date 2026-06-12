@@ -3621,8 +3621,9 @@ public class DiscordPromotionBotWorker(
 
             var womGroupId = configuration.GetValue<int?>("WiseOldMan:GroupId") ?? 7173;
             var womAdded = womGroupId > 0 && await IsPlayerInWiseOldManGroupAsync(player.Username, womGroupId);
+            var discordGuess = await GuessDiscordMemberForPlayerAsync(db, player.Id, player.Username, ct);
 
-            var embed = new EmbedBuilder()
+            var embedBuilder = new EmbedBuilder()
                 .WithTitle("Temple Membership Missing")
                 .WithColor(new Color(245, 158, 11))
                 .AddField("Player", player.Username, true)
@@ -3630,7 +3631,9 @@ public class DiscordPromotionBotWorker(
                 .AddField("Status", player.Status.ToString(), true)
                 .AddField("Temple", "Missing", true)
                 .AddField("WiseOldMan", womAdded ? "Added" : "Missing", true)
-                .AddField("Pets", (player.ManualPetOverride ?? player.StoredPetCount) > 0 ? (player.ManualPetOverride ?? player.StoredPetCount).ToString() : "N/A", true)
+                .AddField("Pets", (player.ManualPetOverride ?? player.StoredPetCount) > 0 ? (player.ManualPetOverride ?? player.StoredPetCount).ToString() : "N/A", true);
+            AddDiscordGuessField(embedBuilder, "Player", discordGuess);
+            var embed = embedBuilder
                 .AddField("Last Synced (Swedish Time)", FormatSwedishTime(player.LastSynced), false)
                 .Build();
             var renderFingerprint = ComputeRenderFingerprint(new
@@ -3643,6 +3646,7 @@ public class DiscordPromotionBotWorker(
                 PlayerStatus = player.Status.ToString(),
                 Temple = "Missing",
                 Wom = womAdded ? "Added" : "Missing",
+                DiscordGuess = FormatDiscordGuessForFingerprint(discordGuess),
                 Pets = player.ManualPetOverride ?? player.StoredPetCount,
                 LastSynced = FormatSwedishTime(player.LastSynced)
             });
@@ -3825,8 +3829,9 @@ public class DiscordPromotionBotWorker(
                 });
                 continue;
             }
+            var discordGuess = await GuessDiscordMemberForPlayerAsync(db, player.Id, player.Username, ct);
 
-            var embed = new EmbedBuilder()
+            var embedBuilder = new EmbedBuilder()
                 .WithTitle("WiseOldMan Membership Missing")
                 .WithColor(new Color(249, 115, 22))
                 .AddField("Player", player.Username, true)
@@ -3834,7 +3839,9 @@ public class DiscordPromotionBotWorker(
                 .AddField("Status", player.Status.ToString(), true)
                 .AddField("Temple", templeAdded ? "Added" : "Missing", true)
                 .AddField("WiseOldMan", "Missing", true)
-                .AddField("Pets", (player.ManualPetOverride ?? player.StoredPetCount) > 0 ? (player.ManualPetOverride ?? player.StoredPetCount).ToString() : "N/A", true)
+                .AddField("Pets", (player.ManualPetOverride ?? player.StoredPetCount) > 0 ? (player.ManualPetOverride ?? player.StoredPetCount).ToString() : "N/A", true);
+            AddDiscordGuessField(embedBuilder, "Player", discordGuess);
+            var embed = embedBuilder
                 .AddField("Last Synced (Swedish Time)", FormatSwedishTime(player.LastSynced), false)
                 .Build();
             var renderFingerprint = ComputeRenderFingerprint(new
@@ -3847,6 +3854,7 @@ public class DiscordPromotionBotWorker(
                 PlayerStatus = player.Status.ToString(),
                 Temple = templeAdded ? "Added" : "Missing",
                 Wom = "Missing",
+                DiscordGuess = FormatDiscordGuessForFingerprint(discordGuess),
                 Pets = player.ManualPetOverride ?? player.StoredPetCount,
                 LastSynced = FormatSwedishTime(player.LastSynced)
             });
@@ -4186,7 +4194,8 @@ public class DiscordPromotionBotWorker(
             var expectedRank = PickLifecycleValue(metadata, "ExpectedRank") ?? player.CurrentRank;
             var actualWomRole = PickLifecycleValue(metadata, "ActualWomRole") ?? "Unknown";
             var direction = GetWomRankMismatchDirection(expectedRank, actualWomRole);
-            var embed = BuildWomRankMismatchEmbed(player.Username, expectedRank, actualWomRole, direction);
+            var discordGuess = await GuessDiscordMemberForPlayerAsync(db, player.Id, player.Username, ct);
+            var embed = BuildWomRankMismatchEmbed(player.Username, expectedRank, actualWomRole, direction, discordGuess);
             var components = BuildWomRankMismatchComponents(player.Id, ev.Id, expectedRank, actualWomRole);
             var renderFingerprint = ComputeRenderFingerprint(new
             {
@@ -4196,7 +4205,8 @@ public class DiscordPromotionBotWorker(
                 player.Username,
                 ExpectedRank = expectedRank,
                 ActualWomRole = actualWomRole,
-                Direction = direction
+                Direction = direction,
+                DiscordGuess = FormatDiscordGuessForFingerprint(discordGuess)
             });
 
             var postedEvents = await db.LifecycleEvents
@@ -4515,11 +4525,15 @@ public class DiscordPromotionBotWorker(
             {
                 await SuppressTempleMissingForMergeAsync(db, suggested, ev.PlayerId, ct);
             }
-            var embed = new EmbedBuilder()
+            var newPlayerDiscordGuess = await GuessDiscordMemberForNamesAsync([newPlayer], ct);
+            var previousPlayerDiscordGuess = await GuessDiscordMemberForNamesAsync([suggested], ct);
+            var embedBuilder = new EmbedBuilder()
                 .WithTitle("Possible Rename Review")
                 .WithColor(new Color(234, 179, 8))
-                .WithDescription($"New: `{newPlayer}`\nSuggested previous: `{suggested}`\nChoose how to resolve this rename review.\nIf confirmed/reassigned and the old name has unknown WOM role, old-name WOM cleanup is attempted automatically.")
-                .Build();
+                .WithDescription($"New: `{newPlayer}`\nSuggested previous: `{suggested}`\nChoose how to resolve this rename review.\nIf confirmed/reassigned and the old name has unknown WOM role, old-name WOM cleanup is attempted automatically.");
+            AddDiscordGuessField(embedBuilder, "New Player", newPlayerDiscordGuess);
+            AddDiscordGuessField(embedBuilder, "Suggested Previous", previousPlayerDiscordGuess);
+            var embed = embedBuilder.Build();
             var components = new ComponentBuilder()
                 .WithButton("Confirm rename", $"merge:confirm:{ev.PlayerId}", ButtonStyle.Success)
                 .WithButton("Choose other candidate", $"merge:choose:{ev.PlayerId}", ButtonStyle.Primary)
@@ -4536,6 +4550,8 @@ public class DiscordPromotionBotWorker(
                     RequiredEventId = ev.Id,
                     NewPlayer = newPlayer,
                     SuggestedPrevious = suggested,
+                    NewPlayerDiscordGuess = FormatDiscordGuessForFingerprint(newPlayerDiscordGuess),
+                    SuggestedPreviousDiscordGuess = FormatDiscordGuessForFingerprint(previousPlayerDiscordGuess),
                     ChannelId = _options.ChannelId,
                     DiscordMessageId = msg.Id
                 }),
@@ -5825,6 +5841,18 @@ Visar alla spelare som just nu är ignorerade i:
         }
 
         var playerNames = await GetDiscordGuessPlayerNamesAsync(db, playerId, playerName, ct);
+        return await GuessDiscordMemberForNamesAsync(playerNames, ct);
+    }
+
+    private async Task<DiscordMemberGuessResult> GuessDiscordMemberForNamesAsync(
+        IReadOnlyList<string> playerNames,
+        CancellationToken ct)
+    {
+        if (_client is null || _options.GuildId == 0 || playerNames.Count == 0)
+        {
+            return new DiscordMemberGuessResult([]);
+        }
+
         var members = new List<DiscordMemberLookupCandidate>();
         members.AddRange(await GetCachedDiscordMembersAsync(ct));
         members.AddRange(await SearchDiscordMembersAsync(playerNames, ct));
@@ -6054,6 +6082,14 @@ Visar alla spelare som just nu är ignorerade i:
             $"{match.Mention} - {match.Score}% via {match.MatchedField} `{EscapeInlineCode(match.MatchedValue)}`"));
     }
 
+    private static void AddDiscordGuessField(EmbedBuilder builder, string subject, DiscordMemberGuessResult guess)
+    {
+        var value = FormatDiscordGuessForEmbed(guess, out var baseFieldName);
+        if (string.IsNullOrWhiteSpace(value)) return;
+
+        builder.AddField($"{baseFieldName}: {subject}", value, false);
+    }
+
     private static string FormatDiscordGuessForFingerprint(DiscordMemberGuessResult guess)
     {
         if (guess.Matches.Count == 0) return "none";
@@ -6127,7 +6163,12 @@ Visar alla spelare som just nu är ignorerade i:
             .Build();
     }
 
-    private static Embed BuildWomRankMismatchEmbed(string playerName, string expectedRank, string actualWomRole, string direction)
+    private static Embed BuildWomRankMismatchEmbed(
+        string playerName,
+        string expectedRank,
+        string actualWomRole,
+        string direction,
+        DiscordMemberGuessResult discordGuess)
     {
         var directionText = direction switch
         {
@@ -6146,14 +6187,16 @@ Visar alla spelare som just nu är ignorerade i:
             $"Select \"Sync to WOM ({actualWomRole})\" to set both to {actualWomRole}, or \"Sync to database ({expectedRank})\" to set both to {expectedRank}.\n\n" +
             "Use **Dismiss** to review later, or **Ignore** to permanently allow this mismatch for this player.";
 
-        return new EmbedBuilder()
+        var builder = new EmbedBuilder()
             .WithTitle("WiseOldMan Rank Mismatch")
             .WithColor(direction == "higher" ? new Color(239, 68, 68) : new Color(245, 158, 11))
             .WithDescription(description)
             .AddField("Player", playerName, true)
             .AddField("Database Rank", expectedRank, true)
             .AddField("WiseOldMan Rank", actualWomRole, true)
-            .AddField("Mismatch", directionText, false)
+            .AddField("Mismatch", directionText, false);
+        AddDiscordGuessField(builder, "Player", discordGuess);
+        return builder
             .WithTimestamp(DateTimeOffset.Now)
             .Build();
     }
