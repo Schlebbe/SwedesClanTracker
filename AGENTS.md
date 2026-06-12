@@ -4,6 +4,14 @@
 * Use `scripts/windows/pi/check-pi-db-readonly.ps1` as the default one-command Pi SSH + read-only DB connectivity check for new chats.
 * Never commit private keys, passwords, tokens, or real connection strings.
 
+## Encoding
+
+Preserve UTF-8 text, including Swedish characters such as å, ä, and ö.
+
+If terminal output shows mojibake such as Ã¥, Ã¤, or Ã¶, assume it may be a shell display encoding issue. Verify file bytes as UTF-8 before replacing non-ASCII text.
+
+Do not convert Swedish text to ASCII approximations.
+
 ## Required reading before frontend implementation
 
 For the OSRS redesign, do not treat the existing frontend as the visual baseline. The existing frontend is legacy structure. It may be substantially rewritten as long as current behavior and real API data usage are preserved.
