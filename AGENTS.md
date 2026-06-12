@@ -4,6 +4,19 @@
 * Use `scripts/windows/pi/check-pi-db-readonly.ps1` as the default one-command Pi SSH + read-only DB connectivity check for new chats.
 * Never commit private keys, passwords, tokens, or real connection strings.
 
+## Pi diagnostics guardrails
+
+* Prefer the repository Pi scripts and `scripts/windows/pi/pi-common.ps1` helpers over plain `ssh`.
+  Plain `ssh user@host` can hang or fail because it skips the configured Codex key, known_hosts file, `BatchMode=yes`, and timeout options.
+* For worker logs, prefer `scripts/windows/pi/get-pi-worker-journal.ps1`.
+  It avoids fragile remote shell quoting and filters noisy EF Core SQL command logs by default.
+* Avoid remote shell pipelines with complex `grep -E` patterns, especially patterns containing `|`.
+  If a remote command needs quotes, pipes, regexes, SQL, or multiline logic, send it as base64-encoded Python/SQL/script content and decode it on the Pi.
+* If SSH reports `kex_exchange_identification: read: Connection reset`, treat it as a transient transport failure first.
+  Retry once with the Pi helper scripts before drawing conclusions about the application.
+* For PostgreSQL diagnostics, prefer `codex_ro` plus base64-encoded SQL.
+  Remember that PostgreSQL identifiers such as `"Players"` and `"LifecycleEvents"` are case-sensitive and need double quotes.
+
 ## Encoding
 
 Preserve UTF-8 text, including Swedish characters such as å, ä, and ö.
