@@ -88,6 +88,14 @@ public static class DiscordMemberGuessing
             return BuildMatch(member, field, alias, 82, DiscordMemberMatchStrength.Possible);
         }
 
+        var boundaryOverlapScore = BoundaryOverlapScore(alias.Compact, field.Compact);
+        var leetBoundaryOverlapScore = BoundaryOverlapScore(alias.LeetFoldedCompact, field.LeetFoldedCompact);
+        var bestBoundaryOverlapScore = Math.Max(boundaryOverlapScore, leetBoundaryOverlapScore);
+        if (bestBoundaryOverlapScore >= MinimumPlausibleScore)
+        {
+            return BuildMatch(member, field, alias, bestBoundaryOverlapScore, DiscordMemberMatchStrength.Possible);
+        }
+
         var directSimilarity = Similarity(alias.Compact, field.Compact);
         var leetSimilarity = Similarity(alias.LeetFoldedCompact, field.LeetFoldedCompact);
         var similarity = Math.Max(directSimilarity, leetSimilarity);
@@ -213,6 +221,39 @@ public static class DiscordMemberGuessing
         var distance = LevenshteinDistance(left, right);
         var maxLength = Math.Max(left.Length, right.Length);
         return 1 - (double)distance / maxLength;
+    }
+
+    private static int BoundaryOverlapScore(string left, string right)
+    {
+        var overlap = Math.Max(
+            CommonBoundaryOverlapLength(left, right),
+            CommonBoundaryOverlapLength(right, left));
+
+        if (overlap < 5)
+        {
+            return 0;
+        }
+
+        var shorter = Math.Min(left.Length, right.Length);
+        var shorterCoverage = (double)overlap / shorter;
+
+        return shorterCoverage >= 0.85
+            ? 80
+            : 74;
+    }
+
+    private static int CommonBoundaryOverlapLength(string suffixSource, string prefixSource)
+    {
+        var max = Math.Min(suffixSource.Length, prefixSource.Length);
+        for (var length = max; length >= 1; length--)
+        {
+            if (suffixSource.EndsWith(prefixSource[..length], StringComparison.Ordinal))
+            {
+                return length;
+            }
+        }
+
+        return 0;
     }
 
     private static int LevenshteinDistance(string left, string right)

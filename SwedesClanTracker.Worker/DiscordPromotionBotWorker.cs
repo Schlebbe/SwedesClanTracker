@@ -61,7 +61,9 @@ public class DiscordPromotionBotWorker(
     private static readonly TimeSpan DiscordGuessCommandTimeout = TimeSpan.FromSeconds(12);
     private static readonly TimeSpan DiscordMemberCacheLockTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DiscordMemberDownloadTimeout = TimeSpan.FromSeconds(8);
+    private static readonly TimeSpan DiscordMemberWarmupDownloadTimeout = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan DiscordMemberSearchTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan DiscordMemberSearchTotalTimeout = TimeSpan.FromSeconds(8);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -84,7 +86,9 @@ public class DiscordPromotionBotWorker(
         await statusReporter.ReportAsync("Discord", "Starting", "Discord worker is logging in.", stoppingToken);
         _client = new DiscordSocketClient(new DiscordSocketConfig
         {
-            GatewayIntents = GatewayIntents.Guilds | GatewayIntents.GuildMessages | GatewayIntents.GuildMembers
+            GatewayIntents = GatewayIntents.Guilds | GatewayIntents.GuildMessages | GatewayIntents.GuildMembers,
+            AlwaysDownloadUsers = true,
+            LargeThreshold = 250
         });
 
         _client.Log += msg =>
@@ -592,6 +596,7 @@ public class DiscordPromotionBotWorker(
             await socketGuild.CreateApplicationCommandAsync(setPets.Build());
 
             logger.LogInformation("Registered Discord slash commands in guild {GuildId}.", _options.GuildId);
+            _ = Task.Run(() => WarmDiscordMemberCacheAsync(CancellationToken.None));
         }
         catch (Exception ex)
         {
@@ -5994,9 +5999,22 @@ Visar alla spelare som just nu är ignorerade i:
         return names.ToList();
     }
 
-    private async Task<IReadOnlyList<DiscordMemberLookupCandidate>> GetCachedDiscordMembersAsync(CancellationToken ct)
+    private Task<IReadOnlyList<DiscordMemberLookupCandidate>> GetCachedDiscordMembersAsync(CancellationToken ct)
     {
-        if (_discordMemberCache is not null && DateTimeOffset.UtcNow < _discordMemberCacheValidUntil)
+        return RefreshDiscordMemberCacheAsync(forceRefresh: false, DiscordMemberDownloadTimeout, ct);
+    }
+
+    private Task<IReadOnlyList<DiscordMemberLookupCandidate>> ForceRefreshDiscordMemberCacheAsync(CancellationToken ct)
+    {
+        return RefreshDiscordMemberCacheAsync(forceRefresh: true, DiscordMemberWarmupDownloadTimeout, ct);
+    }
+
+    private async Task<IReadOnlyList<DiscordMemberLookupCandidate>> RefreshDiscordMemberCacheAsync(
+        bool forceRefresh,
+        TimeSpan downloadTimeout,
+        CancellationToken ct)
+    {
+        if (!forceRefresh && _discordMemberCache is not null && DateTimeOffset.UtcNow < _discordMemberCacheValidUntil)
         {
             return _discordMemberCache;
         }
@@ -6009,7 +6027,7 @@ Visar alla spelare som just nu är ignorerade i:
 
         try
         {
-            if (_discordMemberCache is not null && DateTimeOffset.UtcNow < _discordMemberCacheValidUntil)
+            if (!forceRefresh && _discordMemberCache is not null && DateTimeOffset.UtcNow < _discordMemberCacheValidUntil)
             {
                 return _discordMemberCache;
             }
@@ -6023,10 +6041,10 @@ Visar alla spelare som just nu är ignorerade i:
             var downloadedMembers = true;
             try
             {
-                downloadedMembers = await WaitForDiscordTaskAsync(guild.DownloadUsersAsync(), DiscordMemberDownloadTimeout, ct);
+                downloadedMembers = await WaitForDiscordTaskAsync(guild.DownloadUsersAsync(), downloadTimeout, ct);
                 if (!downloadedMembers)
                 {
-                    logger.LogWarning("Timed out downloading Discord guild members after {TimeoutSeconds}s; using currently cached guild users.", DiscordMemberDownloadTimeout.TotalSeconds);
+                    logger.LogWarning("Timed out downloading Discord guild members after {TimeoutSeconds}s; using currently cached guild users.", downloadTimeout.TotalSeconds);
                 }
             }
             catch (Exception ex)
@@ -6040,11 +6058,40 @@ Visar alla spelare som just nu är ignorerade i:
                 .Select(x => ToLookupCandidate(x, fromDiscordSearch: false))
                 .ToList();
             _discordMemberCacheValidUntil = DateTimeOffset.UtcNow.Add(downloadedMembers ? TimeSpan.FromMinutes(10) : TimeSpan.FromMinutes(1));
+            if (_discordMemberCache.Count == 0)
+            {
+                logger.LogWarning(
+                    "Discord member cache refresh produced no non-bot users. DownloadedMembers={DownloadedMembers}; valid for {ValidSeconds}s.",
+                    downloadedMembers,
+                    (_discordMemberCacheValidUntil - DateTimeOffset.UtcNow).TotalSeconds);
+            }
+            else
+            {
+                logger.LogInformation(
+                    "Discord member cache refreshed with {MemberCount} non-bot users. DownloadedMembers={DownloadedMembers}; valid until {ValidUntil:u}.",
+                    _discordMemberCache.Count,
+                    downloadedMembers,
+                    _discordMemberCacheValidUntil);
+            }
+
             return _discordMemberCache;
         }
         finally
         {
             _discordMemberCacheLock.Release();
+        }
+    }
+
+    private async Task WarmDiscordMemberCacheAsync(CancellationToken ct)
+    {
+        try
+        {
+            var members = await ForceRefreshDiscordMemberCacheAsync(ct);
+            logger.LogInformation("Discord member cache warmup completed with {MemberCount} non-bot users.", members.Count);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Discord member cache warmup failed.");
         }
     }
 
@@ -6056,15 +6103,27 @@ Visar alla spelare som just nu är ignorerade i:
         if (guild is null) return [];
 
         var members = new List<DiscordMemberLookupCandidate>();
+        var searchTimer = Stopwatch.StartNew();
         foreach (var query in BuildDiscordMemberSearchQueries(playerNames))
         {
             ct.ThrowIfCancellationRequested();
+            var remaining = DiscordMemberSearchTotalTimeout - searchTimer.Elapsed;
+            if (remaining <= TimeSpan.Zero)
+            {
+                logger.LogWarning(
+                    "Stopped Discord member search after {TimeoutSeconds}s total timeout; collected {MemberCount} search candidates.",
+                    DiscordMemberSearchTotalTimeout.TotalSeconds,
+                    members.Count);
+                break;
+            }
+
+            var queryTimeout = remaining < DiscordMemberSearchTimeout ? remaining : DiscordMemberSearchTimeout;
             try
             {
-                var results = await WaitForDiscordTaskAsync(guild.SearchUsersAsync(query, 10), DiscordMemberSearchTimeout, ct);
+                var results = await WaitForDiscordTaskAsync(guild.SearchUsersAsync(query, 10), queryTimeout, ct);
                 if (results is null)
                 {
-                    logger.LogWarning("Timed out searching Discord members for query {Query} after {TimeoutSeconds}s.", query, DiscordMemberSearchTimeout.TotalSeconds);
+                    logger.LogWarning("Timed out searching Discord members for query {Query} after {TimeoutSeconds}s.", query, queryTimeout.TotalSeconds);
                     continue;
                 }
 
