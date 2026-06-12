@@ -5555,7 +5555,7 @@ public class DiscordPromotionBotWorker(
             .WithTimestamp(DateTimeOffset.Now)
             .Build();
 
-        await RespondAndAutoDeleteAsync(command, embed, ephemeral: false);
+        await RespondAndAutoDeleteAsync(command, embed, ephemeral: true);
     }
 
     private async Task HandleHelpSlashCommandAsync(SocketSlashCommand command)
@@ -5612,7 +5612,7 @@ Visar alla spelare som just nu är ignorerade i:
 - WOM rank mismatch
 """;
 
-        await RespondAndAutoDeleteAsync(command, helpText, ephemeral: false);
+        await RespondAndAutoDeleteAsync(command, helpText, ephemeral: true);
     }
 
     private async Task LogSlashCommandAsync(SocketSlashCommand command, bool adminLocked, bool allowed)
@@ -5827,7 +5827,9 @@ Visar alla spelare som just nu är ignorerade i:
     private bool IsEphemeralSlashCommand(string commandName)
     {
         return string.Equals(commandName, "lookup", StringComparison.OrdinalIgnoreCase) ||
-               string.Equals(commandName, "update", StringComparison.OrdinalIgnoreCase);
+               string.Equals(commandName, "update", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(commandName, "help", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(commandName, "show-ignored", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsAdminLockedButton(string? prefix)
