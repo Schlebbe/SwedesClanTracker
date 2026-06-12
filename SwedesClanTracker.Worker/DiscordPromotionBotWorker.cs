@@ -55,6 +55,9 @@ public class DiscordPromotionBotWorker(
     private readonly ConcurrentDictionary<string, DateTimeOffset> _lookupBackoffUntilByKey = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<ulong, MessagePatchState> _messagePatchStateByMessageId = new();
     private static readonly TimeSpan MessagePatchMinInterval = TimeSpan.FromSeconds(5);
+    private readonly SemaphoreSlim _discordMemberCacheLock = new(1, 1);
+    private IReadOnlyList<DiscordMemberLookupCandidate>? _discordMemberCache;
+    private DateTimeOffset _discordMemberCacheValidUntil = DateTimeOffset.MinValue;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -77,7 +80,7 @@ public class DiscordPromotionBotWorker(
         await statusReporter.ReportAsync("Discord", "Starting", "Discord worker is logging in.", stoppingToken);
         _client = new DiscordSocketClient(new DiscordSocketConfig
         {
-            GatewayIntents = GatewayIntents.Guilds | GatewayIntents.GuildMessages
+            GatewayIntents = GatewayIntents.Guilds | GatewayIntents.GuildMessages | GatewayIntents.GuildMembers
         });
 
         _client.Log += msg =>
@@ -342,6 +345,7 @@ public class DiscordPromotionBotWorker(
 
             var womRole = await wiseOldManClient.GetMemberRoleAsync(c.PlayerName, ct);
             var candidateType = RankRules.ClassifyPromotionCandidate(c.NewRank, womRole);
+            var discordGuess = await GuessDiscordMemberForPlayerAsync(db, c.PlayerId, c.PlayerName, ct);
 
             var embed = BuildPromotionEmbed(
                 c.PlayerName,
@@ -349,6 +353,7 @@ public class DiscordPromotionBotWorker(
                 c.NewRank,
                 string.IsNullOrWhiteSpace(womRole) ? "Unknown" : RankRules.NormalizeRankName(womRole),
                 ToPromotionUpdateTargetLabel(candidateType),
+                discordGuess,
                 BuildStatsSummary(c.Latest?.Ehb, c.Latest?.Ehp, c.Latest?.Collections, c.ManualPetOverride ?? c.StoredPetCount),
                 c.Reason,
                 FormatSwedishTime(c.LastSynced));
@@ -362,6 +367,7 @@ public class DiscordPromotionBotWorker(
                 c.NewRank,
                 WomRole = string.IsNullOrWhiteSpace(womRole) ? "Unknown" : RankRules.NormalizeRankName(womRole),
                 CandidateType = candidateType.ToString(),
+                DiscordGuess = FormatDiscordGuessForFingerprint(discordGuess),
                 Stats = BuildStatsSummary(c.Latest?.Ehb, c.Latest?.Ehp, c.Latest?.Collections, c.ManualPetOverride ?? c.StoredPetCount),
                 c.Reason,
                 LastSynced = FormatSwedishTime(c.LastSynced)
@@ -5807,12 +5813,200 @@ Visar alla spelare som just nu är ignorerade i:
         return $"{local:yyyy-MM-dd HH:mm}";
     }
 
+    private async Task<DiscordMemberGuessResult> GuessDiscordMemberForPlayerAsync(
+        TrackerDbContext db,
+        int playerId,
+        string playerName,
+        CancellationToken ct)
+    {
+        if (_client is null || _options.GuildId == 0)
+        {
+            return new DiscordMemberGuessResult([]);
+        }
+
+        var playerNames = await GetDiscordGuessPlayerNamesAsync(db, playerId, playerName, ct);
+        var members = new List<DiscordMemberLookupCandidate>();
+        members.AddRange(await GetCachedDiscordMembersAsync(ct));
+        members.AddRange(await SearchDiscordMembersAsync(playerNames, ct));
+        return DiscordMemberGuessing.Guess(playerNames, members);
+    }
+
+    private async Task<List<string>> GetDiscordGuessPlayerNamesAsync(
+        TrackerDbContext db,
+        int playerId,
+        string playerName,
+        CancellationToken ct)
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        AddDiscordGuessPlayerName(names, playerName);
+
+        var metadataRows = await db.LifecycleEvents
+            .Where(x => x.PlayerId == playerId &&
+                (x.EventType.Contains("MERGE") || x.EventType.Contains("RENAME")))
+            .OrderByDescending(x => x.CreatedAt)
+            .Take(25)
+            .Select(x => x.MetadataJson)
+            .ToListAsync(ct);
+
+        foreach (var metadata in metadataRows)
+        {
+            AddDiscordGuessPlayerNamesFromMetadata(names, metadata);
+        }
+
+        return names.ToList();
+    }
+
+    private async Task<IReadOnlyList<DiscordMemberLookupCandidate>> GetCachedDiscordMembersAsync(CancellationToken ct)
+    {
+        if (_discordMemberCache is not null && DateTimeOffset.UtcNow < _discordMemberCacheValidUntil)
+        {
+            return _discordMemberCache;
+        }
+
+        await _discordMemberCacheLock.WaitAsync(ct);
+        try
+        {
+            if (_discordMemberCache is not null && DateTimeOffset.UtcNow < _discordMemberCacheValidUntil)
+            {
+                return _discordMemberCache;
+            }
+
+            var guild = _client?.GetGuild(_options.GuildId);
+            if (guild is null)
+            {
+                return [];
+            }
+
+            var downloadedMembers = true;
+            try
+            {
+                await guild.DownloadUsersAsync();
+            }
+            catch (Exception ex)
+            {
+                downloadedMembers = false;
+                logger.LogWarning(ex, "Failed to download Discord guild members for guessing.");
+            }
+
+            _discordMemberCache = guild.Users
+                .Where(x => !x.IsBot)
+                .Select(x => ToLookupCandidate(x, fromDiscordSearch: false))
+                .ToList();
+            _discordMemberCacheValidUntil = DateTimeOffset.UtcNow.Add(downloadedMembers ? TimeSpan.FromMinutes(10) : TimeSpan.FromMinutes(1));
+            return _discordMemberCache;
+        }
+        finally
+        {
+            _discordMemberCacheLock.Release();
+        }
+    }
+
+    private async Task<IReadOnlyList<DiscordMemberLookupCandidate>> SearchDiscordMembersAsync(
+        IReadOnlyList<string> playerNames,
+        CancellationToken ct)
+    {
+        var guild = _client?.GetGuild(_options.GuildId);
+        if (guild is null) return [];
+
+        var members = new List<DiscordMemberLookupCandidate>();
+        foreach (var query in BuildDiscordMemberSearchQueries(playerNames))
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                var results = await guild.SearchUsersAsync(query, 10);
+                members.AddRange(results.Where(x => !x.IsBot).Select(x => ToLookupCandidate(x, fromDiscordSearch: true)));
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to search Discord members for query {Query}.", query);
+            }
+        }
+
+        return members;
+    }
+
+    private static DiscordMemberLookupCandidate ToLookupCandidate(IGuildUser user, bool fromDiscordSearch)
+    {
+        return new DiscordMemberLookupCandidate(
+            user.Id,
+            user.Username,
+            user.GlobalName,
+            user.Nickname,
+            user.DisplayName,
+            fromDiscordSearch);
+    }
+
+    private static IReadOnlyList<string> BuildDiscordMemberSearchQueries(IEnumerable<string> playerNames)
+    {
+        var queries = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var playerName in playerNames)
+        {
+            if (string.IsNullOrWhiteSpace(playerName)) continue;
+            var trimmed = playerName.Trim();
+            if (trimmed.Length >= 2) queries.Add(trimmed);
+
+            var compact = trimmed
+                .Replace("_", "", StringComparison.Ordinal)
+                .Replace("-", "", StringComparison.Ordinal)
+                .Replace(" ", "", StringComparison.Ordinal);
+            if (compact.Length >= 3) queries.Add(compact);
+        }
+
+        return queries.Take(12).ToList();
+    }
+
+    private static void AddDiscordGuessPlayerNamesFromMetadata(HashSet<string> names, string metadataJson)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(metadataJson);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return;
+
+            AddDiscordGuessPlayerName(names, ReadStringProperty(doc.RootElement, "Username"));
+            AddDiscordGuessPlayerName(names, ReadStringProperty(doc.RootElement, "Player"));
+            AddDiscordGuessPlayerName(names, ReadStringProperty(doc.RootElement, "NewPlayer"));
+            AddDiscordGuessPlayerName(names, ReadStringProperty(doc.RootElement, "PreviousPlayer"));
+            AddDiscordGuessPlayerName(names, ReadStringProperty(doc.RootElement, "SuggestedPrevious"));
+            AddDiscordGuessPlayerName(names, ReadStringProperty(doc.RootElement, "CanonicalPlayer"));
+
+            if (doc.RootElement.TryGetProperty("CandidatePreviousPlayers", out var candidates) &&
+                candidates.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var candidate in candidates.EnumerateArray())
+                {
+                    if (candidate.ValueKind != JsonValueKind.Object) continue;
+                    AddDiscordGuessPlayerName(names, ReadStringProperty(candidate, "PreviousPlayer"));
+                    AddDiscordGuessPlayerName(names, ReadStringProperty(candidate, "Username"));
+                    AddDiscordGuessPlayerName(names, ReadStringProperty(candidate, "Player"));
+                }
+            }
+        }
+        catch
+        {
+            // best-effort aliases only
+        }
+    }
+
+    private static string? ReadStringProperty(JsonElement element, string property)
+    {
+        if (!element.TryGetProperty(property, out var value)) return null;
+        return value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+    }
+
+    private static void AddDiscordGuessPlayerName(HashSet<string> names, string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return;
+        names.Add(NormalizeUsername(value));
+    }
+
     private static Embed BuildPromotionEmbed(
         string playerName,
         string oldRank,
         string newRank,
         string womRank,
         string updateTarget,
+        DiscordMemberGuessResult discordGuess,
         string statsSummary,
         string reason,
         string lastSynced)
@@ -5824,12 +6018,50 @@ Visar alla spelare som just nu är ignorerade i:
             .AddField("Old Rank", oldRank, true)
             .AddField("New Eligible Rank", newRank, true)
             .AddField("WOM Rank", womRank, true)
-            .AddField("Update Target", updateTarget, true)
-            .AddField("Stats Summary", statsSummary, false)
+            .AddField("Update Target", updateTarget, true);
+
+        var discordGuessValue = FormatDiscordGuessForEmbed(discordGuess, out var discordGuessFieldName);
+        if (!string.IsNullOrWhiteSpace(discordGuessValue))
+        {
+            b.AddField(discordGuessFieldName, discordGuessValue, false);
+        }
+
+        b.AddField("Stats Summary", statsSummary, false)
             .AddField("Reason", reason, false)
             .AddField("Last Synced (Swedish Time)", lastSynced, false);
         return b.Build();
     }
+
+    private static string FormatDiscordGuessForEmbed(DiscordMemberGuessResult guess, out string fieldName)
+    {
+        fieldName = "Discord Match";
+        var best = guess.Best;
+        if (best is null) return "";
+
+        var second = guess.Matches.Skip(1).FirstOrDefault();
+        var showSingle =
+            best.Strength == DiscordMemberMatchStrength.Exact ||
+            (best.Strength == DiscordMemberMatchStrength.Strong && (second is null || second.Score < 85));
+
+        if (showSingle)
+        {
+            var label = best.Strength == DiscordMemberMatchStrength.Exact ? "exact" : "best guess";
+            return $"{best.Mention} ({label}; matched {best.MatchedField} `{EscapeInlineCode(best.MatchedValue)}`)";
+        }
+
+        fieldName = "Possible Discord Matches";
+        return string.Join("\n", guess.Matches.Select(match =>
+            $"{match.Mention} - {match.Score}% via {match.MatchedField} `{EscapeInlineCode(match.MatchedValue)}`"));
+    }
+
+    private static string FormatDiscordGuessForFingerprint(DiscordMemberGuessResult guess)
+    {
+        if (guess.Matches.Count == 0) return "none";
+        return string.Join("|", guess.Matches.Select(x =>
+            $"{x.UserId}:{x.Score}:{x.Strength}:{x.MatchedField}:{x.MatchedValue}:{x.PlayerAlias}"));
+    }
+
+    private static string EscapeInlineCode(string value) => value.Replace("`", "'", StringComparison.Ordinal);
 
     private static string ToPromotionUpdateTargetLabel(PromotionCandidateType candidateType)
     {
