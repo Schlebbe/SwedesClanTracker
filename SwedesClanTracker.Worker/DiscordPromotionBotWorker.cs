@@ -514,6 +514,10 @@ public class DiscordPromotionBotWorker(
                 .WithName("lookup")
                 .WithDescription("Lookup a specific player in SwedesClanTracker.")
                 .AddOption("player", ApplicationCommandOptionType.String, "Player username", isRequired: true);
+            var discordGuess = new SlashCommandBuilder()
+                .WithName("discord-guess")
+                .WithDescription("Guess the Discord member for a tracked player.")
+                .AddOption("player", ApplicationCommandOptionType.String, "Player username", isRequired: true);
             var help = new SlashCommandBuilder()
                 .WithName("help")
                 .WithDescription("Visar alla tillgängliga kommandon och vad de gör.");
@@ -568,6 +572,7 @@ public class DiscordPromotionBotWorker(
                 .AddOption("count", ApplicationCommandOptionType.Integer, "Manual pet count (0 or higher)", isRequired: true);
 
             await socketGuild.CreateApplicationCommandAsync(lookup.Build());
+            await socketGuild.CreateApplicationCommandAsync(discordGuess.Build());
             await socketGuild.CreateApplicationCommandAsync(help.Build());
             await socketGuild.CreateApplicationCommandAsync(update.Build());
             await socketGuild.CreateApplicationCommandAsync(add.Build());
@@ -582,7 +587,7 @@ public class DiscordPromotionBotWorker(
             await socketGuild.CreateApplicationCommandAsync(requeueReviewCard.Build());
             await socketGuild.CreateApplicationCommandAsync(setPets.Build());
 
-            logger.LogInformation("Registered /lookup slash command in guild {GuildId}.", _options.GuildId);
+            logger.LogInformation("Registered Discord slash commands in guild {GuildId}.", _options.GuildId);
         }
         catch (Exception ex)
         {
@@ -4943,7 +4948,7 @@ public class DiscordPromotionBotWorker(
                 return;
             }
 
-            var deferEphemeral = true;
+            var deferEphemeral = IsEphemeralSlashCommand(command.Data.Name);
             if (!command.HasResponded)
             {
                 await command.DeferAsync(ephemeral: deferEphemeral);
@@ -5188,6 +5193,12 @@ public class DiscordPromotionBotWorker(
                 return;
             }
 
+            if (string.Equals(command.Data.Name, "discord-guess", StringComparison.OrdinalIgnoreCase))
+            {
+                await HandleDiscordGuessSlashCommandAsync(command);
+                return;
+            }
+
             if (string.Equals(command.Data.Name, "help", StringComparison.OrdinalIgnoreCase))
             {
                 await HandleHelpSlashCommandAsync(command);
@@ -5286,6 +5297,86 @@ public class DiscordPromotionBotWorker(
         {
             logger.LogInformation("Discord slash end: {Command} in {ElapsedMs}ms", command.Data.Name, sw.ElapsedMilliseconds);
         }
+    }
+
+    private async Task HandleDiscordGuessSlashCommandAsync(SocketSlashCommand command)
+    {
+        var playerRaw = command.Data.Options.FirstOrDefault(x => x.Name == "player")?.Value?.ToString()?.Trim();
+        if (string.IsNullOrWhiteSpace(playerRaw))
+        {
+            await RespondAndAutoDeleteAsync(command, "Please provide a player username.", ephemeral: false);
+            return;
+        }
+
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        var player = await db.Players
+            .Where(x => x.Username.ToLower() == playerRaw.ToLower())
+            .Select(x => new { x.Id, x.Username })
+            .FirstOrDefaultAsync();
+
+        if (player is null)
+        {
+            await RespondAndAutoDeleteAsync(command, $"No player found for `{EscapeInlineCode(playerRaw)}`.", ephemeral: false);
+            return;
+        }
+
+        var aliases = await GetDiscordGuessPlayerNamesAsync(db, player.Id, player.Username, CancellationToken.None);
+        var guess = await GuessDiscordMemberForNamesAsync(aliases, CancellationToken.None);
+        var embed = BuildDiscordGuessEmbed(player.Username, aliases, guess);
+        await RespondAndAutoDeleteAsync(command, embed, ephemeral: false);
+    }
+
+    private static Embed BuildDiscordGuessEmbed(
+        string playerName,
+        IReadOnlyList<string> aliases,
+        DiscordMemberGuessResult guess)
+    {
+        var builder = new EmbedBuilder()
+            .WithTitle($"Discord Guess: {playerName}")
+            .WithColor(new Color(99, 102, 241))
+            .WithTimestamp(DateTimeOffset.Now);
+
+        var aliasText = aliases.Count == 0
+            ? $"`{EscapeInlineCode(playerName)}`"
+            : string.Join(", ", aliases.Take(8).Select(x => $"`{EscapeInlineCode(x)}`"));
+        if (aliases.Count > 8)
+        {
+            aliasText += $" +{aliases.Count - 8} more";
+        }
+
+        builder.AddField("Names Used", aliasText, false);
+
+        if (guess.Matches.Count == 0)
+        {
+            builder
+                .WithDescription("No plausible Discord member match found.")
+                .AddField("Result", "No mention will be shown on cards for this player unless another alias or linked account is added later.", false);
+            return builder.Build();
+        }
+
+        var best = guess.Best!;
+        var second = guess.Matches.Skip(1).FirstOrDefault();
+        var showSingle =
+            best.Strength == DiscordMemberMatchStrength.Exact ||
+            (best.Strength == DiscordMemberMatchStrength.Strong && (second is null || second.Score < 85));
+
+        if (showSingle)
+        {
+            var label = best.Strength == DiscordMemberMatchStrength.Exact ? "Exact match" : "Strong best guess";
+            builder
+                .WithDescription($"{label}: {best.Mention}")
+                .AddField("Matched On", $"{best.Score}% via {best.MatchedField} `{EscapeInlineCode(best.MatchedValue)}`", true)
+                .AddField("Player Alias", $"`{EscapeInlineCode(best.PlayerAlias)}`", true)
+                .AddField("Source", best.FromDiscordSearch ? "Discord search + member cache" : "Member cache", true);
+            return builder.Build();
+        }
+
+        builder.WithDescription("Possible Discord member matches:");
+        var lines = guess.Matches.Select((match, index) =>
+            $"{index + 1}. {match.Mention} - {match.Score}% via {match.MatchedField} `{EscapeInlineCode(match.MatchedValue)}` from `{EscapeInlineCode(match.PlayerAlias)}`");
+        builder.AddField("Top Matches", string.Join("\n", lines), false);
+        return builder.Build();
     }
 
     private async Task HandleWomUnignoreSlashCommandAsync(SocketSlashCommand command)
@@ -5471,6 +5562,9 @@ public class DiscordPromotionBotWorker(
     {
         var helpText = """
 ### Info / Sync
+**/discord-guess <player>**  
+Visar botens bästa Discord-matchning för spelaren med klickbar mention
+
 **/lookup <player>**  
 Visar spelarens sammanfattning (rank, stats, pets, Temple/WOM-status, senaste sync)
 
@@ -5563,7 +5657,7 @@ Visar alla spelare som just nu är ignorerade i:
 
     private async Task RespondAndAutoDeleteAsync(SocketSlashCommand command, string text, bool ephemeral = true)
     {
-        var effectiveEphemeral = true;
+        var effectiveEphemeral = ephemeral;
         var response = await command.FollowupAsync(text: text, ephemeral: effectiveEphemeral);
         var messageDescription = BuildSlashTextCleanupDescription(command, text);
         if (effectiveEphemeral)
@@ -5585,7 +5679,7 @@ Visar alla spelare som just nu är ignorerade i:
 
     private async Task RespondAndAutoDeleteAsync(SocketSlashCommand command, Embed embed, bool ephemeral = true)
     {
-        var effectiveEphemeral = true;
+        var effectiveEphemeral = ephemeral;
         var response = await command.FollowupAsync(embed: embed, ephemeral: effectiveEphemeral);
         var messageDescription = BuildSlashEmbedCleanupDescription(command, embed);
         if (effectiveEphemeral)
@@ -5750,6 +5844,7 @@ Visar alla spelare som just nu är ignorerade i:
     private static bool IsAdminLockedSlashCommand(string commandName)
     {
         return string.Equals(commandName, "update", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(commandName, "discord-guess", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(commandName, "set-pets", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(commandName, "add", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(commandName, "remove", StringComparison.OrdinalIgnoreCase) ||
