@@ -58,6 +58,10 @@ public class DiscordPromotionBotWorker(
     private readonly SemaphoreSlim _discordMemberCacheLock = new(1, 1);
     private IReadOnlyList<DiscordMemberLookupCandidate>? _discordMemberCache;
     private DateTimeOffset _discordMemberCacheValidUntil = DateTimeOffset.MinValue;
+    private static readonly TimeSpan DiscordGuessCommandTimeout = TimeSpan.FromSeconds(12);
+    private static readonly TimeSpan DiscordMemberCacheLockTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan DiscordMemberDownloadTimeout = TimeSpan.FromSeconds(8);
+    private static readonly TimeSpan DiscordMemberSearchTimeout = TimeSpan.FromSeconds(5);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -5308,23 +5312,32 @@ public class DiscordPromotionBotWorker(
             return;
         }
 
-        await using var scope = scopeFactory.CreateAsyncScope();
-        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
-        var player = await db.Players
-            .Where(x => x.Username.ToLower() == playerRaw.ToLower())
-            .Select(x => new { x.Id, x.Username })
-            .FirstOrDefaultAsync();
-
-        if (player is null)
+        using var timeout = new CancellationTokenSource(DiscordGuessCommandTimeout);
+        try
         {
-            await RespondAndAutoDeleteAsync(command, $"No player found for `{EscapeInlineCode(playerRaw)}`.", ephemeral: false);
-            return;
-        }
+            await using var scope = scopeFactory.CreateAsyncScope();
+            var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+            var player = await db.Players
+                .Where(x => x.Username.ToLower() == playerRaw.ToLower())
+                .Select(x => new { x.Id, x.Username })
+                .FirstOrDefaultAsync(timeout.Token);
 
-        var aliases = await GetDiscordGuessPlayerNamesAsync(db, player.Id, player.Username, CancellationToken.None);
-        var guess = await GuessDiscordMemberForNamesAsync(aliases, CancellationToken.None);
-        var embed = BuildDiscordGuessEmbed(player.Username, aliases, guess);
-        await RespondAndAutoDeleteAsync(command, embed, ephemeral: false);
+            if (player is null)
+            {
+                await RespondAndAutoDeleteAsync(command, $"No player found for `{EscapeInlineCode(playerRaw)}`.", ephemeral: false);
+                return;
+            }
+
+            var aliases = await GetDiscordGuessPlayerNamesAsync(db, player.Id, player.Username, timeout.Token);
+            var guess = await GuessDiscordMemberForNamesAsync(aliases, timeout.Token);
+            var embed = BuildDiscordGuessEmbed(player.Username, aliases, guess);
+            await RespondAndAutoDeleteAsync(command, embed, ephemeral: false);
+        }
+        catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+        {
+            logger.LogWarning("Discord guess slash command timed out for {Player}.", playerRaw);
+            await RespondAndAutoDeleteAsync(command, $"Discord guess timed out for `{EscapeInlineCode(playerRaw)}`. Try again in a moment.", ephemeral: false);
+        }
     }
 
     private static Embed BuildDiscordGuessEmbed(
@@ -5988,7 +6001,12 @@ Visar alla spelare som just nu är ignorerade i:
             return _discordMemberCache;
         }
 
-        await _discordMemberCacheLock.WaitAsync(ct);
+        if (!await _discordMemberCacheLock.WaitAsync(DiscordMemberCacheLockTimeout, ct))
+        {
+            logger.LogWarning("Timed out waiting for Discord member cache lock; using existing cache if available.");
+            return _discordMemberCache ?? [];
+        }
+
         try
         {
             if (_discordMemberCache is not null && DateTimeOffset.UtcNow < _discordMemberCacheValidUntil)
@@ -6005,7 +6023,11 @@ Visar alla spelare som just nu är ignorerade i:
             var downloadedMembers = true;
             try
             {
-                await guild.DownloadUsersAsync();
+                downloadedMembers = await WaitForDiscordTaskAsync(guild.DownloadUsersAsync(), DiscordMemberDownloadTimeout, ct);
+                if (!downloadedMembers)
+                {
+                    logger.LogWarning("Timed out downloading Discord guild members after {TimeoutSeconds}s; using currently cached guild users.", DiscordMemberDownloadTimeout.TotalSeconds);
+                }
             }
             catch (Exception ex)
             {
@@ -6039,7 +6061,13 @@ Visar alla spelare som just nu är ignorerade i:
             ct.ThrowIfCancellationRequested();
             try
             {
-                var results = await guild.SearchUsersAsync(query, 10);
+                var results = await WaitForDiscordTaskAsync(guild.SearchUsersAsync(query, 10), DiscordMemberSearchTimeout, ct);
+                if (results is null)
+                {
+                    logger.LogWarning("Timed out searching Discord members for query {Query} after {TimeoutSeconds}s.", query, DiscordMemberSearchTimeout.TotalSeconds);
+                    continue;
+                }
+
                 members.AddRange(results.Where(x => !x.IsBot).Select(x => ToLookupCandidate(x, fromDiscordSearch: true)));
             }
             catch (Exception ex)
@@ -6079,6 +6107,33 @@ Visar alla spelare som just nu är ignorerade i:
         }
 
         return queries.Take(12).ToList();
+    }
+
+    private static async Task<bool> WaitForDiscordTaskAsync(Task task, TimeSpan timeout, CancellationToken ct)
+    {
+        var delay = Task.Delay(timeout, ct);
+        var completed = await Task.WhenAny(task, delay);
+        if (completed == delay)
+        {
+            ct.ThrowIfCancellationRequested();
+            return false;
+        }
+
+        await task;
+        return true;
+    }
+
+    private static async Task<T?> WaitForDiscordTaskAsync<T>(Task<T> task, TimeSpan timeout, CancellationToken ct)
+    {
+        var delay = Task.Delay(timeout, ct);
+        var completed = await Task.WhenAny(task, delay);
+        if (completed == delay)
+        {
+            ct.ThrowIfCancellationRequested();
+            return default;
+        }
+
+        return await task;
     }
 
     private static void AddDiscordGuessPlayerNamesFromMetadata(HashSet<string> names, string metadataJson)
