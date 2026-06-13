@@ -66,6 +66,7 @@ public class DiscordPromotionBotWorker(
     private static readonly TimeSpan DiscordMemberSearchTotalTimeout = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan TempleNameChangeDetectionWindow = TimeSpan.FromHours(6);
     private static readonly TimeSpan TempleNameChangeReminderInterval = TimeSpan.FromHours(2);
+    private static readonly TimeSpan WomOnlyPostGracePeriod = TimeSpan.FromMinutes(5);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -2223,7 +2224,8 @@ public class DiscordPromotionBotWorker(
             (x.EventType == "PROMOTION_DISCORD_DELETE_SCHEDULED" ||
              x.EventType == "TEMPLE_MISSING_DISCORD_DELETE_SCHEDULED" ||
              x.EventType == "WOM_MISSING_DISCORD_DELETE_SCHEDULED" ||
-             x.EventType == "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED"), ct);
+             x.EventType == "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED") &&
+            x.Status == "OPEN", ct);
         if (hasScheduledDelete)
         {
             var deleteRows = await db.LifecycleEvents
@@ -2231,7 +2233,8 @@ public class DiscordPromotionBotWorker(
                     (x.EventType == "PROMOTION_DISCORD_DELETE_SCHEDULED" ||
                      x.EventType == "TEMPLE_MISSING_DISCORD_DELETE_SCHEDULED" ||
                      x.EventType == "WOM_MISSING_DISCORD_DELETE_SCHEDULED" ||
-                     x.EventType == "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED"))
+                     x.EventType == "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED") &&
+                    x.Status == "OPEN")
                 .ToListAsync(ct);
             hasScheduledDelete = deleteRows.Any(x => MetadataUlongEquals(x.MetadataJson, "DiscordMessageId", messageId));
         }
@@ -2381,7 +2384,8 @@ public class DiscordPromotionBotWorker(
             (x.EventType == "PROMOTION_DISCORD_DELETE_SCHEDULED" ||
              x.EventType == "TEMPLE_MISSING_DISCORD_DELETE_SCHEDULED" ||
              x.EventType == "WOM_MISSING_DISCORD_DELETE_SCHEDULED" ||
-             x.EventType == "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED"));
+             x.EventType == "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED") &&
+            x.Status == "OPEN");
         if (hasScheduledDelete)
         {
             var scheduledRows = await db.LifecycleEvents
@@ -2389,7 +2393,8 @@ public class DiscordPromotionBotWorker(
                     (x.EventType == "PROMOTION_DISCORD_DELETE_SCHEDULED" ||
                      x.EventType == "TEMPLE_MISSING_DISCORD_DELETE_SCHEDULED" ||
                      x.EventType == "WOM_MISSING_DISCORD_DELETE_SCHEDULED" ||
-                     x.EventType == "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED"))
+                     x.EventType == "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED") &&
+                    x.Status == "OPEN")
                 .ToListAsync();
             hasScheduledDelete = scheduledRows.Any(x => MetadataUlongEquals(x.MetadataJson, "DiscordMessageId", messageId));
         }
@@ -2533,7 +2538,7 @@ public class DiscordPromotionBotWorker(
             }
 
             if (s.EventType == "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED" &&
-                IsWomOnlyCleanup(sd.RootElement) &&
+                RequiresWomOnlyActionForCleanup(sd.RootElement) &&
                 !await HasWomOnlyActionForScheduledDeleteAsync(db, s, ct))
             {
                 logger.LogWarning(
@@ -3578,6 +3583,98 @@ public class DiscordPromotionBotWorker(
         return usernames;
     }
 
+    private async Task<bool> IsStillLiveWomOnlyRequirementAsync(
+        TrackerDbContext db,
+        LifecycleEvent requiredEvent,
+        string normalizedUsername,
+        string actualWomRole,
+        CancellationToken ct)
+    {
+        var lowerUsername = normalizedUsername.ToLowerInvariant();
+        var existsInDatabase = await db.Players.AnyAsync(
+            x => x.Username.ToLower() == lowerUsername &&
+                 x.Status != PlayerStatus.REMOVED_CONFIRMED,
+            ct);
+        if (existsInDatabase)
+        {
+            await CloseStaleWomOnlyRequirementAsync(
+                db,
+                requiredEvent,
+                normalizedUsername,
+                actualWomRole,
+                "database",
+                "Present",
+                "Player already exists in tracker database.",
+                ct);
+            return false;
+        }
+
+        var womGroupId = configuration.GetValue<int?>("WiseOldMan:GroupId") ?? 7173;
+        var isInWom = womGroupId > 0 && await IsPlayerInWiseOldManGroupAsync(normalizedUsername, womGroupId);
+        if (!isInWom)
+        {
+            await CloseStaleWomOnlyRequirementAsync(
+                db,
+                requiredEvent,
+                normalizedUsername,
+                actualWomRole,
+                "wom",
+                "Missing",
+                "Player is no longer present in Wise Old Man.",
+                ct);
+            return false;
+        }
+
+        var templeGroupId = configuration.GetValue<int?>("TempleOsrs:GroupId") ?? 449;
+        var isInTemple = await IsPlayerInTempleGroupAsync(normalizedUsername, templeGroupId);
+        if (isInTemple)
+        {
+            await CloseStaleWomOnlyRequirementAsync(
+                db,
+                requiredEvent,
+                normalizedUsername,
+                actualWomRole,
+                "temple",
+                "Present",
+                "Player is already present in Temple.",
+                ct);
+            return false;
+        }
+
+        return true;
+    }
+
+    private static async Task CloseStaleWomOnlyRequirementAsync(
+        TrackerDbContext db,
+        LifecycleEvent requiredEvent,
+        string normalizedUsername,
+        string actualWomRole,
+        string liveSource,
+        string liveState,
+        string reason,
+        CancellationToken ct)
+    {
+        requiredEvent.Status = "DONE";
+        await CloseOpenWomOnlyRequiredEventsAsync(db, normalizedUsername);
+        db.LifecycleEvents.Add(new LifecycleEvent
+        {
+            PlayerId = requiredEvent.PlayerId,
+            EventType = "WOM_ONLY_SUPPRESSED_BY_LIVE_CHECK",
+            MetadataJson = JsonUtil.Serialize(new
+            {
+                Username = normalizedUsername,
+                ActualWomRole = actualWomRole,
+                Source = "discord-post-guard",
+                LiveSource = liveSource,
+                LiveState = liveState,
+                Reason = reason
+            }),
+            Status = "DONE",
+            CreatedAt = DateTimeOffset.UtcNow
+        });
+        await db.SaveChangesAsync(ct);
+    }
+
     private static async Task CloseOpenWomOnlyRequiredEventsAsync(TrackerDbContext db, string normalizedUsername)
     {
         var openRequired = await db.LifecycleEvents
@@ -4144,7 +4241,7 @@ public class DiscordPromotionBotWorker(
         await db.SaveChangesAsync(ct);
     }
 
-    private static bool IsWomOnlyCleanup(JsonElement root)
+    private static bool RequiresWomOnlyActionForCleanup(JsonElement root)
     {
         if (!root.TryGetProperty("Extra", out var extra) || extra.ValueKind != JsonValueKind.Object)
         {
@@ -4157,7 +4254,7 @@ public class DiscordPromotionBotWorker(
         }
 
         var reason = reasonProperty.GetString() ?? "";
-        return reason.Contains("wom-only", StringComparison.OrdinalIgnoreCase);
+        return string.Equals(reason, "wom-only-action-handled", StringComparison.OrdinalIgnoreCase);
     }
 
     private static async Task<bool> HasWomOnlyActionForScheduledDeleteAsync(
@@ -4244,6 +4341,16 @@ public class DiscordPromotionBotWorker(
                 continue;
             }
             if (IsOpenTempleNameChangeForNewUsername(openTempleNameChanges, normalizedUsername))
+            {
+                continue;
+            }
+
+            if (DateTimeOffset.UtcNow - ev.CreatedAt < WomOnlyPostGracePeriod)
+            {
+                continue;
+            }
+
+            if (!await IsStillLiveWomOnlyRequirementAsync(db, ev, normalizedUsername, womRole, ct))
             {
                 continue;
             }
@@ -7506,6 +7613,7 @@ Visar alla spelare som just nu är ignorerade i:
                 details: $"HTTP {(int)response.StatusCode}: {responseText}");
         }
 
+        await InvalidateWiseOldManCacheAsync("wom-add-command");
         return BuildWomResultEmbed(
             title: "WiseOldMan Add Completed",
             success: true,
@@ -7597,6 +7705,7 @@ Visar alla spelare som just nu är ignorerade i:
                 details: $"HTTP {(int)response.StatusCode}: {responseText}");
         }
 
+        await InvalidateWiseOldManCacheAsync("wom-remove-command");
         return BuildWomResultEmbed(
             title: "WiseOldMan Remove Completed",
             success: true,
@@ -7650,6 +7759,7 @@ Visar alla spelare som just nu är ignorerade i:
             {
                 updatedRole = parsedUpdatedRole;
             }
+            await InvalidateWiseOldManCacheAsync("wom-role-update-command");
         }
 
         await LogWomRoleUpdateAppliedAsync(
@@ -7888,6 +7998,21 @@ Visar alla spelare som just nu är ignorerade i:
     private static string NormalizeUsername(string input) =>
         UsernameRules.NormalizeUsername(input);
 
+    private async Task InvalidateWiseOldManCacheAsync(string reason)
+    {
+        try
+        {
+            await using var scope = scopeFactory.CreateAsyncScope();
+            var wiseOldManClient = scope.ServiceProvider.GetRequiredService<IWiseOldManClient>();
+            await wiseOldManClient.InvalidateCacheAsync(CancellationToken.None);
+            logger.LogInformation("Invalidated Wise Old Man roster cache after {Reason}.", reason);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to invalidate Wise Old Man roster cache after {Reason}.", reason);
+        }
+    }
+
     private async Task<bool> AddPlayerToTempleAsync(string username)
     {
         try
@@ -7926,7 +8051,12 @@ Visar alla spelare som just nu är ignorerade i:
                 Content = new StringContent(addBody, Encoding.UTF8, "application/json")
             };
             var response = await client.SendAsync(req);
-            return response.IsSuccessStatusCode;
+            if (response.IsSuccessStatusCode)
+            {
+                await InvalidateWiseOldManCacheAsync("wom-add-helper");
+                return true;
+            }
+            return false;
         }
         catch { return false; }
     }
@@ -7949,7 +8079,12 @@ Visar alla spelare som just nu är ignorerade i:
                 Content = new StringContent(removeBody, Encoding.UTF8, "application/json")
             };
             var response = await client.SendAsync(req);
-            return response.IsSuccessStatusCode;
+            if (response.IsSuccessStatusCode)
+            {
+                await InvalidateWiseOldManCacheAsync("wom-remove-helper");
+                return true;
+            }
+            return false;
         }
         catch { return false; }
     }
