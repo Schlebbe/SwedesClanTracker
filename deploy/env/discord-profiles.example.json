@@ -1,14 +1,27 @@
 {
   "temporary": {
-    "AdminRoleId": "1508594760913256479",
-    "GuildId": "1186818422810628126",
-    "ChannelId": "1362728523357491321",
-    "PetHiscoresChannelId": "1500523354300481767"
+    "AdminRoleId": "CHANGE_ME",
+    "GuildId": "CHANGE_ME",
+    "ChannelId": "CHANGE_ME",
+    "PetHiscoresChannelId": "CHANGE_ME",
+    "RankRoleIds": {}
   },
   "real": {
-    "AdminRoleId": "290138154537582593",
-    "GuildId": "290137959288537092",
-    "ChannelId": "1500542861974966416",
-    "PetHiscoresChannelId": "1500542941314158712"
+    "AdminRoleId": "CHANGE_ME",
+    "GuildId": "CHANGE_ME",
+    "ChannelId": "CHANGE_ME",
+    "PetHiscoresChannelId": "CHANGE_ME",
+    "RankRoleIds": {
+      "Officer": "CHANGE_ME",
+      "Commander": "CHANGE_ME",
+      "Lieutenant": "CHANGE_ME",
+      "Captain": "CHANGE_ME",
+      "Astral": "CHANGE_ME",
+      "General": "CHANGE_ME",
+      "Brigadier": "CHANGE_ME",
+      "Admiral": "CHANGE_ME",
+      "Marshal": "CHANGE_ME",
+      "Beast": "CHANGE_ME"
+    }
   }
 }

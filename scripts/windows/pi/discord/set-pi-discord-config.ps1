@@ -9,6 +9,8 @@ param(
     [string]$DiscordGuildId,
     [string]$DiscordChannelId,
     [string]$DiscordPetHiscoresChannelId,
+    [string[]]$DiscordRankRoleIds = @(),
+    [switch]$ClearDiscordRankRoleIds,
     [switch]$NoPause
 )
 
@@ -25,6 +27,26 @@ function Assert-UInt64String {
     if (-not [UInt64]::TryParse($Value, [ref]$parsed)) {
         throw "$Name must be numeric. Received: '$Value'"
     }
+}
+
+function Convert-RankRoleEntries {
+    param([string[]]$Entries)
+
+    $result = [ordered]@{}
+    foreach ($entry in @($Entries)) {
+        if ([string]::IsNullOrWhiteSpace($entry)) { continue }
+        $parts = $entry.Split("=", 2)
+        if ($parts.Count -ne 2 -or [string]::IsNullOrWhiteSpace($parts[0]) -or [string]::IsNullOrWhiteSpace($parts[1])) {
+            throw "Rank role entry must be formatted as Rank=RoleId. Received: '$entry'"
+        }
+
+        $rank = $parts[0].Trim()
+        $roleId = $parts[1].Trim()
+        Assert-UInt64String -Name "DiscordBot rank role ID for $rank" -Value $roleId
+        $result[$rank] = $roleId
+    }
+
+    return $result
 }
 
 try {
@@ -97,6 +119,8 @@ try {
     Assert-UInt64String -Name "DiscordBot guild ID" -Value $DiscordGuildId
     Assert-UInt64String -Name "DiscordBot channel ID" -Value $DiscordChannelId
     Assert-UInt64String -Name "DiscordBot pet hiscores channel ID" -Value $DiscordPetHiscoresChannelId
+    $requestedRankRoleIds = Convert-RankRoleEntries -Entries $DiscordRankRoleIds
+    $hasRequestedRankRoleIds = $PSBoundParameters.ContainsKey("DiscordRankRoleIds") -or $ClearDiscordRankRoleIds
 
     $isUnchanged = @(
         $existingToken -eq $DiscordToken
@@ -106,19 +130,40 @@ try {
         $existingPetHiscores -eq $DiscordPetHiscoresChannelId
         ($existingMap.ContainsKey("DiscordBot__Enabled") -and $existingMap["DiscordBot__Enabled"] -eq "true")
     ) -notcontains $false
+    if ($isUnchanged -and $hasRequestedRankRoleIds) {
+        foreach ($rank in $requestedRankRoleIds.Keys) {
+            $key = "DiscordBot__RankRoleIds__$rank"
+            if (-not $existingMap.ContainsKey($key) -or "$($existingMap[$key])" -ne "$($requestedRankRoleIds[$rank])") {
+                $isUnchanged = $false
+                break
+            }
+        }
+        $existingRankKeys = @($existingMap.Keys | Where-Object { $_ -match '^DiscordBot__RankRoleIds__' })
+        if ($existingRankKeys.Count -ne $requestedRankRoleIds.Count) {
+            $isUnchanged = $false
+        }
+    }
     if ($isUnchanged) {
         Write-OpResult -Success $true -Step "Discord configuration unchanged" -Details "Requested Discord settings already active on Pi worker." -NextStep "No restart was needed."
         Pause-IfRequested -NoPause:$NoPause
         exit 0
     }
 
-    $updatedLines = @($existingLines | Where-Object { $_ -notmatch '^DiscordBot__' })
+    $updatedLines = @($existingLines | Where-Object {
+        $_ -notmatch '^DiscordBot__' -or
+        (-not $hasRequestedRankRoleIds -and $_ -match '^DiscordBot__RankRoleIds__')
+    })
     $updatedLines += "DiscordBot__Enabled=true"
     $updatedLines += "DiscordBot__Token=$DiscordToken"
     $updatedLines += "DiscordBot__AdminRoleId=$DiscordAdminRoleId"
     $updatedLines += "DiscordBot__GuildId=$DiscordGuildId"
     $updatedLines += "DiscordBot__ChannelId=$DiscordChannelId"
     $updatedLines += "DiscordBot__PetHiscoresChannelId=$DiscordPetHiscoresChannelId"
+    if ($hasRequestedRankRoleIds) {
+        foreach ($rank in $requestedRankRoleIds.Keys) {
+            $updatedLines += "DiscordBot__RankRoleIds__$rank=$($requestedRankRoleIds[$rank])"
+        }
+    }
 
     $tempFile = [System.IO.Path]::GetTempFileName()
     try {
@@ -150,7 +195,8 @@ sudo -n systemctl is-active swedesclantracker-worker
         Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue
     }
 
-    $sanitized = "GuildId=$DiscordGuildId, ChannelId=$DiscordChannelId, PetHiscoresChannelId=$DiscordPetHiscoresChannelId, AdminRoleId=$DiscordAdminRoleId"
+    $rankRoleDetails = if ($hasRequestedRankRoleIds) { ", RankRoleIds=$($requestedRankRoleIds.Count)" } else { "" }
+    $sanitized = "GuildId=$DiscordGuildId, ChannelId=$DiscordChannelId, PetHiscoresChannelId=$DiscordPetHiscoresChannelId, AdminRoleId=$DiscordAdminRoleId$rankRoleDetails"
     Write-OpResult -Success $true -Step "Discord configuration updated" -Details $sanitized -NextStep "Run verify-pi-stack.ps1 to confirm the Pi stack is healthy."
     Pause-IfRequested -NoPause:$NoPause
 }

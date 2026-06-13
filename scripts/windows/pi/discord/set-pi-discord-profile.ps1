@@ -50,6 +50,22 @@ try {
         "-DiscordChannelId", [string]$profile.ChannelId,
         "-DiscordPetHiscoresChannelId", [string]$profile.PetHiscoresChannelId
     )
+    if ($profile.PSObject.Properties.Name -contains "RankRoleIds") {
+        $rankRoleEntries = @()
+        if ($null -ne $profile.RankRoleIds) {
+            foreach ($roleProperty in $profile.RankRoleIds.PSObject.Properties) {
+                if (-not [string]::IsNullOrWhiteSpace([string]$roleProperty.Value)) {
+                    $rankRoleEntries += "$($roleProperty.Name)=$($roleProperty.Value)"
+                }
+            }
+        }
+        if ($rankRoleEntries.Count -gt 0) {
+            $args += @("-DiscordRankRoleIds", $rankRoleEntries)
+        }
+        else {
+            $args += "-ClearDiscordRankRoleIds"
+        }
+    }
     if (-not [string]::IsNullOrWhiteSpace($DiscordToken)) {
         $args += @("-DiscordToken", $DiscordToken)
     }
