@@ -364,9 +364,14 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
     private async Task EnsureWomRankMismatchLifecycleAsync(Player player, string womRole, DateTimeOffset now, CancellationToken ct)
     {
         if (player.Status != PlayerStatus.ACTIVE) return;
+        if (RankRules.IsExactKnownClanRankMatch(player.CurrentRank, womRole))
+        {
+            await CloseOpenLifecycleEventsAsync(player.Id, ct, "WOM_RANK_MISMATCH_REQUIRED", "WOM_RANK_MISMATCH_IGNORED");
+            return;
+        }
+
         if (string.Equals(player.CurrentRank, "Recruit", StringComparison.OrdinalIgnoreCase) ||
-            IsSpecialWomRole(womRole) ||
-            string.Equals(NormalizeRankName(player.CurrentRank), NormalizeRankName(womRole), StringComparison.OrdinalIgnoreCase))
+            IsSpecialWomRole(womRole))
         {
             await CloseOpenLifecycleEventsAsync(player.Id, ct, "WOM_RANK_MISMATCH_REQUIRED");
             return;

@@ -29,4 +29,22 @@ public class RankRulesTests
             PromotionCandidateType.needs_wom_rank_update,
             RankRules.ClassifyPromotionCandidate("Captain", "Member"));
     }
+
+    [Fact]
+    public void IsExactKnownClanRankMatch_MatchesEqualKnownRanks()
+    {
+        Assert.True(RankRules.IsExactKnownClanRankMatch("General", "general"));
+    }
+
+    [Fact]
+    public void IsExactKnownClanRankMatch_DoesNotTreatMemberAsRecruitEquivalent()
+    {
+        Assert.False(RankRules.IsExactKnownClanRankMatch("Recruit", "member"));
+    }
+
+    [Fact]
+    public void IsExactKnownClanRankMatch_DoesNotMatchSpecialUnknownRoles()
+    {
+        Assert.False(RankRules.IsExactKnownClanRankMatch("General", "Short green guy"));
+    }
 }

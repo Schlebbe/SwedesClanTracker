@@ -136,6 +136,12 @@ public static class RankRules
         return SpecialWomRoles.Any(x => string.Equals(x, normalized, StringComparison.OrdinalIgnoreCase));
     }
 
+    public static bool IsExactKnownClanRankMatch(string left, string right)
+    {
+        if (!IsKnownClanRank(left) || !IsKnownClanRank(right)) return false;
+        return string.Equals(NormalizeRankName(left), NormalizeRankName(right), StringComparison.OrdinalIgnoreCase);
+    }
+
     public static PromotionCandidateType ClassifyPromotionCandidate(string newRank, string? womRole)
     {
         if (string.IsNullOrWhiteSpace(womRole)) return PromotionCandidateType.unknown_wom_role;
