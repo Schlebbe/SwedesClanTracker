@@ -81,6 +81,23 @@ public class DiscordPromotionBotWorker(
     private static readonly TimeSpan TempleNameChangeDetectionWindow = TimeSpan.FromHours(6);
     private static readonly TimeSpan TempleNameChangeReminderInterval = TimeSpan.FromHours(2);
     private static readonly TimeSpan WomOnlyPostGracePeriod = TimeSpan.FromMinutes(5);
+    private static readonly string[] AdminHistoryEventTypes =
+    [
+        "PROMOTION_CANDIDATE_CREATED",
+        "PROMOTION_DISCORD_ACTION_APPLIED",
+        "NEW_PLAYER",
+        "MISSING_IN_ROSTER",
+        "STATUS_UPDATED",
+        "MERGE_SUGGESTED",
+        "MERGE_ACTION_APPLIED",
+        "TEMPLE_MISSING_ACTION_APPLIED",
+        "WOM_MISSING_ACTION_APPLIED",
+        "WOM_ONLY_ACTION_APPLIED",
+        "WOM_RANK_MISMATCH_REQUIRED",
+        "WOM_RANK_MISMATCH_ACTION_APPLIED",
+        "WOM_ROLE_UPDATE_APPLIED",
+        "PLAYER_SNAPSHOT_CONTAMINATION_REQUIRED"
+    ];
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -665,9 +682,14 @@ public class DiscordPromotionBotWorker(
             var discordRankReviewPost = new SlashCommandBuilder()
                 .WithName("discord-rank-review-post")
                 .WithDescription("Post actionable Discord rank role review cards for current mismatches.");
+            var history = new SlashCommandBuilder()
+                .WithName("history")
+                .WithDescription("Show recent tracker history.")
+                .AddOption("rows", ApplicationCommandOptionType.Integer, "Number of recent rows to show (1-25).", isRequired: true)
+                .AddOption("everything", ApplicationCommandOptionType.Boolean, "Include bot/system diagnostic events.", isRequired: false);
             var help = new SlashCommandBuilder()
                 .WithName("help")
-                .WithDescription("Visar alla tillgängliga kommandon och vad de gör.");
+                .WithDescription("Shows all available commands and what they do.");
             var update = new SlashCommandBuilder()
                 .WithName("update")
                 .WithDescription("Prioritize a player for immediate stats update.")
@@ -724,6 +746,7 @@ public class DiscordPromotionBotWorker(
             await socketGuild.CreateApplicationCommandAsync(discordRankAudit.Build());
             await socketGuild.CreateApplicationCommandAsync(discordRankSet.Build());
             await socketGuild.CreateApplicationCommandAsync(discordRankReviewPost.Build());
+            await socketGuild.CreateApplicationCommandAsync(history.Build());
             await socketGuild.CreateApplicationCommandAsync(help.Build());
             await socketGuild.CreateApplicationCommandAsync(update.Build());
             await socketGuild.CreateApplicationCommandAsync(add.Build());
@@ -6388,6 +6411,12 @@ public class DiscordPromotionBotWorker(
                 return;
             }
 
+            if (string.Equals(command.Data.Name, "history", StringComparison.OrdinalIgnoreCase))
+            {
+                await HandleHistorySlashCommandAsync(command);
+                return;
+            }
+
             if (string.Equals(command.Data.Name, "help", StringComparison.OrdinalIgnoreCase))
             {
                 await HandleHelpSlashCommandAsync(command);
@@ -7401,6 +7430,236 @@ public class DiscordPromotionBotWorker(
         await RespondAndAutoDeleteAsync(command, $"Queued review-card requeue for `{player.Username}`.", ephemeral: false);
     }
 
+    private async Task HandleHistorySlashCommandAsync(SocketSlashCommand command)
+    {
+        var limit = ParseHistoryRowLimit(command);
+        var everything = ParseHistoryEverything(command);
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+
+        var query = db.LifecycleEvents
+            .Where(x => x.EventType != AppStatusConstants.EventType);
+        if (!everything)
+        {
+            query = query.Where(x => AdminHistoryEventTypes.Contains(x.EventType));
+        }
+
+        var rawRows = await query
+            .OrderByDescending(x => x.CreatedAt)
+            .ThenByDescending(x => x.Id)
+            .Take(everything ? Math.Max(limit * 5, 100) : limit)
+            .Select(x => new
+            {
+                x.Id,
+                x.PlayerId,
+                x.EventType,
+                x.MetadataJson,
+                x.Status,
+                x.CreatedAt,
+                Player = db.Players
+                    .Where(p => p.Id == x.PlayerId)
+                    .Select(p => p.Username)
+                    .FirstOrDefault()
+            })
+            .ToListAsync();
+
+        var rows = rawRows
+            .Select(x => new HistoryEventRow(
+                x.Id,
+                x.PlayerId,
+                x.Player,
+                x.EventType,
+                ReadLifecycleMetadata(x.MetadataJson),
+                x.Status,
+                x.CreatedAt))
+            .Where(x => !IsHistoryCommandLog(x))
+            .Take(limit)
+            .ToList();
+
+        await RespondPrivatelyAsync(command, BuildHistoryEmbed(rows, limit, everything));
+    }
+
+    private Embed BuildHistoryEmbed(IReadOnlyList<HistoryEventRow> rows, int requestedLimit, bool everything)
+    {
+        var builder = new EmbedBuilder()
+            .WithTitle(everything ? "Recent Diagnostic History" : "Recent Admin History")
+            .WithColor(everything ? new Color(96, 165, 250) : new Color(180, 137, 64))
+            .WithDescription(rows.Count == 0
+                ? "No recent history rows found for this view."
+                : everything
+                    ? $"Showing {rows.Count} recent tracker events, including system noise."
+                    : $"Showing {rows.Count} recent admin-relevant events.")
+            .WithFooter($"Rows: {requestedLimit} | Everything: {(everything ? "yes" : "no")}")
+            .WithTimestamp(DateTimeOffset.Now);
+
+        foreach (var row in rows)
+        {
+            builder.AddField(
+                ShortenHistoryText($"{FormatDiscordRelativeTime(row.CreatedAt)} | {FormatHistoryEventLabel(row.EventType)}", 256),
+                BuildHistoryFieldValue(row),
+                false);
+        }
+
+        return builder.Build();
+    }
+
+    private string BuildHistoryFieldValue(HistoryEventRow row)
+    {
+        var summary = BuildHistorySummary(row);
+        var actor = PickLifecycleValue(row.Metadata, "HandledBy", "RequestedBy", "User", "IgnoredBy");
+        var details = new List<string>();
+
+        if (!string.IsNullOrWhiteSpace(actor)) details.Add($"By {EscapeHistoryText(actor)}");
+
+        return details.Count == 0
+            ? ShortenHistoryText(summary, 1024)
+            : ShortenHistoryText($"{summary}\n{string.Join(" | ", details)}", 1024);
+    }
+
+    private static string BuildHistorySummary(HistoryEventRow row)
+    {
+        var player = GetHistoryPlayerName(row);
+        var playerText = string.IsNullOrWhiteSpace(player) ? "Player" : $"`{EscapeInlineCode(player)}`";
+        var action = PickLifecycleValue(row.Metadata, "Action");
+        var commandName = PickLifecycleValue(row.Metadata, "Command", "CommandName");
+        var actor = PickLifecycleValue(row.Metadata, "HandledBy", "RequestedBy", "User", "IgnoredBy");
+        var newPlayer = PickLifecycleValue(row.Metadata, "NewPlayer", "Username", "Player");
+        var previousPlayer = PickLifecycleValue(row.Metadata, "SuggestedPrevious", "PreviousPlayer", "PreviousUsername");
+        var newRank = PickLifecycleValue(row.Metadata, "NewRank");
+        var oldRank = PickLifecycleValue(row.Metadata, "OldRank");
+        var expectedRank = PickLifecycleValue(row.Metadata, "ExpectedRank");
+        var actualWomRole = PickLifecycleValue(row.Metadata, "ActualWomRole");
+        var requestedRole = PickLifecycleValue(row.Metadata, "RequestedRole");
+        var updatedRole = PickLifecycleValue(row.Metadata, "UpdatedRole");
+
+        return row.EventType switch
+        {
+            "NEW_PLAYER" => $"{playerText} joined the tracker and needs review.",
+            "MISSING_IN_ROSTER" => $"{playerText} disappeared from the roster.",
+            "STATUS_UPDATED" => $"{playerText} moved to `{EscapeInlineCode(PickLifecycleValue(row.Metadata, "Status") ?? row.Status)}`.",
+            "PRIORITY_UPDATE_REQUEST" => $"{playerText} was queued for immediate sync.",
+            "MERGE_SUGGESTED" => $"Possible rename: `{EscapeInlineCode(newPlayer ?? "new player")}` may be `{EscapeInlineCode(previousPlayer ?? "previous player")}`.",
+            "MERGE_ACTION_REQUIRED" => $"Rename review opened for `{EscapeInlineCode(newPlayer ?? player ?? "player")}`.",
+            "MERGE_ACTION_APPLIED" => $"Rename review resolved: `{EscapeInlineCode(action ?? "unknown")}`.",
+            "TEMPLE_MISSING_ACTION_REQUIRED" => $"{playerText} needs a Temple decision.",
+            "TEMPLE_MISSING_ACTION_APPLIED" => $"{playerText} Temple review resolved: `{EscapeInlineCode(action ?? "unknown")}`.",
+            "WOM_MISSING_ACTION_REQUIRED" => $"{playerText} needs a Wise Old Man decision.",
+            "WOM_MISSING_ACTION_APPLIED" => $"{playerText} Wise Old Man review resolved: `{EscapeInlineCode(action ?? "unknown")}`.",
+            "WOM_ONLY_ACTION_REQUIRED" => $"{playerText} is in Wise Old Man only.",
+            "WOM_ONLY_ACTION_APPLIED" => $"{playerText} Wise Old Man only review resolved: `{EscapeInlineCode(action ?? "unknown")}`.",
+            "WOM_RANK_MISMATCH_REQUIRED" => $"{playerText} rank mismatch: tracker `{EscapeInlineCode(expectedRank ?? "unknown")}`, WOM `{EscapeInlineCode(actualWomRole ?? "unknown")}`.",
+            "WOM_RANK_MISMATCH_ACTION_APPLIED" => $"{playerText} rank mismatch resolved: `{EscapeInlineCode(action ?? "unknown")}`.",
+            "WOM_ROLE_UPDATE_APPLIED" => $"{playerText} WOM role update: `{EscapeInlineCode(requestedRole ?? "unknown")}` -> `{EscapeInlineCode(updatedRole ?? "unknown")}`.",
+            "PROMOTION_CANDIDATE_CREATED" => oldRank is null || newRank is null
+                ? $"{playerText} is ready for promotion."
+                : $"{playerText} is ready for promotion: `{EscapeInlineCode(oldRank)}` -> `{EscapeInlineCode(newRank)}`.",
+            "PROMOTION_DISCORD_POSTED" => $"{playerText} promotion card was posted.",
+            "PROMOTION_DISCORD_ACTION_APPLIED" => $"{playerText} promotion resolved: `{EscapeInlineCode(action ?? "unknown")}`.",
+            "DISCORD_MARK_RENAME_SUSPECT" => $"{playerText} promotion flagged as possible rename.",
+            "DISCORD_REVIEW_REQUEUE_REQUESTED" => $"{playerText} review card was requeued.",
+            "DISCORD_POSTED_MESSAGE_MISSING" => $"{playerText} Discord review card is missing.",
+            "DISCORD_SLASH_COMMAND_USED" => string.IsNullOrWhiteSpace(commandName)
+                ? $"Slash command used{(string.IsNullOrWhiteSpace(actor) ? "" : $" by {EscapeHistoryText(actor)}")}."
+                : $"Slash command `/{EscapeInlineCode(commandName)}` used{(string.IsNullOrWhiteSpace(actor) ? "" : $" by {EscapeHistoryText(actor)}")}.",
+            "PLAYER_SNAPSHOT_CONTAMINATION_REQUIRED" => $"{playerText} has suspicious stat data and needs review.",
+            "PET_HISCORES_DISCORD_POSTED" => $"Pet hiscores page `{EscapeInlineCode(PickLifecycleValue(row.Metadata, "Page") ?? "unknown")}` was posted.",
+            "PET_HISCORES_BANNER_POSTED" => "Pet hiscores banner was posted.",
+            _ => $"{FormatHistoryEventName(row.EventType)} was recorded."
+        };
+    }
+
+    private static int ParseHistoryRowLimit(SocketSlashCommand command)
+    {
+        var raw = command.Data.Options.FirstOrDefault(x => x.Name == "rows")?.Value;
+        if (raw is null) return 5;
+
+        try
+        {
+            return Math.Clamp(Convert.ToInt32(raw, CultureInfo.InvariantCulture), 1, 25);
+        }
+        catch
+        {
+            return 5;
+        }
+    }
+
+    private static bool ParseHistoryEverything(SocketSlashCommand command)
+    {
+        var raw = command.Data.Options.FirstOrDefault(x => x.Name == "everything")?.Value;
+        return raw is bool value && value;
+    }
+
+    private static bool IsHistoryCommandLog(HistoryEventRow row)
+    {
+        return string.Equals(row.EventType, "DISCORD_SLASH_COMMAND_USED", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(PickLifecycleValue(row.Metadata, "Command", "CommandName"), "history", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string? GetHistoryPlayerName(HistoryEventRow row)
+    {
+        return row.EventType.StartsWith("WOM_ONLY_", StringComparison.OrdinalIgnoreCase)
+            ? PickLifecycleValue(row.Metadata, "Username", "Player") ?? row.Player
+            : row.Player ?? PickLifecycleValue(row.Metadata, "Username", "Player", "NewPlayer");
+    }
+
+    private static string FormatHistoryEventName(string eventType)
+    {
+        var text = eventType.Replace("_", " ");
+        return CultureInfo.InvariantCulture.TextInfo.ToTitleCase(text.ToLowerInvariant());
+    }
+
+    private static string FormatHistoryEventLabel(string eventType)
+    {
+        return eventType switch
+        {
+            "PROMOTION_CANDIDATE_CREATED" => "Promotion ready",
+            "PROMOTION_DISCORD_ACTION_APPLIED" => "Promotion resolved",
+            "NEW_PLAYER" => "New member",
+            "MISSING_IN_ROSTER" => "Missing member",
+            "STATUS_UPDATED" => "Status changed",
+            "MERGE_SUGGESTED" => "Possible rename",
+            "MERGE_ACTION_APPLIED" => "Rename resolved",
+            "TEMPLE_MISSING_ACTION_APPLIED" => "Temple resolved",
+            "WOM_MISSING_ACTION_APPLIED" => "WOM resolved",
+            "WOM_ONLY_ACTION_APPLIED" => "WOM-only resolved",
+            "WOM_RANK_MISMATCH_REQUIRED" => "Rank mismatch",
+            "WOM_RANK_MISMATCH_ACTION_APPLIED" => "Rank fixed",
+            "WOM_ROLE_UPDATE_APPLIED" => "WOM role update",
+            "PLAYER_SNAPSHOT_CONTAMINATION_REQUIRED" => "Snapshot warning",
+            _ => FormatHistoryEventName(eventType)
+        };
+    }
+
+    private static string FormatDiscordRelativeTime(DateTimeOffset value)
+    {
+        return $"<t:{value.ToUnixTimeSeconds()}:R>";
+    }
+
+    private static string EscapeHistoryText(string value)
+    {
+        return value.Replace("`", "'", StringComparison.Ordinal);
+    }
+
+    private static string ShortenHistoryText(string value, int maxLength)
+    {
+        if (value.Length <= maxLength) return value;
+        return value[..Math.Max(0, maxLength - 3)] + "...";
+    }
+
+    private static async Task RespondPrivatelyAsync(SocketSlashCommand command, Embed embed)
+    {
+        await command.FollowupAsync(embed: embed, ephemeral: true);
+    }
+
+    private sealed record HistoryEventRow(
+        int Id,
+        int PlayerId,
+        string? Player,
+        string EventType,
+        Dictionary<string, string> Metadata,
+        string Status,
+        DateTimeOffset CreatedAt);
+
     private async Task HandleShowIgnoredSlashCommandAsync(SocketSlashCommand command)
     {
         await using var scope = scopeFactory.CreateAsyncScope();
@@ -7463,64 +7722,67 @@ public class DiscordPromotionBotWorker(
     {
         var helpText = """
 ### Info / Sync
+**/history [rows]**  
+Shows recent admin history privately. Rows can be 1-25. Set `everything` to include bot/system events.
+
 **/discord-guess <player>**  
-Visar botens bästa Discord-matchning för spelaren med klickbar mention
+Shows the bot's best Discord member match for a tracked player, including a clickable mention.
 
 **/discord-rank-check <player>**  
-Checks an exact Discord match's rank role against the database
+Checks an exact Discord match's rank role against the database.
 
 **/discord-rank-audit**  
-Runs a read-only exact-match rank role audit and attaches a CSV
+Runs a read-only exact-match rank role audit and attaches a CSV.
 
 **/discord-rank-set <user> <rank>**  
-Replaces a Discord member's configured rank roles with the selected rank role
+Replaces a Discord member's configured rank roles with the selected rank role.
 
 **/discord-rank-review-post**  
-Posts review cards for actionable Discord rank role mismatches
+Posts review cards for actionable Discord rank role mismatches.
 
 **/lookup <player>**  
-Visar spelarens sammanfattning (rank, stats, pets, Temple/WOM-status, senaste sync)
+Shows a player summary: rank, stats, pets, Temple/WOM status, and latest sync.
 
 **/update <player>**  
-Prioriterar spelaren i uppdateringskön för snabb sync
+Prioritizes a player in the update queue for a faster sync.
 
 **/set-pets <player> <count>**  
-Sätter manuell pet count override för spelaren
+Sets a manual pet count override for a player.
 
-### Temple / WOM medlemskap
+### Temple / WOM Membership
 **/temple-add <players>**  
-Lägger till en eller flera spelare i TempleOSRS  
-Format: kommaseparerat, t.ex. A, B, C
+Adds one or more players to TempleOSRS.  
+Format: comma-separated, for example A, B, C.
 
 **/temple-remove <players>**  
-Tar bort en eller flera spelare från TempleOSRS
+Removes one or more players from TempleOSRS.
 
 **/wom-add <players>**  
-Lägger till en eller flera spelare i WiseOldMan
+Adds one or more players to Wise Old Man.
 
 **/wom-remove <players>**  
-Tar bort en eller flera spelare från WiseOldMan
+Removes one or more players from Wise Old Man.
 
 **/add <players>**  
-Kombokommando: lägger till spelare i både TempleOSRS och WiseOldMan
+Combo command: adds players to both TempleOSRS and Wise Old Man.
 
 **/remove <players>**  
-Kombokommando: tar bort spelare från både TempleOSRS och WiseOldMan
+Combo command: removes players from both TempleOSRS and Wise Old Man.
 
 **/wom-role-update <player> <rank>**  
-Uppdaterar spelarens rank i WiseOldMan
+Updates a player's Wise Old Man group role.
 
-### Review / Ignore-hantering
+### Review / Ignore Handling
 **/requeue-review-card <player>**  
-Tvingar ompostning/återskapande av review-kort för spelaren om review fortfarande är aktiv
+Forces review card reposting/recreation for a player when the review is still active.
 
 **/unignore <player>**  
-Tar bort ignore för spelaren i:
+Removes ignore flags for a player in:
 - WOM-only ignore
 - WOM rank mismatch ignore
 
 **/show-ignored**  
-Visar alla spelare som just nu är ignorerade i:
+Shows all currently ignored players in:
 - WOM-only
 - WOM rank mismatch
 """;
@@ -7741,6 +8003,7 @@ Visar alla spelare som just nu är ignorerade i:
     {
         return string.Equals(commandName, "lookup", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(commandName, "update", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(commandName, "history", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(commandName, "help", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(commandName, "show-ignored", StringComparison.OrdinalIgnoreCase);
     }
@@ -7766,6 +8029,7 @@ Visar alla spelare som just nu är ignorerade i:
             string.Equals(commandName, "discord-rank-audit", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(commandName, "discord-rank-set", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(commandName, "discord-rank-review-post", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(commandName, "history", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(commandName, "set-pets", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(commandName, "add", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(commandName, "remove", StringComparison.OrdinalIgnoreCase) ||
