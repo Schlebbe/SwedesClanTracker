@@ -812,9 +812,7 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
 
     private static bool IsSpecialWomRole(string role)
     {
-        string[] specialRoles = ["imp", "Kitten", "Administrator", "Deputy Owner", "Owner", "short green guy", "member", "recruit", "apothecary"];
-        var normalized = NormalizeRankName(role);
-        return specialRoles.Any(x => string.Equals(x, normalized, StringComparison.OrdinalIgnoreCase));
+        return RankRules.IsSpecialWomRole(role);
     }
 
     private static bool IsWomOnlyIgnoredRole(string role)
