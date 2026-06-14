@@ -552,6 +552,14 @@ public class DiscordPromotionBotWorker(
             var discordRankAudit = new SlashCommandBuilder()
                 .WithName("discord-rank-audit")
                 .WithDescription("Audit exact Discord matches for rank-role mismatches and return a CSV.");
+            var discordRankSet = new SlashCommandBuilder()
+                .WithName("discord-rank-set")
+                .WithDescription("Replace a Discord member's clan rank role with the selected rank.")
+                .AddOption("user", ApplicationCommandOptionType.User, "Discord member to update", isRequired: true)
+                .AddOption(BuildDiscordRankRoleOption());
+            var discordRankReviewPost = new SlashCommandBuilder()
+                .WithName("discord-rank-review-post")
+                .WithDescription("Post actionable Discord rank role review cards for current mismatches.");
             var help = new SlashCommandBuilder()
                 .WithName("help")
                 .WithDescription("Visar alla tillgängliga kommandon och vad de gör.");
@@ -609,6 +617,8 @@ public class DiscordPromotionBotWorker(
             await socketGuild.CreateApplicationCommandAsync(discordGuess.Build());
             await socketGuild.CreateApplicationCommandAsync(discordRankCheck.Build());
             await socketGuild.CreateApplicationCommandAsync(discordRankAudit.Build());
+            await socketGuild.CreateApplicationCommandAsync(discordRankSet.Build());
+            await socketGuild.CreateApplicationCommandAsync(discordRankReviewPost.Build());
             await socketGuild.CreateApplicationCommandAsync(help.Build());
             await socketGuild.CreateApplicationCommandAsync(update.Build());
             await socketGuild.CreateApplicationCommandAsync(add.Build());
@@ -643,6 +653,22 @@ public class DiscordPromotionBotWorker(
         foreach (var role in WomRoleChoices)
         {
             option.AddChoice(role.Label, role.Value);
+        }
+
+        return option;
+    }
+
+    private static SlashCommandOptionBuilder BuildDiscordRankRoleOption()
+    {
+        var option = new SlashCommandOptionBuilder()
+            .WithName("rank")
+            .WithDescription("Discord rank role to assign")
+            .WithType(ApplicationCommandOptionType.String)
+            .WithRequired(true);
+
+        foreach (var rank in DiscordRankNames)
+        {
+            option.AddChoice(rank, rank);
         }
 
         return option;
@@ -784,6 +810,16 @@ public class DiscordPromotionBotWorker(
                 return;
             }
             await HandleMergeButtonAsync(component, parts);
+            return;
+        }
+        if (parts[0] == "drankreview")
+        {
+            if (parts.Length < 2)
+            {
+                await RespondToComponentAsync(component, "Unknown action.", ephemeral: true);
+                return;
+            }
+            await HandleDiscordRankReviewButtonAsync(component, parts);
             return;
         }
         if (parts[0] != "promo" || parts.Length != 3) return;
@@ -1162,6 +1198,18 @@ public class DiscordPromotionBotWorker(
         {
             if (!component.HasResponded) await component.DeferAsync(ephemeral: true);
             var customId = component.Data.CustomId ?? "";
+            if (customId.StartsWith("drankreview:", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!HasDiscordAdminRole(component.User))
+                {
+                    await RespondToComponentAsync(component, "You need the admin role for this action.", ephemeral: true);
+                    return;
+                }
+
+                await HandleDiscordRankReviewManualSelectAsync(component, customId);
+                return;
+            }
+
             if (!customId.StartsWith("mergepick:", StringComparison.OrdinalIgnoreCase)) return;
             if (!HasDiscordAdminRole(component.User))
             {
@@ -6209,6 +6257,18 @@ public class DiscordPromotionBotWorker(
                 return;
             }
 
+            if (string.Equals(command.Data.Name, "discord-rank-set", StringComparison.OrdinalIgnoreCase))
+            {
+                await HandleDiscordRankSetSlashCommandAsync(command);
+                return;
+            }
+
+            if (string.Equals(command.Data.Name, "discord-rank-review-post", StringComparison.OrdinalIgnoreCase))
+            {
+                await HandleDiscordRankReviewPostSlashCommandAsync(command);
+                return;
+            }
+
             if (string.Equals(command.Data.Name, "help", StringComparison.OrdinalIgnoreCase))
             {
                 await HandleHelpSlashCommandAsync(command);
@@ -6403,7 +6463,7 @@ public class DiscordPromotionBotWorker(
         var playerRaw = command.Data.Options.FirstOrDefault(x => x.Name == "player")?.Value?.ToString()?.Trim();
         if (string.IsNullOrWhiteSpace(playerRaw))
         {
-            await RespondAndAutoDeleteAsync(command, "Please provide a player username.", ephemeral: true);
+            await RespondAndAutoDeleteAsync(command, "Please provide a player username.", ephemeral: false);
             return;
         }
 
@@ -6419,17 +6479,19 @@ public class DiscordPromotionBotWorker(
 
             if (player is null)
             {
-                await RespondAndAutoDeleteAsync(command, $"No player found for `{EscapeInlineCode(playerRaw)}`.", ephemeral: true);
+                await RespondAndAutoDeleteAsync(command, $"No player found for `{EscapeInlineCode(playerRaw)}`.", ephemeral: false);
                 return;
             }
 
+            var hasWomRankMismatchIgnore = await HasOpenWomRankMismatchIgnoreAsync(db, player.Id, timeout.Token);
+            player = player with { WomRankMismatchIgnored = hasWomRankMismatchIgnore };
             var result = await CheckDiscordRankForPlayerAsync(db, player, cachedMembers: null, timeout.Token);
-            await RespondAndAutoDeleteAsync(command, BuildDiscordRankCheckEmbed(result), ephemeral: true);
+            await RespondAndAutoDeleteAsync(command, BuildDiscordRankCheckEmbed(result), ephemeral: false);
         }
         catch (OperationCanceledException) when (timeout.IsCancellationRequested)
         {
             logger.LogWarning("Discord rank check slash command timed out for {Player}.", playerRaw);
-            await RespondAndAutoDeleteAsync(command, $"Discord rank check timed out for `{EscapeInlineCode(playerRaw)}`. Try again in a moment.", ephemeral: true);
+            await RespondAndAutoDeleteAsync(command, $"Discord rank check timed out for `{EscapeInlineCode(playerRaw)}`. Try again in a moment.", ephemeral: false);
         }
     }
 
@@ -6440,20 +6502,7 @@ public class DiscordPromotionBotWorker(
         {
             await using var scope = scopeFactory.CreateAsyncScope();
             var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
-            var players = await db.Players
-                .Where(x => x.Status != PlayerStatus.REMOVED_CONFIRMED)
-                .OrderBy(x => x.Username)
-                .Select(x => new DiscordRankAuditPlayer(x.Id, x.Username, x.CurrentRank, x.Status))
-                .ToListAsync(timeout.Token);
-
-            var cachedMembers = await GetCachedDiscordMembersAsync(timeout.Token);
-            var results = new List<DiscordRankAuditResult>(players.Count);
-            foreach (var player in players)
-            {
-                timeout.Token.ThrowIfCancellationRequested();
-                results.Add(await CheckDiscordRankForPlayerAsync(db, player, cachedMembers, timeout.Token));
-            }
-
+            var results = await BuildDiscordRankAuditResultsAsync(db, timeout.Token);
             var embed = BuildDiscordRankAuditSummaryEmbed(results);
             var csv = BuildDiscordRankAuditCsv(results);
             await RespondWithCsvAsync(command, embed, csv, $"discord-rank-audit-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}.csv");
@@ -6461,8 +6510,140 @@ public class DiscordPromotionBotWorker(
         catch (OperationCanceledException) when (timeout.IsCancellationRequested)
         {
             logger.LogWarning("Discord rank audit slash command timed out.");
-            await RespondAndAutoDeleteAsync(command, "Discord rank audit timed out. Try again after the member cache has warmed up.", ephemeral: true);
+            await RespondAndAutoDeleteAsync(command, "Discord rank audit timed out. Try again after the member cache has warmed up.", ephemeral: false);
         }
+    }
+
+    private async Task HandleDiscordRankReviewPostSlashCommandAsync(SocketSlashCommand command)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+        try
+        {
+            if (!command.ChannelId.HasValue)
+            {
+                await RespondAndAutoDeleteAsync(command, "This command must be run in a Discord channel.", ephemeral: false);
+                return;
+            }
+
+            var channel = await ResolveMessageChannelAsync(command.ChannelId.Value);
+            if (channel is null)
+            {
+                await RespondAndAutoDeleteAsync(command, "Could not resolve the Discord channel for review cards.", ephemeral: false);
+                return;
+            }
+
+            await using var scope = scopeFactory.CreateAsyncScope();
+            var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+            var results = await BuildDiscordRankAuditResultsAsync(db, timeout.Token);
+            var actionable = results
+                .Where(IsActionableDiscordRankReviewResult)
+                .OrderBy(x => DiscordRankAuditCsvSortOrder(x.Verdict))
+                .ThenBy(x => RankRules.RankOrder(x.DatabaseRank))
+                .ThenBy(x => x.Username, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            foreach (var result in actionable)
+            {
+                timeout.Token.ThrowIfCancellationRequested();
+                await channel.SendMessageAsync(
+                    embed: BuildDiscordRankReviewEmbed(result),
+                    components: BuildDiscordRankReviewComponents(result));
+            }
+
+            await RespondAndAutoDeleteAsync(
+                command,
+                $"Posted {actionable.Count} Discord rank review card(s). Wrong: {actionable.Count(x => x.Verdict == "WrongRankRole")}, multiple: {actionable.Count(x => x.Verdict == "MultipleRankRoles")}, missing: {actionable.Count(x => x.Verdict == "MissingExpectedRankRole")}.",
+                ephemeral: false);
+        }
+        catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+        {
+            logger.LogWarning("Discord rank review post slash command timed out.");
+            await RespondAndAutoDeleteAsync(command, "Discord rank review posting timed out. Try again in a moment.", ephemeral: false);
+        }
+    }
+
+    private async Task HandleDiscordRankSetSlashCommandAsync(SocketSlashCommand command)
+    {
+        using var timeout = new CancellationTokenSource(DiscordGuessCommandTimeout);
+        try
+        {
+            var guild = _client?.GetGuild(_options.GuildId);
+            if (guild is null)
+            {
+                await RespondAndAutoDeleteAsync(command, "Discord guild is not available in the bot cache.", ephemeral: false);
+                return;
+            }
+
+            var rank = command.Data.Options.FirstOrDefault(x => x.Name == "rank")?.Value?.ToString()?.Trim();
+            if (string.IsNullOrWhiteSpace(rank) || !DiscordRankNames.Contains(rank, StringComparer.OrdinalIgnoreCase))
+            {
+                await RespondAndAutoDeleteAsync(command, "Please select a valid Discord rank role.", ephemeral: false);
+                return;
+            }
+
+            var rankRoles = BuildDiscordRankRoleConfiguration(guild);
+            if (rankRoles.MissingRanks.Contains(rank, StringComparer.OrdinalIgnoreCase))
+            {
+                await RespondAndAutoDeleteAsync(command, $"No configured Discord role ID for `{EscapeInlineCode(rank)}`.", ephemeral: false);
+                return;
+            }
+
+            var selectedRole = rankRoles.RolesByRank[rank];
+            var guildRole = guild.GetRole(selectedRole.RoleId);
+            if (guildRole is null)
+            {
+                await RespondAndAutoDeleteAsync(command, $"Configured Discord role for `{EscapeInlineCode(rank)}` was not found in this guild.", ephemeral: false);
+                return;
+            }
+
+            var guildUser = await ResolveSelectedGuildUserAsync(command, guild, timeout.Token);
+            if (guildUser is null)
+            {
+                await RespondAndAutoDeleteAsync(command, "Please select a valid Discord guild member.", ephemeral: false);
+                return;
+            }
+
+            var update = await ApplyDiscordRankRoleAsync(guildUser, selectedRole, rankRoles);
+            var embed = BuildDiscordRankSetEmbed(guildUser, selectedRole, update.RemovedRoles, update.AddedRole, command.User.Username);
+            await RespondAndAutoDeleteAsync(command, embed, ephemeral: false);
+        }
+        catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+        {
+            logger.LogWarning("Discord rank set slash command timed out.");
+            await RespondAndAutoDeleteAsync(command, "Discord rank update timed out. Try again in a moment.", ephemeral: false);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Discord rank set slash command failed.");
+            await RespondAndAutoDeleteAsync(command, $"Discord rank update failed: {EscapeInlineCode(ex.Message)}", ephemeral: false);
+        }
+    }
+
+    private async Task<IReadOnlyList<DiscordRankAuditResult>> BuildDiscordRankAuditResultsAsync(TrackerDbContext db, CancellationToken ct)
+    {
+        var players = await db.Players
+            .Where(x => x.Status != PlayerStatus.REMOVED_CONFIRMED)
+            .OrderBy(x => x.Username)
+            .Select(x => new DiscordRankAuditPlayer(x.Id, x.Username, x.CurrentRank, x.Status))
+            .ToListAsync(ct);
+        var ignoredMismatchPlayerIds = await db.LifecycleEvents
+            .Where(x => x.EventType == "WOM_RANK_MISMATCH_IGNORED" && x.Status == "OPEN")
+            .Select(x => x.PlayerId)
+            .Distinct()
+            .ToHashSetAsync(ct);
+        players = players
+            .Select(x => x with { WomRankMismatchIgnored = ignoredMismatchPlayerIds.Contains(x.Id) })
+            .ToList();
+
+        var cachedMembers = await GetCachedDiscordMembersAsync(ct);
+        var results = new List<DiscordRankAuditResult>(players.Count);
+        foreach (var player in players)
+        {
+            ct.ThrowIfCancellationRequested();
+            results.Add(await CheckDiscordRankForPlayerAsync(db, player, cachedMembers, ct));
+        }
+
+        return results;
     }
 
     private async Task<DiscordRankAuditResult> CheckDiscordRankForPlayerAsync(
@@ -6533,6 +6714,7 @@ public class DiscordPromotionBotWorker(
         {
             0 => "MissingExpectedRankRole",
             1 when foundRankRoles[0].RoleId == expectedRole.RoleId => "OK",
+            1 when player.WomRankMismatchIgnored && RankRules.RankOrder(foundRankRoles[0].Rank) > RankRules.RankOrder(normalizedRank) => "AllowedHigherRankIgnored",
             1 => "WrongRankRole",
             _ => "MultipleRankRoles"
         };
@@ -6540,6 +6722,7 @@ public class DiscordPromotionBotWorker(
         var details = verdict switch
         {
             "OK" => "Discord rank role matches the database rank.",
+            "AllowedHigherRankIgnored" => "Discord rank role is higher than the database rank, but an open WOM rank mismatch ignore allows this exception.",
             "MissingExpectedRankRole" => "No configured rank role was found on the Discord member.",
             "WrongRankRole" => "A configured rank role was found, but it does not match the database rank.",
             _ => "Multiple configured rank roles were found on the Discord member."
@@ -6547,6 +6730,13 @@ public class DiscordPromotionBotWorker(
 
         return DiscordRankAuditResult.WithMatch(player, verdict, details, expectedRole, foundRankRoles, match);
     }
+
+    private static Task<bool> HasOpenWomRankMismatchIgnoreAsync(TrackerDbContext db, int playerId, CancellationToken ct) =>
+        db.LifecycleEvents.AnyAsync(x =>
+            x.PlayerId == playerId &&
+            x.EventType == "WOM_RANK_MISMATCH_IGNORED" &&
+            x.Status == "OPEN",
+            ct);
 
     private DiscordRankRoleConfiguration BuildDiscordRankRoleConfiguration(SocketGuild guild)
     {
@@ -6598,12 +6788,236 @@ public class DiscordPromotionBotWorker(
             .ToList();
     }
 
+    private static async Task<DiscordRankRoleUpdateResult> ApplyDiscordRankRoleAsync(
+        IGuildUser guildUser,
+        DiscordRankRole selectedRole,
+        DiscordRankRoleConfiguration rankRoles)
+    {
+        var existingRankRoles = GetDiscordRankRolesForUser(guildUser, rankRoles);
+        var removeRoleIds = existingRankRoles
+            .Where(x => x.RoleId != selectedRole.RoleId)
+            .Select(x => x.RoleId)
+            .Distinct()
+            .ToList();
+        var userRoleIds = guildUser is SocketGuildUser socketUser
+            ? socketUser.Roles.Select(x => x.Id).ToHashSet()
+            : guildUser.RoleIds.ToHashSet();
+        var addRole = !userRoleIds.Contains(selectedRole.RoleId);
+
+        foreach (var roleId in removeRoleIds)
+        {
+            await guildUser.RemoveRoleAsync(roleId);
+        }
+
+        if (addRole)
+        {
+            await guildUser.AddRoleAsync(selectedRole.RoleId);
+        }
+
+        var removedRoles = existingRankRoles
+            .Where(x => removeRoleIds.Contains(x.RoleId))
+            .ToList();
+        return new DiscordRankRoleUpdateResult(removedRoles, addRole);
+    }
+
     private static async Task<IGuildUser?> ResolveGuildUserAsync(SocketGuild guild, ulong userId, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
         var socketUser = guild.GetUser(userId);
         if (socketUser is not null) return socketUser;
         return await ((IGuild)guild).GetUserAsync(userId, CacheMode.AllowDownload);
+    }
+
+    private static async Task<IGuildUser?> ResolveSelectedGuildUserAsync(SocketSlashCommand command, SocketGuild guild, CancellationToken ct)
+    {
+        var userValue = command.Data.Options.FirstOrDefault(x => x.Name == "user")?.Value;
+        return userValue switch
+        {
+            IGuildUser guildUser => guildUser,
+            IUser user => await ResolveGuildUserAsync(guild, user.Id, ct),
+            ulong userId => await ResolveGuildUserAsync(guild, userId, ct),
+            _ when ulong.TryParse(userValue?.ToString(), out var parsedUserId) => await ResolveGuildUserAsync(guild, parsedUserId, ct),
+            _ => null
+        };
+    }
+
+    private async Task HandleDiscordRankReviewButtonAsync(SocketMessageComponent component, string[] parts)
+    {
+        var action = parts[1];
+        if (string.Equals(action, "dismiss", StringComparison.OrdinalIgnoreCase))
+        {
+            await RespondToComponentAsync(component, "Dismissed Discord rank review card.", ephemeral: true);
+            await DeleteDiscordRankReviewCardAsync(component);
+            return;
+        }
+
+        if (!string.Equals(action, "accept", StringComparison.OrdinalIgnoreCase) ||
+            parts.Length != 4 ||
+            !ulong.TryParse(parts[2], out var userId))
+        {
+            await RespondToComponentAsync(component, "Unknown action.", ephemeral: true);
+            return;
+        }
+
+        var rank = parts[3];
+        await ApplyDiscordRankReviewRoleAsync(component, userId, rank, "Accepted");
+    }
+
+    private async Task HandleDiscordRankReviewManualSelectAsync(SocketMessageComponent component, string customId)
+    {
+        var parts = customId.Split(':');
+        if (parts.Length != 3 ||
+            !string.Equals(parts[0], "drankreview", StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(parts[1], "manual", StringComparison.OrdinalIgnoreCase) ||
+            !ulong.TryParse(parts[2], out var userId))
+        {
+            await RespondToComponentAsync(component, "Malformed rank selection.", ephemeral: true);
+            return;
+        }
+
+        var rank = component.Data.Values.FirstOrDefault();
+        if (string.IsNullOrWhiteSpace(rank))
+        {
+            await RespondToComponentAsync(component, "No rank selected.", ephemeral: true);
+            return;
+        }
+
+        await ApplyDiscordRankReviewRoleAsync(component, userId, rank, "Manual rank");
+    }
+
+    private async Task ApplyDiscordRankReviewRoleAsync(SocketMessageComponent component, ulong userId, string rank, string actionLabel)
+    {
+        try
+        {
+            var guild = _client?.GetGuild(_options.GuildId);
+            if (guild is null)
+            {
+                await RespondToComponentAsync(component, "Discord guild is not available in the bot cache.", ephemeral: true);
+                return;
+            }
+
+            if (!DiscordRankNames.Contains(rank, StringComparer.OrdinalIgnoreCase))
+            {
+                await RespondToComponentAsync(component, "Selected rank is not a configured clan rank.", ephemeral: true);
+                return;
+            }
+
+            var rankRoles = BuildDiscordRankRoleConfiguration(guild);
+            if (rankRoles.MissingRanks.Contains(rank, StringComparer.OrdinalIgnoreCase))
+            {
+                await RespondToComponentAsync(component, $"No configured Discord role ID for `{EscapeInlineCode(rank)}`.", ephemeral: true);
+                return;
+            }
+
+            var selectedRole = rankRoles.RolesByRank[rank];
+            if (guild.GetRole(selectedRole.RoleId) is null)
+            {
+                await RespondToComponentAsync(component, $"Configured Discord role for `{EscapeInlineCode(rank)}` was not found in this guild.", ephemeral: true);
+                return;
+            }
+
+            var guildUser = await ResolveGuildUserAsync(guild, userId, CancellationToken.None);
+            if (guildUser is null)
+            {
+                await RespondToComponentAsync(component, "Discord member could not be resolved.", ephemeral: true);
+                return;
+            }
+
+            var update = await ApplyDiscordRankRoleAsync(guildUser, selectedRole, rankRoles);
+            var removedText = update.RemovedRoles.Count == 0
+                ? "none"
+                : string.Join(", ", update.RemovedRoles.Select(x => x.RoleName));
+            await RespondToComponentAsync(
+                component,
+                $"{actionLabel}: set {guildUser.Mention} to {FormatDiscordRoleMention(selectedRole.RoleId, selectedRole.RoleName)}. Removed: {removedText}.",
+                ephemeral: true);
+            await DeleteDiscordRankReviewCardAsync(component);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed applying Discord rank review action.");
+            await RespondToComponentAsync(component, $"Discord rank update failed: {EscapeInlineCode(ex.Message)}", ephemeral: true);
+        }
+    }
+
+    private static async Task DeleteDiscordRankReviewCardAsync(SocketMessageComponent component)
+    {
+        try
+        {
+            await component.Message.DeleteAsync();
+        }
+        catch
+        {
+            // best-effort cleanup; the ephemeral acknowledgement above still tells the officer what happened.
+        }
+    }
+
+    private static bool IsActionableDiscordRankReviewResult(DiscordRankAuditResult result) =>
+        result.DiscordUserId.HasValue &&
+        result.Verdict is "WrongRankRole" or "MultipleRankRoles" or "MissingExpectedRankRole";
+
+    private static Embed BuildDiscordRankReviewEmbed(DiscordRankAuditResult result)
+    {
+        var currentRoles = FormatDiscordRoleMentions(result.FoundRoleIds, result.FoundRoleNames);
+        return new EmbedBuilder()
+            .WithTitle("Discord Rank Review")
+            .WithColor(new Color(245, 158, 11))
+            .WithDescription("Review the exact Discord match before applying a role change.")
+            .AddField("Player", result.Username, true)
+            .AddField("Discord Member", result.DiscordMention ?? "N/A", true)
+            .AddField("Verdict", result.Verdict, true)
+            .AddField("Should Have", FormatDiscordRoleMention(result.ExpectedRoleId, result.ExpectedRoleName), true)
+            .AddField("Currently Has", currentRoles, true)
+            .AddField("Matched On", string.IsNullOrWhiteSpace(result.MatchedField) ? "N/A" : $"{result.MatchedField}: `{EscapeInlineCode(result.MatchedValue ?? "")}`", false)
+            .WithTimestamp(DateTimeOffset.Now)
+            .Build();
+    }
+
+    private static MessageComponent BuildDiscordRankReviewComponents(DiscordRankAuditResult result)
+    {
+        var userId = result.DiscordUserId!.Value;
+        var rank = RankRules.NormalizeRankName(result.DatabaseRank);
+        var menu = new SelectMenuBuilder()
+            .WithCustomId($"drankreview:manual:{userId}")
+            .WithPlaceholder("Manual rank")
+            .WithMinValues(1)
+            .WithMaxValues(1);
+
+        foreach (var rankName in DiscordRankNames)
+        {
+            menu.AddOption(rankName, rankName);
+        }
+
+        return new ComponentBuilder()
+            .WithButton("Accept", $"drankreview:accept:{userId}:{rank}", ButtonStyle.Success)
+            .WithButton("Dismiss", $"drankreview:dismiss:{userId}", ButtonStyle.Secondary)
+            .WithSelectMenu(menu)
+            .Build();
+    }
+
+    private static Embed BuildDiscordRankSetEmbed(
+        IGuildUser guildUser,
+        DiscordRankRole assignedRole,
+        IReadOnlyList<DiscordRankRole> removedRoles,
+        bool addedRole,
+        string handledBy)
+    {
+        var removedText = removedRoles.Count == 0
+            ? "None"
+            : FormatDiscordRoleMentions(removedRoles.Select(x => x.RoleId).ToList(), removedRoles.Select(x => x.RoleName).ToList());
+        var actionText = addedRole
+            ? $"Added {FormatDiscordRoleMention(assignedRole.RoleId, assignedRole.RoleName)}"
+            : $"{FormatDiscordRoleMention(assignedRole.RoleId, assignedRole.RoleName)} was already present";
+
+        return new EmbedBuilder()
+            .WithTitle("Discord Rank Role Updated")
+            .WithColor(new Color(34, 197, 94))
+            .AddField("Member", guildUser.Mention, true)
+            .AddField("Assigned Rank Role", actionText, true)
+            .AddField("Removed Rank Roles", removedText, false)
+            .WithFooter($"Handled by {handledBy}")
+            .WithTimestamp(DateTimeOffset.Now)
+            .Build();
     }
 
     private static Embed BuildDiscordRankCheckEmbed(DiscordRankAuditResult result)
@@ -6623,6 +7037,7 @@ public class DiscordPromotionBotWorker(
             .AddField("Discord Match", string.IsNullOrWhiteSpace(result.DiscordMention) ? "N/A" : result.DiscordMention, true)
             .AddField("Matched On", string.IsNullOrWhiteSpace(result.MatchSummary) ? "N/A" : result.MatchSummary, true)
             .AddField("Expected Role", FormatDiscordRoleMention(result.ExpectedRoleId, result.ExpectedRoleName), true)
+            .AddField("WOM Mismatch Ignored", result.WomRankMismatchIgnored ? "Yes" : "No", true)
             .AddField("Found Rank Roles", FormatDiscordRoleMentions(result.FoundRoleIds, result.FoundRoleNames), false)
             .AddField("Details", result.Details, false)
             .WithTimestamp(DateTimeOffset.Now);
@@ -6658,6 +7073,7 @@ public class DiscordPromotionBotWorker(
             .ThenBy(x => x.Key)
             .ToList();
         var mismatchCount = results.Count(x => x.Verdict is "MissingExpectedRankRole" or "WrongRankRole" or "MultipleRankRoles");
+        var allowedIgnoredCount = results.Count(x => x.Verdict == "AllowedHigherRankIgnored");
         var skippedCount = results.Count(x => x.Verdict.StartsWith("Skipped", StringComparison.OrdinalIgnoreCase) ||
                                              x.Verdict is "NoExactDiscordMatch" or "AmbiguousExactDiscordMatch" or "RankRoleMappingMissing" or "UnknownDatabaseRank");
 
@@ -6668,6 +7084,7 @@ public class DiscordPromotionBotWorker(
             .AddField("Players Scanned", results.Count.ToString(CultureInfo.InvariantCulture), true)
             .AddField("OK", results.Count(x => x.Verdict == "OK").ToString(CultureInfo.InvariantCulture), true)
             .AddField("Needs Review", mismatchCount.ToString(CultureInfo.InvariantCulture), true)
+            .AddField("Allowed Higher", allowedIgnoredCount.ToString(CultureInfo.InvariantCulture), true)
             .AddField("Skipped", skippedCount.ToString(CultureInfo.InvariantCulture), true)
             .WithTimestamp(DateTimeOffset.Now);
 
@@ -6679,27 +7096,25 @@ public class DiscordPromotionBotWorker(
     private static string BuildDiscordRankAuditCsv(IReadOnlyList<DiscordRankAuditResult> results)
     {
         var sb = new StringBuilder();
-        sb.AppendLine("PlayerId,Username,PlayerStatus,DatabaseRank,Verdict,DiscordUserId,DiscordDisplayName,DiscordMention,ExpectedRoleId,ExpectedRoleName,FoundRankRoleIds,FoundRankRoleNames,MatchStrength,MatchedField,MatchedValue,PlayerAlias,Details");
-        foreach (var result in results)
+        sb.AppendLine("Verdict,Username,Database Rank,Expected Role,Found Rank Roles,WOM Mismatch Ignored,Discord Display Name,Matched On,Matched Value,Player Alias,Player Status,Details");
+        foreach (var result in results
+            .OrderBy(x => DiscordRankAuditCsvSortOrder(x.Verdict))
+            .ThenBy(x => RankRules.RankOrder(x.DatabaseRank))
+            .ThenBy(x => x.Username, StringComparer.OrdinalIgnoreCase))
         {
             var fields = new[]
             {
-                result.PlayerId.ToString(CultureInfo.InvariantCulture),
-                result.Username,
-                result.PlayerStatus.ToString(),
-                result.DatabaseRank,
                 result.Verdict,
-                result.DiscordUserId?.ToString(CultureInfo.InvariantCulture) ?? "",
-                result.DiscordDisplayName ?? "",
-                result.DiscordMention ?? "",
-                result.ExpectedRoleId?.ToString(CultureInfo.InvariantCulture) ?? "",
+                result.Username,
+                result.DatabaseRank,
                 result.ExpectedRoleName ?? "",
-                string.Join(";", result.FoundRoleIds.Select(x => x.ToString(CultureInfo.InvariantCulture))),
                 string.Join(";", result.FoundRoleNames),
-                result.MatchStrength ?? "",
+                result.WomRankMismatchIgnored ? "Yes" : "No",
+                result.DiscordDisplayName ?? "",
                 result.MatchedField ?? "",
                 result.MatchedValue ?? "",
                 result.PlayerAlias ?? "",
+                result.PlayerStatus.ToString(),
                 result.Details
             };
             sb.AppendLine(string.Join(",", fields.Select(EscapeCsv)));
@@ -6708,10 +7123,36 @@ public class DiscordPromotionBotWorker(
         return sb.ToString();
     }
 
+    private static int DiscordRankAuditCsvSortOrder(string verdict) =>
+        verdict switch
+        {
+            "WrongRankRole" => 0,
+            "MultipleRankRoles" => 1,
+            "MissingExpectedRankRole" => 2,
+            "DiscordUserNotInGuild" => 3,
+            "RankRoleMappingMissing" => 4,
+            "UnknownDatabaseRank" => 5,
+            "AmbiguousExactDiscordMatch" => 6,
+            "NoExactDiscordMatch" => 7,
+            "OK" => 8,
+            "AllowedHigherRankIgnored" => 9,
+            "SkippedRecruit" => 10,
+            _ => 11
+        };
+
     private async Task RespondWithCsvAsync(SocketSlashCommand command, Embed embed, string csv, string fileName)
     {
         await using var stream = new MemoryStream(Encoding.UTF8.GetBytes(csv));
-        await command.FollowupWithFileAsync(stream, fileName, embed: embed, ephemeral: true);
+        var response = await command.FollowupWithFileAsync(stream, fileName, embed: embed, ephemeral: false);
+        var messageDescription = BuildSlashEmbedCleanupDescription(command, embed);
+        if (command.ChannelId.HasValue)
+        {
+            await ScheduleChannelResponseDeleteAsync(command.ChannelId.Value, response.Id, $"slash-{command.CommandName}-followup", messageDescription);
+        }
+        else
+        {
+            await ScheduleInteractionResponseDeleteAsync(command, messageDescription);
+        }
     }
 
     private static string EscapeCsv(string value)
@@ -6911,6 +7352,12 @@ Checks an exact Discord match's rank role against the database
 
 **/discord-rank-audit**  
 Runs a read-only exact-match rank role audit and attaches a CSV
+
+**/discord-rank-set <user> <rank>**  
+Replaces a Discord member's configured rank roles with the selected rank role
+
+**/discord-rank-review-post**  
+Posts review cards for actionable Discord rank role mismatches
 
 **/lookup <player>**  
 Visar spelarens sammanfattning (rank, stats, pets, Temple/WOM-status, senaste sync)
@@ -7176,8 +7623,6 @@ Visar alla spelare som just nu är ignorerade i:
         return string.Equals(commandName, "lookup", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(commandName, "update", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(commandName, "help", StringComparison.OrdinalIgnoreCase) ||
-               string.Equals(commandName, "discord-rank-check", StringComparison.OrdinalIgnoreCase) ||
-               string.Equals(commandName, "discord-rank-audit", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(commandName, "show-ignored", StringComparison.OrdinalIgnoreCase);
     }
 
@@ -7190,7 +7635,8 @@ Visar alla spelare som just nu är ignorerade i:
              string.Equals(prefix, "womonly", StringComparison.OrdinalIgnoreCase) ||
              string.Equals(prefix, "womrank", StringComparison.OrdinalIgnoreCase) ||
              string.Equals(prefix, "templename", StringComparison.OrdinalIgnoreCase) ||
-             string.Equals(prefix, "merge", StringComparison.OrdinalIgnoreCase));
+             string.Equals(prefix, "merge", StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(prefix, "drankreview", StringComparison.OrdinalIgnoreCase));
     }
 
     private static bool IsAdminLockedSlashCommand(string commandName)
@@ -7199,6 +7645,8 @@ Visar alla spelare som just nu är ignorerade i:
             string.Equals(commandName, "discord-guess", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(commandName, "discord-rank-check", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(commandName, "discord-rank-audit", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(commandName, "discord-rank-set", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(commandName, "discord-rank-review-post", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(commandName, "set-pets", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(commandName, "add", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(commandName, "remove", StringComparison.OrdinalIgnoreCase) ||
@@ -8566,9 +9014,16 @@ public class DiscordBotOptions
     public Dictionary<string, string> RankRoleIds { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 }
 
-public sealed record DiscordRankAuditPlayer(int Id, string Username, string CurrentRank, PlayerStatus Status);
+public sealed record DiscordRankAuditPlayer(
+    int Id,
+    string Username,
+    string CurrentRank,
+    PlayerStatus Status,
+    bool WomRankMismatchIgnored = false);
 
 public sealed record DiscordRankRole(string Rank, ulong RoleId, string RoleName);
+
+public sealed record DiscordRankRoleUpdateResult(IReadOnlyList<DiscordRankRole> RemovedRoles, bool AddedRole);
 
 public sealed record DiscordRankRoleConfiguration(
     IReadOnlyDictionary<string, DiscordRankRole> RolesByRank,
@@ -8579,6 +9034,7 @@ public sealed record DiscordRankAuditResult(
     int PlayerId,
     string Username,
     PlayerStatus PlayerStatus,
+    bool WomRankMismatchIgnored,
     string DatabaseRank,
     string Verdict,
     string Details,
@@ -8604,6 +9060,7 @@ public sealed record DiscordRankAuditResult(
             player.Id,
             player.Username,
             player.Status,
+            player.WomRankMismatchIgnored,
             player.CurrentRank,
             verdict,
             details,
@@ -8630,6 +9087,7 @@ public sealed record DiscordRankAuditResult(
             player.Id,
             player.Username,
             player.Status,
+            player.WomRankMismatchIgnored,
             player.CurrentRank,
             verdict,
             details,
