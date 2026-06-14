@@ -109,7 +109,7 @@ public static class RankRules
 
     private static readonly string[] SpecialWomRoles =
     [
-        "imp", "Kitten", "Administrator", "Deputy Owner", "Owner", "short green guy", "member", "recruit", "apothecary"
+        "imp", "Kitten", "Administrator", "Deputy Owner", "Owner", "short green guy", "recruit", "apothecary"
     ];
 
     public static string NormalizeRankName(string rank) => (rank ?? "").Replace('_', ' ').Trim();
@@ -139,6 +139,12 @@ public static class RankRules
     public static PromotionCandidateType ClassifyPromotionCandidate(string newRank, string? womRole)
     {
         if (string.IsNullOrWhiteSpace(womRole)) return PromotionCandidateType.unknown_wom_role;
+        if (string.Equals(NormalizeRankName(womRole), "member", StringComparison.OrdinalIgnoreCase))
+        {
+            return string.Equals(NormalizeRankName(newRank), "Recruit", StringComparison.OrdinalIgnoreCase)
+                ? PromotionCandidateType.wom_already_at_new_rank
+                : PromotionCandidateType.needs_wom_rank_update;
+        }
         if (IsSpecialWomRole(womRole)) return PromotionCandidateType.unknown_wom_role;
         if (!IsKnownClanRank(womRole)) return PromotionCandidateType.unknown_wom_role;
 

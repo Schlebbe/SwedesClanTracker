@@ -8,9 +8,18 @@ public interface IWiseOldManClient
     Task<string?> GetMemberRoleAsync(string username, CancellationToken ct);
     Task<IReadOnlyDictionary<string, string>> GetMemberRolesAsync(CancellationToken ct);
     Task<bool> IsImpAccountAsync(string username, CancellationToken ct);
+    Task<WomRoleUpdateResult> UpdateMemberRoleAsync(string username, string role, CancellationToken ct, bool invalidateCache = true);
     Task<(bool Success, string Details)> RemoveMemberAsync(string username, CancellationToken ct);
     Task InvalidateCacheAsync(CancellationToken ct);
 }
+
+public sealed record WomRoleUpdateResult(
+    bool Success,
+    int HttpStatus,
+    string Details,
+    string? UpdatedRole,
+    int? WomPlayerId,
+    string? DisplayName);
 
 public class WiseOldManClient(HttpClient httpClient, IConfiguration configuration) : IWiseOldManClient
 {
@@ -38,6 +47,79 @@ public class WiseOldManClient(HttpClient httpClient, IConfiguration configuratio
     {
         var role = await GetMemberRoleAsync(username, ct);
         return string.Equals(role, "imp", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public async Task<WomRoleUpdateResult> UpdateMemberRoleAsync(string username, string role, CancellationToken ct, bool invalidateCache = true)
+    {
+        var normalizedUsername = NormalizeUsername(username);
+        var normalizedRole = RankRules.NormalizeRankName(role);
+        if (string.IsNullOrWhiteSpace(normalizedUsername))
+        {
+            return new WomRoleUpdateResult(false, 0, "Username is empty.", null, null, null);
+        }
+        if (string.IsNullOrWhiteSpace(normalizedRole))
+        {
+            return new WomRoleUpdateResult(false, 0, "Role is empty.", null, null, null);
+        }
+
+        var groupId = configuration.GetValue<int?>("WiseOldMan:GroupId") ?? 0;
+        var verificationCode = configuration["WiseOldMan:VerificationCode"] ?? "";
+        if (groupId <= 0 || string.IsNullOrWhiteSpace(verificationCode))
+        {
+            return new WomRoleUpdateResult(false, 0, "WiseOldMan settings missing.", null, null, null);
+        }
+
+        var updateBody = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            verificationCode,
+            username = normalizedUsername,
+            role = normalizedRole.ToLowerInvariant()
+        });
+        var request = new HttpRequestMessage(HttpMethod.Put, $"https://api.wiseoldman.net/v2/groups/{groupId}/role")
+        {
+            Content = new StringContent(updateBody, System.Text.Encoding.UTF8, "application/json")
+        };
+
+        try
+        {
+            var response = await httpClient.SendAsync(request, ct);
+            var responseText = await response.Content.ReadAsStringAsync(ct);
+            if (invalidateCache)
+            {
+                await InvalidateCacheAsync(ct);
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                return new WomRoleUpdateResult(
+                    false,
+                    (int)response.StatusCode,
+                    $"WOM role update failed ({(int)response.StatusCode}): {Truncate(responseText, 180)}",
+                    null,
+                    null,
+                    null);
+            }
+
+            var updatedRole = normalizedRole;
+            int? womPlayerId = null;
+            string? displayName = null;
+            if (TryReadWomRoleUpdateResponse(responseText, out var parsedUpdatedRole, out womPlayerId, out displayName))
+            {
+                updatedRole = parsedUpdatedRole;
+            }
+
+            return new WomRoleUpdateResult(
+                true,
+                (int)response.StatusCode,
+                "Role update accepted by WiseOldMan.",
+                updatedRole,
+                womPlayerId,
+                displayName);
+        }
+        catch (Exception ex)
+        {
+            return new WomRoleUpdateResult(false, 0, $"WOM role update exception: {ex.GetType().Name}", null, null, null);
+        }
     }
 
     public async Task<(bool Success, string Details)> RemoveMemberAsync(string username, CancellationToken ct)
@@ -182,6 +264,34 @@ public class WiseOldManClient(HttpClient httpClient, IConfiguration configuratio
 
     private static string NormalizeUsername(string input) =>
         UsernameRules.NormalizeUsername(input);
+
+    private static bool TryReadWomRoleUpdateResponse(string json, out string updatedRole, out int? womPlayerId, out string? displayName)
+    {
+        updatedRole = "";
+        womPlayerId = null;
+        displayName = null;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            if (doc.RootElement.TryGetProperty("role", out var roleProp))
+            {
+                updatedRole = roleProp.GetString() ?? "";
+            }
+            if (doc.RootElement.TryGetProperty("playerId", out var playerIdProp) && playerIdProp.TryGetInt32(out var parsedPlayerId))
+            {
+                womPlayerId = parsedPlayerId;
+            }
+            if (doc.RootElement.TryGetProperty("displayName", out var displayNameProp))
+            {
+                displayName = displayNameProp.GetString();
+            }
+            return !string.IsNullOrWhiteSpace(updatedRole) || womPlayerId.HasValue || !string.IsNullOrWhiteSpace(displayName);
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
     private static string Truncate(string value, int max)
     {

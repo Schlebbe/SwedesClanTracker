@@ -195,6 +195,111 @@ public class DiscordPromotionBotWorker(
         }
     }
 
+    private static async Task<SwedesClanTracker.Core.WomRoleUpdateResult> ApplyWomRoleUpdateForApprovedPromotionAsync(
+        TrackerDbContext db,
+        IWiseOldManClient wiseOldManClient,
+        Player player,
+        PromotionCandidate candidate,
+        string handledBy,
+        ulong handledByDiscordUserId,
+        string source,
+        CancellationToken ct)
+    {
+        var womRoleBefore = await wiseOldManClient.GetMemberRoleAsync(player.Username, ct);
+        var result = await wiseOldManClient.UpdateMemberRoleAsync(player.Username, candidate.NewRank, ct);
+        var womRoleAfter = result.UpdatedRole ?? womRoleBefore;
+
+        db.LifecycleEvents.Add(new LifecycleEvent
+        {
+            PlayerId = player.Id,
+            EventType = "WOM_ROLE_UPDATE_APPLIED",
+            MetadataJson = JsonUtil.Serialize(new
+            {
+                CandidateId = candidate.Id,
+                Player = player.Username,
+                RequestedRole = candidate.NewRank,
+                PreviousWomRole = womRoleBefore,
+                UpdatedRole = result.UpdatedRole,
+                Success = result.Success,
+                HttpStatus = result.HttpStatus,
+                WiseOldManPlayerId = result.WomPlayerId,
+                WiseOldManDisplayName = result.DisplayName,
+                Details = result.Details,
+                HandledBy = handledBy,
+                HandledByDiscordUserId = handledByDiscordUserId,
+                Source = $"promotion-approval-{source}"
+            }),
+            Status = "DONE",
+            CreatedAt = DateTimeOffset.UtcNow
+        });
+
+        if (IsRankAligned(candidate.NewRank, womRoleAfter))
+        {
+            await CloseOpenLifecycleEventsAsync(db, player.Id, "WOM_RANK_MISMATCH_REQUIRED");
+        }
+        else
+        {
+            await EnsurePromotionWomRankMismatchLifecycleAsync(db, player, womRoleAfter, source, ct);
+        }
+
+        return result;
+    }
+
+    private static async Task EnsurePromotionWomRankMismatchLifecycleAsync(
+        TrackerDbContext db,
+        Player player,
+        string? womRole,
+        string source,
+        CancellationToken ct)
+    {
+        if (player.Status != PlayerStatus.ACTIVE) return;
+        if (string.IsNullOrWhiteSpace(womRole)) return;
+        if (string.Equals(player.CurrentRank, "Recruit", StringComparison.OrdinalIgnoreCase)) return;
+        if (RankRules.IsSpecialWomRole(womRole)) return;
+        if (IsRankAligned(player.CurrentRank, womRole)) return;
+
+        var now = DateTimeOffset.UtcNow;
+        var direction = GetWomRankMismatchDirection(player.CurrentRank, womRole);
+        var openMismatches = await db.LifecycleEvents
+            .Where(x =>
+                x.PlayerId == player.Id &&
+                x.EventType == "WOM_RANK_MISMATCH_REQUIRED" &&
+                x.Status == "OPEN")
+            .ToListAsync(ct);
+
+        var metadata = JsonUtil.Serialize(new
+        {
+            player.Username,
+            ExpectedRank = player.CurrentRank,
+            ActualWomRole = womRole,
+            Direction = direction,
+            Source = $"promotion-approval-{source}",
+            DetectedAt = now
+        });
+
+        if (openMismatches.Count > 0)
+        {
+            foreach (var ev in openMismatches)
+            {
+                ev.MetadataJson = metadata;
+            }
+            return;
+        }
+
+        db.LifecycleEvents.Add(new LifecycleEvent
+        {
+            PlayerId = player.Id,
+            EventType = "WOM_RANK_MISMATCH_REQUIRED",
+            MetadataJson = metadata,
+            Status = "OPEN",
+            CreatedAt = now
+        });
+    }
+
+    private static bool IsRankAligned(string expectedRank, string? actualRank) =>
+        !string.IsNullOrWhiteSpace(actualRank) &&
+        string.Equals(RankRules.NormalizeRankName(expectedRank), RankRules.NormalizeRankName(actualRank), StringComparison.OrdinalIgnoreCase);
+
     private static async Task EnsureOpenMergeSuggestedEventAsync(TrackerDbContext db, int playerId, string username, string handledBy)
     {
         var hasOpenMerge = await db.LifecycleEvents.AnyAsync(x =>
@@ -828,6 +933,7 @@ public class DiscordPromotionBotWorker(
 
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        var wiseOldManClient = scope.ServiceProvider.GetRequiredService<IWiseOldManClient>();
         var candidate = await db.PromotionCandidates.FirstOrDefaultAsync(x => x.Id == candidateId);
         if (candidate is null)
         {
@@ -863,10 +969,20 @@ public class DiscordPromotionBotWorker(
             return;
         }
 
+        SwedesClanTracker.Core.WomRoleUpdateResult? promotionWomUpdate = null;
         if (action == "approve")
         {
             player.CurrentRank = candidate.NewRank;
-            await CloseOpenLifecycleEventsAsync(db, player.Id, "WOM_RANK_MISMATCH_IGNORED", "WOM_RANK_MISMATCH_REQUIRED");
+            await CloseOpenLifecycleEventsAsync(db, player.Id, "WOM_RANK_MISMATCH_IGNORED");
+            promotionWomUpdate = await ApplyWomRoleUpdateForApprovedPromotionAsync(
+                db,
+                wiseOldManClient,
+                player,
+                candidate,
+                component.User.Username,
+                component.User.Id,
+                "discord",
+                CancellationToken.None);
             candidate.Status = PromotionStatus.APPROVED;
             ScheduleDelete(candidate.Id, player.Id);
         }
@@ -906,6 +1022,9 @@ public class DiscordPromotionBotWorker(
                 Action = action,
                 HandledBy = component.User.Username,
                 HandledByDiscordUserId = component.User.Id,
+                WomUpdateSuccess = promotionWomUpdate?.Success,
+                WomUpdateDetails = promotionWomUpdate?.Details,
+                WomUpdatedRole = promotionWomUpdate?.UpdatedRole,
                 Source = "discord",
                 ChannelId = component.Channel.Id,
                 DiscordMessageId = component.Message.Id
