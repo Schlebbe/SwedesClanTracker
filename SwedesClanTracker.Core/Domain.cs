@@ -109,7 +109,7 @@ public static class RankRules
 
     private static readonly string[] SpecialWomRoles =
     [
-        "imp", "Kitten", "Administrator", "Deputy Owner", "Owner", "short green guy", "recruit", "apothecary"
+        "imp", "Kitten", "Administrator", "Deputy Owner", "Owner", "short green guy", "recruit", "apothecary", "wily"
     ];
 
     public static string NormalizeRankName(string rank) => (rank ?? "").Replace('_', ' ').Trim();

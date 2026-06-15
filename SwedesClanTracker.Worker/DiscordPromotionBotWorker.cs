@@ -7693,29 +7693,99 @@ public class DiscordPromotionBotWorker(
                 .Select(x => x.Username)
                 .ToListAsync();
 
-        string ToDisplay(IReadOnlyList<string> names)
+        List<string> ToDisplayChunks(IReadOnlyList<string> names)
         {
-            if (names.Count == 0) return "None";
-            const int maxNames = 40;
-            var shown = names.Take(maxNames).Select(x => $"• {x}");
-            var text = string.Join("\n", shown);
-            if (names.Count > maxNames)
+            if (names.Count == 0) return ["None"];
+
+            const int maxFieldValueLength = 1024;
+            var chunks = new List<string>();
+            var current = new StringBuilder();
+            foreach (var name in names)
             {
-                text += $"\n...and {names.Count - maxNames} more";
+                var line = $"• {name}";
+                if (current.Length > 0 && current.Length + 1 + line.Length > maxFieldValueLength)
+                {
+                    chunks.Add(current.ToString());
+                    current.Clear();
+                }
+
+                if (current.Length > 0)
+                {
+                    current.AppendLine();
+                }
+                current.Append(line);
             }
-            return text;
+            if (current.Length > 0)
+            {
+                chunks.Add(current.ToString());
+            }
+
+            return chunks;
         }
 
-        var embed = new EmbedBuilder()
+        static void AddChunkedFields(EmbedBuilder builder, string title, int count, IReadOnlyList<string> chunks)
+        {
+            for (var i = 0; i < chunks.Count; i++)
+            {
+                var label = chunks.Count == 1 ? $"{title} ({count})" : $"{title} ({count}) {i + 1}/{chunks.Count}";
+                builder.AddField(label, chunks[i], false);
+            }
+        }
+
+        static string BuildAttachedList(IReadOnlyList<string> womOnly, IReadOnlyList<string> womRankMismatch)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("Ignored Players");
+            sb.AppendLine();
+            sb.AppendLine($"WOM-only ignored ({womOnly.Count})");
+            foreach (var name in womOnly)
+            {
+                sb.AppendLine($"- {name}");
+            }
+            if (womOnly.Count == 0)
+            {
+                sb.AppendLine("- None");
+            }
+            sb.AppendLine();
+            sb.AppendLine($"WOM rank mismatch ignored ({womRankMismatch.Count})");
+            foreach (var name in womRankMismatch)
+            {
+                sb.AppendLine($"- {name}");
+            }
+            if (womRankMismatch.Count == 0)
+            {
+                sb.AppendLine("- None");
+            }
+            return sb.ToString();
+        }
+
+        var womOnlyChunks = ToDisplayChunks(womOnlyIgnored);
+        var womRankMismatchChunks = ToDisplayChunks(womRankMismatchIgnored);
+        var totalFieldCount = womOnlyChunks.Count + womRankMismatchChunks.Count;
+        var totalFieldValueLength = womOnlyChunks.Sum(x => x.Length) + womRankMismatchChunks.Sum(x => x.Length);
+
+        var embedBuilder = new EmbedBuilder()
             .WithTitle("Ignored Players")
             .WithColor(new Color(59, 130, 246))
             .WithDescription("Currently open ignore flags by category.")
-            .AddField($"WOM-only ignored ({womOnlyIgnored.Count})", ToDisplay(womOnlyIgnored), false)
-            .AddField($"WOM rank mismatch ignored ({womRankMismatchIgnored.Count})", ToDisplay(womRankMismatchIgnored), false)
-            .WithTimestamp(DateTimeOffset.Now)
-            .Build();
+            .WithTimestamp(DateTimeOffset.Now);
 
-        await RespondAndAutoDeleteAsync(command, embed, ephemeral: true);
+        if (totalFieldCount <= 25 && totalFieldValueLength <= 5500)
+        {
+            AddChunkedFields(embedBuilder, "WOM-only ignored", womOnlyIgnored.Count, womOnlyChunks);
+            AddChunkedFields(embedBuilder, "WOM rank mismatch ignored", womRankMismatchIgnored.Count, womRankMismatchChunks);
+            await RespondAndAutoDeleteAsync(command, embedBuilder.Build(), ephemeral: true);
+            return;
+        }
+
+        embedBuilder
+            .WithDescription("Currently open ignore flags by category. Full list attached.")
+            .AddField("WOM-only ignored", womOnlyIgnored.Count.ToString(CultureInfo.InvariantCulture), true)
+            .AddField("WOM rank mismatch ignored", womRankMismatchIgnored.Count.ToString(CultureInfo.InvariantCulture), true);
+
+        await using var stream = new MemoryStream(Encoding.UTF8.GetBytes(BuildAttachedList(womOnlyIgnored, womRankMismatchIgnored)));
+        await command.FollowupWithFileAsync(stream, "ignored-players.txt", embed: embedBuilder.Build(), ephemeral: true);
+        await ScheduleInteractionResponseDeleteAsync(command, BuildSlashEmbedCleanupDescription(command, embedBuilder.Build()));
     }
 
     private async Task HandleHelpSlashCommandAsync(SocketSlashCommand command)

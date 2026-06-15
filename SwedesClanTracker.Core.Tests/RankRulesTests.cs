@@ -23,11 +23,25 @@ public class RankRulesTests
     }
 
     [Fact]
+    public void IsSpecialWomRole_KeepsWilySpecial()
+    {
+        Assert.True(RankRules.IsSpecialWomRole("Wily"));
+    }
+
+    [Fact]
     public void ClassifyPromotionCandidate_TreatsMemberAsNeedingWomUpdate()
     {
         Assert.Equal(
             PromotionCandidateType.needs_wom_rank_update,
             RankRules.ClassifyPromotionCandidate("Captain", "Member"));
+    }
+
+    [Fact]
+    public void ClassifyPromotionCandidate_TreatsWilyAsUnknownWomRole()
+    {
+        Assert.Equal(
+            PromotionCandidateType.unknown_wom_role,
+            RankRules.ClassifyPromotionCandidate("Captain", "Wily"));
     }
 
     [Fact]
