@@ -66,6 +66,18 @@ public class DiscordPromotionBotWorker(
         Malformed,
         Unknown
     }
+
+    private static bool IsDiscordMessageMissingOrInaccessible(Discord.Net.HttpException ex)
+    {
+        return ex.HttpCode is System.Net.HttpStatusCode.NotFound or System.Net.HttpStatusCode.Forbidden ||
+               ex.DiscordCode is DiscordErrorCode.UnknownMessage or
+                   DiscordErrorCode.UnknownChannel or
+                   DiscordErrorCode.UnknownWebhook or
+                   DiscordErrorCode.UnknownInteraction or
+                   DiscordErrorCode.MissingPermissions or
+                   DiscordErrorCode.InsufficientPermissions;
+    }
+
     private readonly ConcurrentDictionary<string, DateTimeOffset> _lookupBackoffUntilByKey = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<ulong, MessagePatchState> _messagePatchStateByMessageId = new();
     private static readonly TimeSpan MessagePatchMinInterval = TimeSpan.FromSeconds(5);
@@ -2158,7 +2170,7 @@ public class DiscordPromotionBotWorker(
             }
             return (PostedMessageLookupState.Missing, null, channelId, messageId);
         }
-        catch (Discord.Net.HttpException ex) when (ex.HttpCode == System.Net.HttpStatusCode.NotFound)
+        catch (Discord.Net.HttpException ex) when (IsDiscordMessageMissingOrInaccessible(ex))
         {
             return (PostedMessageLookupState.Missing, null, channelId, messageId);
         }
@@ -2468,8 +2480,7 @@ public class DiscordPromotionBotWorker(
                     await channel.DeleteMessageAsync(messageId);
                     return;
                 }
-                catch (Discord.Net.HttpException ex) when (ex.HttpCode == System.Net.HttpStatusCode.NotFound ||
-                                                           ex.HttpCode == System.Net.HttpStatusCode.Forbidden)
+                catch (Discord.Net.HttpException ex) when (IsDiscordMessageMissingOrInaccessible(ex))
                 {
                     return;
                 }
@@ -2779,8 +2790,7 @@ public class DiscordPromotionBotWorker(
                 await channel.DeleteMessageAsync(messageId);
                 s.Status = "DONE";
             }
-            catch (Discord.Net.HttpException ex) when (ex.HttpCode == System.Net.HttpStatusCode.NotFound ||
-                                                       ex.HttpCode == System.Net.HttpStatusCode.Forbidden)
+            catch (Discord.Net.HttpException ex) when (IsDiscordMessageMissingOrInaccessible(ex))
             {
                 // Already gone or inaccessible: treat as complete.
                 s.Status = "DONE";
@@ -3039,8 +3049,7 @@ public class DiscordPromotionBotWorker(
                 await userMessage.DeleteAsync();
             }
         }
-        catch (Discord.Net.HttpException ex) when (ex.HttpCode == System.Net.HttpStatusCode.NotFound ||
-                                                   ex.HttpCode == System.Net.HttpStatusCode.Forbidden)
+        catch (Discord.Net.HttpException ex) when (IsDiscordMessageMissingOrInaccessible(ex))
         {
             // Missing or inaccessible historical messages do not need cleanup rows.
         }
@@ -3331,7 +3340,7 @@ public class DiscordPromotionBotWorker(
             if (msg is IUserMessage userMessage) return (TrackedMessageState.Found, userMessage);
             return (TrackedMessageState.Missing, null);
         }
-        catch (Discord.Net.HttpException ex) when (ex.HttpCode == System.Net.HttpStatusCode.NotFound)
+        catch (Discord.Net.HttpException ex) when (IsDiscordMessageMissingOrInaccessible(ex))
         {
             return (TrackedMessageState.Missing, null);
         }
@@ -3498,8 +3507,7 @@ public class DiscordPromotionBotWorker(
                     userMessage.Id,
                     channel.Id);
             }
-            catch (Discord.Net.HttpException ex) when (ex.HttpCode == System.Net.HttpStatusCode.NotFound ||
-                                                       ex.HttpCode == System.Net.HttpStatusCode.Forbidden)
+            catch (Discord.Net.HttpException ex) when (IsDiscordMessageMissingOrInaccessible(ex))
             {
                 // already gone or inaccessible
             }
