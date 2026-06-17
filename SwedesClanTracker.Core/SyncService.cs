@@ -297,7 +297,7 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
         if (dbUsernames.Contains(normalizedUsername)) return false;
         if (rosterUsernames.Contains(normalizedUsername)) return false;
         if (ignoredUsernames.Contains(normalizedUsername)) return false;
-        return !IsWomOnlyIgnoredRole(womRole);
+        return !IsSpecialWomRole(womRole);
     }
 
     private static string? ReadLifecycleUsername(string metadataJson)
@@ -818,13 +818,6 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
     private static bool IsSpecialWomRole(string role)
     {
         return RankRules.IsSpecialWomRole(role);
-    }
-
-    private static bool IsWomOnlyIgnoredRole(string role)
-    {
-        string[] ignoredRoles = ["imp", "kitten", "administrator", "deputy owner"];
-        var normalized = NormalizeRankName(role);
-        return ignoredRoles.Any(x => string.Equals(x, normalized, StringComparison.OrdinalIgnoreCase));
     }
 
     private static string NormalizeRankName(string rank) => RankRules.NormalizeRankName(rank);

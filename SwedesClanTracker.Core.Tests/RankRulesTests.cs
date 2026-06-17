@@ -28,6 +28,22 @@ public class RankRulesTests
         Assert.True(RankRules.IsSpecialWomRole("Wily"));
     }
 
+    [Theory]
+    [InlineData("imp")]
+    [InlineData("Kitten")]
+    [InlineData("administrator")]
+    [InlineData("Deputy Owner")]
+    [InlineData("deputy_owner")]
+    [InlineData("OWNER")]
+    [InlineData("short_green_guy")]
+    [InlineData(" recruit ")]
+    [InlineData("apothecary")]
+    [InlineData("WILY")]
+    public void IsSpecialWomRole_NormalizesSpecialRoles(string role)
+    {
+        Assert.True(RankRules.IsSpecialWomRole(role));
+    }
+
     [Fact]
     public void ClassifyPromotionCandidate_TreatsMemberAsNeedingWomUpdate()
     {
