@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http;
 using System.Text;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace SwedesClanTracker.Core.Tests;
 
@@ -188,11 +189,54 @@ public class TempleClientTests
         Assert.Equal(1234.5, stats!.Ehp, 6);
     }
 
+    [Fact]
+    public async Task GetPetsAsync_RetriesTransientHttpStatusThenReadsPets()
+    {
+        var handler = new SequenceHttpMessageHandler(
+            new HttpResponseMessage((HttpStatusCode)522),
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""
+                    {
+                      "data": {
+                        "items": {
+                          "all_pets": [
+                            { "name": "pet one" },
+                            { "name": "pet two" }
+                          ]
+                        }
+                      }
+                    }
+                    """, Encoding.UTF8, "application/json")
+            });
+        var client = new TempleClient(new HttpClient(handler), NullLogger<TempleClient>.Instance);
+
+        var pets = await client.GetPetsAsync("Example", CancellationToken.None);
+
+        Assert.Equal(2, pets);
+        Assert.Equal(2, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task GetPetsAsync_ReturnsNullAfterPersistentTransientHttpStatus()
+    {
+        var handler = new SequenceHttpMessageHandler(
+            new HttpResponseMessage((HttpStatusCode)522),
+            new HttpResponseMessage((HttpStatusCode)522),
+            new HttpResponseMessage((HttpStatusCode)522));
+        var client = new TempleClient(new HttpClient(handler), NullLogger<TempleClient>.Instance);
+
+        var pets = await client.GetPetsAsync("Example", CancellationToken.None);
+
+        Assert.Null(pets);
+        Assert.Equal(3, handler.RequestCount);
+    }
+
     private static TempleClient CreateClient(string json)
     {
         var handler = new StubHttpMessageHandler(json);
         var httpClient = new HttpClient(handler);
-        return new TempleClient(httpClient);
+        return new TempleClient(httpClient, NullLogger<TempleClient>.Instance);
     }
 
     private sealed class StubHttpMessageHandler(string payload) : HttpMessageHandler
@@ -203,6 +247,21 @@ public class TempleClientTests
             {
                 Content = new StringContent(payload, Encoding.UTF8, "application/json")
             });
+        }
+    }
+
+    private sealed class SequenceHttpMessageHandler(params HttpResponseMessage[] responses) : HttpMessageHandler
+    {
+        private int _index;
+
+        public int RequestCount { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            RequestCount++;
+            var index = Math.Min(_index, responses.Length - 1);
+            _index++;
+            return Task.FromResult(responses[index]);
         }
     }
 }

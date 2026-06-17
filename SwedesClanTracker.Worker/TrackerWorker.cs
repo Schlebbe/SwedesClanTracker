@@ -16,6 +16,8 @@ public class TrackerWorker(
 
         while (!stoppingToken.IsCancellationRequested)
         {
+            int? currentPlayerId = null;
+            string? currentUsername = null;
             try
             {
                 await using var scope = scopeFactory.CreateAsyncScope();
@@ -120,6 +122,8 @@ public class TrackerWorker(
                         .Where(x => x.Id == playerId)
                         .Select(x => x.Username)
                         .FirstOrDefaultAsync(stoppingToken);
+                    currentPlayerId = playerId;
+                    currentUsername = username;
                     await statusReporter.ReportAsync(
                         "Tracker",
                         "Processing player",
@@ -137,8 +141,32 @@ public class TrackerWorker(
             }
             catch (Exception ex) when (!stoppingToken.IsCancellationRequested)
             {
-                await statusReporter.ReportAsync("Tracker", "Error", $"Tracker cycle failed: {ex.Message}", stoppingToken, new { Error = ex.GetType().Name });
-                logger.LogError(ex, "Worker cycle failed.");
+                if (currentPlayerId.HasValue)
+                {
+                    await statusReporter.ReportAsync(
+                        "Tracker",
+                        "Error",
+                        string.IsNullOrWhiteSpace(currentUsername)
+                            ? $"Tracker cycle failed while syncing player #{currentPlayerId.Value}: {ex.Message}"
+                            : $"Tracker cycle failed while syncing {currentUsername}: {ex.Message}",
+                        stoppingToken,
+                        new
+                        {
+                            Error = ex.GetType().Name,
+                            PlayerId = currentPlayerId.Value,
+                            Username = currentUsername
+                        });
+                    logger.LogError(
+                        ex,
+                        "Worker cycle failed while syncing player {PlayerId} ({Username}).",
+                        currentPlayerId.Value,
+                        currentUsername);
+                }
+                else
+                {
+                    await statusReporter.ReportAsync("Tracker", "Error", $"Tracker cycle failed: {ex.Message}", stoppingToken, new { Error = ex.GetType().Name });
+                    logger.LogError(ex, "Worker cycle failed.");
+                }
                 await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
             }
         }

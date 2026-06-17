@@ -1,5 +1,7 @@
-using System.Text.Json;
+using System.Net;
 using System.Net.Sockets;
+using System.Text.Json;
+using Microsoft.Extensions.Logging;
 
 namespace SwedesClanTracker.Core;
 
@@ -12,7 +14,7 @@ public interface ITempleClient
     Task<int?> GetPetsAsync(string username, CancellationToken ct);
 }
 
-public class TempleClient(HttpClient httpClient) : ITempleClient
+public class TempleClient(HttpClient httpClient, ILogger<TempleClient> logger) : ITempleClient
 {
     private static readonly string[] ModeEhbKeys = ["Ehb", "Im_ehb", "Uim_ehb", "1def_ehb"];
     private static readonly string[] ModeEhpKeys = ["Ehp", "Im_ehp", "Uim_ehp", "1def_ehp"];
@@ -48,6 +50,15 @@ public class TempleClient(HttpClient httpClient) : ITempleClient
         var url = $"https://templeosrs.com/api/collection-log/player_collection_log.php?player={Uri.EscapeDataString(username)}&categories=all_pets";
         using var response = await SendWithRetryAsync(url, ct);
         if ((int)response.StatusCode == 402) return null;
+        if (IsTransientStatusCode(response.StatusCode))
+        {
+            logger.LogWarning(
+                "Temple pet lookup failed for {Username} with transient HTTP {StatusCode}; preserving stored pet count.",
+                username,
+                (int)response.StatusCode);
+            return null;
+        }
+
         response.EnsureSuccessStatusCode();
         var raw = await response.Content.ReadAsStringAsync(ct);
         using var doc = JsonDocument.Parse(raw);
@@ -102,7 +113,17 @@ public class TempleClient(HttpClient httpClient) : ITempleClient
         {
             try
             {
-                return await httpClient.GetAsync(url, ct);
+                var response = await httpClient.GetAsync(url, ct);
+                if (IsTransientStatusCode(response.StatusCode) &&
+                    attempt < RetryDelays.Length &&
+                    !ct.IsCancellationRequested)
+                {
+                    response.Dispose();
+                    await Task.Delay(RetryDelays[attempt], ct);
+                    continue;
+                }
+
+                return response;
             }
             catch (Exception ex) when (IsTransient(ex) && attempt < RetryDelays.Length && !ct.IsCancellationRequested)
             {
@@ -122,6 +143,12 @@ public class TempleClient(HttpClient httpClient) : ITempleClient
         if (ex is SocketException) return true;
         if (ex.InnerException is SocketException) return true;
         return false;
+    }
+
+    private static bool IsTransientStatusCode(HttpStatusCode statusCode)
+    {
+        var code = (int)statusCode;
+        return code is 408 or 429 || code >= 500;
     }
 
     private static double? ResolvePrimaryEhb(JsonElement data)
