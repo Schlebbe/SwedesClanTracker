@@ -571,7 +571,7 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
                 db.PromotionCandidates.RemoveRange(pendingForImp);
             }
         }
-        else if (RankOrder(player.EligibleRank) > RankOrder(player.CurrentRank))
+        else if (RankRules.RankOrder(player.EligibleRank) > RankRules.RankOrder(player.CurrentRank))
         {
             var exists = await db.PromotionCandidates.AnyAsync(x =>
                 x.PlayerId == player.Id && x.Status == PromotionStatus.PENDING && x.NewRank == player.EligibleRank, ct);
@@ -614,7 +614,7 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
                 x.Status == PromotionStatus.PENDING)
             .ToListAsync(ct);
         satisfiedCandidates = satisfiedCandidates
-            .Where(x => RankOrder(x.NewRank) <= RankOrder(player.CurrentRank))
+            .Where(x => RankRules.RankOrder(x.NewRank) <= RankRules.RankOrder(player.CurrentRank))
             .ToList();
         if (satisfiedCandidates.Count == 0) return;
 
@@ -795,21 +795,10 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
         }
     }
 
-    private static int RankOrder(string rank)
-    {
-        var normalized = NormalizeRankName(rank);
-        string[] order = ["Recruit", "Officer", "Commander", "Lieutenant", "Captain", "Astral", "General", "Brigadier", "Admiral", "Marshal", "Beast"];
-        for (var i = 0; i < order.Length; i++)
-        {
-            if (string.Equals(order[i], normalized, StringComparison.OrdinalIgnoreCase)) return i;
-        }
-        return 0;
-    }
-
     private static string GetWomRankMismatchDirection(string expectedRank, string actualWomRole)
     {
-        var expected = RankOrder(expectedRank);
-        var actual = RankOrder(actualWomRole);
+        var expected = RankRules.RankOrder(expectedRank);
+        var actual = RankRules.RankOrder(actualWomRole);
         if (actual > expected) return "higher";
         if (actual < expected) return "lower";
         return "different";
@@ -820,6 +809,5 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
         return RankRules.IsSpecialWomRole(role);
     }
 
-    private static string NormalizeRankName(string rank) => RankRules.NormalizeRankName(rank);
     private static string NormalizeUsername(string input) => UsernameRules.NormalizeUsername(input);
 }

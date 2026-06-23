@@ -582,23 +582,11 @@ public class ActivityController(TrackerDbContext db) : ControllerBase
 
     private static string GetWomRankMismatchDirection(string expectedRank, string actualWomRole)
     {
-        var expected = RankOrder(expectedRank);
-        var actual = RankOrder(actualWomRole);
+        var expected = RankRules.RankOrder(expectedRank);
+        var actual = RankRules.RankOrder(actualWomRole);
         if (actual > expected) return "higher";
         if (actual < expected) return "lower";
         return "different";
-    }
-
-    private static int RankOrder(string rank)
-    {
-        if (string.IsNullOrWhiteSpace(rank)) return 0;
-        var normalized = rank.Replace('_', ' ').Trim();
-        string[] order = ["Recruit", "Officer", "Commander", "Lieutenant", "Captain", "Astral", "General", "Brigadier", "Admiral", "Marshal", "Beast"];
-        for (var i = 0; i < order.Length; i++)
-        {
-            if (string.Equals(order[i], normalized, StringComparison.OrdinalIgnoreCase)) return i;
-        }
-        return 0;
     }
 }
 

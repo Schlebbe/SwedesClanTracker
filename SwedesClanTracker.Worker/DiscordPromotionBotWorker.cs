@@ -26,33 +26,11 @@ public class DiscordPromotionBotWorker(
     private int _discordDeleteDelayMinutes = 5;
     private int _discordDeleteHardCapMinutes = 10;
     private readonly TimeZoneInfo _swedishTimeZone = ResolveSwedishTimeZone();
-    private static readonly IReadOnlyList<WomRoleChoice> WomRoleChoices =
-    [
-        new("Officer", "officer"),
-        new("Commander", "commander"),
-        new("Lieutenant", "lieutenant"),
-        new("Captain", "captain"),
-        new("Astral", "astral"),
-        new("General", "general"),
-        new("Brigadier", "brigadier"),
-        new("Admiral", "admiral"),
-        new("Marshal", "marshal"),
-        new("Beast", "beast"),
-        new("Imp", "imp")
-    ];
-    private static readonly IReadOnlyList<string> DiscordRankNames =
-    [
-        "Officer",
-        "Commander",
-        "Lieutenant",
-        "Captain",
-        "Astral",
-        "General",
-        "Brigadier",
-        "Admiral",
-        "Marshal",
-        "Beast"
-    ];
+    private static readonly IReadOnlyList<WomRoleChoice> WomRoleChoices = RankRules.AssignableClanRanks
+        .Select(rank => new WomRoleChoice(rank, RankRules.ToWomRoleValue(rank)))
+        .Append(new WomRoleChoice("Imp", "imp"))
+        .ToArray();
+    private static readonly IReadOnlyList<string> DiscordRankNames = RankRules.AssignableClanRanks;
     private enum TrackedMessageState
     {
         Found,
@@ -8833,8 +8811,8 @@ Shows all currently ignored players in:
 
     private static string GetWomRankMismatchDirection(string expectedRank, string actualWomRole)
     {
-        var expected = RankOrder(expectedRank);
-        var actual = RankOrder(actualWomRole);
+        var expected = RankRules.RankOrder(expectedRank);
+        var actual = RankRules.RankOrder(actualWomRole);
         if (actual > expected) return "higher";
         if (actual < expected) return "lower";
         return "different";
@@ -9503,7 +9481,7 @@ Shows all currently ignored players in:
             return true;
         }
 
-        if (RankOrder(player.EligibleRank) <= RankOrder(player.CurrentRank))
+        if (RankRules.RankOrder(player.EligibleRank) <= RankRules.RankOrder(player.CurrentRank))
         {
             return false;
         }
@@ -9526,18 +9504,6 @@ Shows all currently ignored players in:
         return false;
     }
 
-    private static int RankOrder(string rank)
-    {
-        var normalized = NormalizeRankName(rank);
-        string[] order = ["Recruit", "Officer", "Commander", "Lieutenant", "Captain", "Astral", "General", "Brigadier", "Admiral", "Marshal", "Beast"];
-        for (var i = 0; i < order.Length; i++)
-        {
-            if (string.Equals(order[i], normalized, StringComparison.OrdinalIgnoreCase)) return i;
-        }
-        return 0;
-    }
-
-    private static string NormalizeRankName(string rank) => RankRules.NormalizeRankName(rank);
 }
 
 public class DiscordBotOptions

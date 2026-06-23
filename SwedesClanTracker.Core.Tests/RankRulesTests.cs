@@ -5,6 +5,41 @@ namespace SwedesClanTracker.Core.Tests;
 public class RankRulesTests
 {
     [Fact]
+    public void OrderedClanRanks_ExposesCanonicalRankOrder()
+    {
+        Assert.Equal(
+            [
+                "Recruit",
+                "Officer",
+                "Commander",
+                "Lieutenant",
+                "Captain",
+                "Astral",
+                "General",
+                "Brigadier",
+                "Admiral",
+                "Marshal",
+                "Beast"
+            ],
+            RankRules.OrderedClanRanks);
+    }
+
+    [Fact]
+    public void AssignableClanRanks_ExcludesRecruit()
+    {
+        Assert.Equal(RankRules.OrderedClanRanks.Skip(1), RankRules.AssignableClanRanks);
+    }
+
+    [Theory]
+    [InlineData("General", "general")]
+    [InlineData("Deputy Owner", "deputy_owner")]
+    [InlineData("short green guy", "short_green_guy")]
+    public void ToWomRoleValue_NormalizesForWiseOldMan(string rank, string expected)
+    {
+        Assert.Equal(expected, RankRules.ToWomRoleValue(rank));
+    }
+
+    [Fact]
     public void IsSpecialWomRole_KeepsRecruitSpecial()
     {
         Assert.True(RankRules.IsSpecialWomRole("Recruit"));

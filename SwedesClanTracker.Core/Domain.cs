@@ -102,10 +102,14 @@ public static class RankEvaluator
 
 public static class RankRules
 {
-    private static readonly string[] OrderedRanks =
+    private static readonly string[] OrderedRankNames =
     [
         "Recruit", "Officer", "Commander", "Lieutenant", "Captain", "Astral", "General", "Brigadier", "Admiral", "Marshal", "Beast"
     ];
+
+    private static readonly string[] AssignableClanRankNames = OrderedRankNames
+        .Where(x => !string.Equals(x, "Recruit", StringComparison.OrdinalIgnoreCase))
+        .ToArray();
 
     private static readonly string[] SpecialWomRoles =
     [
@@ -115,14 +119,20 @@ public static class RankRules
     private static readonly HashSet<string> NormalizedSpecialWomRoles =
         SpecialWomRoles.Select(NormalizeRankName).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
+    public static IReadOnlyList<string> OrderedClanRanks => OrderedRankNames;
+
+    public static IReadOnlyList<string> AssignableClanRanks => AssignableClanRankNames;
+
     public static string NormalizeRankName(string rank) => (rank ?? "").Replace('_', ' ').Trim();
+
+    public static string ToWomRoleValue(string rank) => NormalizeRankName(rank).ToLowerInvariant().Replace(' ', '_');
 
     public static int RankOrder(string rank)
     {
         var normalized = NormalizeRankName(rank);
-        for (var i = 0; i < OrderedRanks.Length; i++)
+        for (var i = 0; i < OrderedRankNames.Length; i++)
         {
-            if (string.Equals(OrderedRanks[i], normalized, StringComparison.OrdinalIgnoreCase)) return i;
+            if (string.Equals(OrderedRankNames[i], normalized, StringComparison.OrdinalIgnoreCase)) return i;
         }
         return 0;
     }
@@ -130,7 +140,7 @@ public static class RankRules
     public static bool IsKnownClanRank(string rank)
     {
         var normalized = NormalizeRankName(rank);
-        return OrderedRanks.Any(x => string.Equals(x, normalized, StringComparison.OrdinalIgnoreCase));
+        return OrderedRankNames.Any(x => string.Equals(x, normalized, StringComparison.OrdinalIgnoreCase));
     }
 
     public static bool IsSpecialWomRole(string role)
