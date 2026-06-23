@@ -1128,8 +1128,6 @@ public class DiscordPromotionBotWorker(
             await RespondToComponentAsync(component, "Player not found.", ephemeral: true);
             return;
         }
-        var scheduleOwnerPlayerId = playerId;
-
         if (action == "add")
         {
             var templeOk = await AddPlayerToTempleAsync(player.Username);
@@ -1162,12 +1160,6 @@ public class DiscordPromotionBotWorker(
         }
         else if (action == "remove")
         {
-            scheduleOwnerPlayerId = await db.Players
-                .Where(x => x.Id != player.Id)
-                .OrderBy(x => x.Id)
-                .Select(x => x.Id)
-                .FirstOrDefaultAsync();
-
             var womRemoved = await RemovePlayerFromWomAsync(player.Username);
             if (!womRemoved)
             {
@@ -1191,10 +1183,9 @@ public class DiscordPromotionBotWorker(
             return;
         }
 
-        var actionEventPlayerId = action == "remove" && scheduleOwnerPlayerId > 0 ? scheduleOwnerPlayerId : playerId;
         db.LifecycleEvents.Add(new LifecycleEvent
         {
-            PlayerId = actionEventPlayerId,
+            PlayerId = playerId,
             EventType = "TEMPLE_MISSING_ACTION_APPLIED",
             MetadataJson = JsonUtil.Serialize(new
             {
@@ -1214,28 +1205,14 @@ public class DiscordPromotionBotWorker(
         var handled = $"Handled by {component.User.Username} ({action})";
         await UpdateComponentMessageAsync(component, BuildHandledEmbed(component.Message.Embeds.FirstOrDefault(), handled, action == "add" ? "approve" : "dismiss"));
 
-        if (scheduleOwnerPlayerId > 0)
-        {
-            ScheduleChannelMessageDelete(
-                db,
-                scheduleOwnerPlayerId,
-                component.Channel.Id,
-                component.Message.Id,
-                "TEMPLE_MISSING_DISCORD_DELETE_SCHEDULED",
-                new { Reason = "temple-missing-action-handled", Action = action });
-            await db.SaveChangesAsync();
-        }
-        else if (action == "remove")
-        {
-            try
-            {
-                await component.Message.DeleteAsync();
-            }
-            catch
-            {
-                // best effort if no valid player row exists for lifecycle scheduling
-            }
-        }
+        ScheduleChannelMessageDelete(
+            db,
+            playerId,
+            component.Channel.Id,
+            component.Message.Id,
+            "TEMPLE_MISSING_DISCORD_DELETE_SCHEDULED",
+            new { Reason = "temple-missing-action-handled", Action = action });
+        await db.SaveChangesAsync();
     }
 
     private async Task HandleMissingWomButtonAsync(SocketMessageComponent component, string[] parts)
@@ -1251,7 +1228,6 @@ public class DiscordPromotionBotWorker(
             return;
         }
 
-        var scheduleOwnerPlayerId = playerId;
         if (action == "reinstate")
         {
             var womOk = await AddPlayerToWomAsync(player.Username);
@@ -1276,12 +1252,6 @@ public class DiscordPromotionBotWorker(
         }
         else if (action == "remove")
         {
-            scheduleOwnerPlayerId = await db.Players
-                .Where(x => x.Id != player.Id)
-                .OrderBy(x => x.Id)
-                .Select(x => x.Id)
-                .FirstOrDefaultAsync();
-
             var templeOk = await RemovePlayerFromTempleAsync(player.Username);
             if (!templeOk)
             {
@@ -1306,10 +1276,9 @@ public class DiscordPromotionBotWorker(
             return;
         }
 
-        var actionEventPlayerId = action == "remove" && scheduleOwnerPlayerId > 0 ? scheduleOwnerPlayerId : playerId;
         db.LifecycleEvents.Add(new LifecycleEvent
         {
-            PlayerId = actionEventPlayerId,
+            PlayerId = playerId,
             EventType = "WOM_MISSING_ACTION_APPLIED",
             MetadataJson = JsonUtil.Serialize(new
             {
@@ -1329,21 +1298,14 @@ public class DiscordPromotionBotWorker(
         var handled = $"Handled by {component.User.Username} ({action})";
         await UpdateComponentMessageAsync(component, BuildHandledEmbed(component.Message.Embeds.FirstOrDefault(), handled, action == "reinstate" ? "approve" : "dismiss"));
 
-        if (scheduleOwnerPlayerId > 0)
-        {
-            ScheduleChannelMessageDelete(
-                db,
-                scheduleOwnerPlayerId,
-                component.Channel.Id,
-                component.Message.Id,
-                "WOM_MISSING_DISCORD_DELETE_SCHEDULED",
-                new { Reason = "wom-missing-action-handled", Action = action });
-            await db.SaveChangesAsync();
-        }
-        else if (action == "remove")
-        {
-            try { await component.Message.DeleteAsync(); } catch { }
-        }
+        ScheduleChannelMessageDelete(
+            db,
+            playerId,
+            component.Channel.Id,
+            component.Message.Id,
+            "WOM_MISSING_DISCORD_DELETE_SCHEDULED",
+            new { Reason = "wom-missing-action-handled", Action = action });
+        await db.SaveChangesAsync();
     }
 
     private async Task HandleSelectMenuAsync(SocketMessageComponent component)
@@ -2529,6 +2491,64 @@ public class DiscordPromotionBotWorker(
         return fallback;
     }
 
+    private async Task<int?> ResolveSlashCommandOwnerPlayerIdAsync(TrackerDbContext db, SocketSlashCommand command, CancellationToken ct)
+    {
+        foreach (var target in ExtractSlashCommandPlayerTargets(command.Data.Options))
+        {
+            var normalized = NormalizeUsername(target);
+            if (string.IsNullOrWhiteSpace(normalized)) continue;
+            var lowered = normalized.ToLowerInvariant();
+            var playerId = await db.Players
+                .Where(x => x.Username.ToLower() == lowered)
+                .Select(x => (int?)x.Id)
+                .FirstOrDefaultAsync(ct);
+            if (playerId.HasValue) return playerId;
+        }
+
+        return await ResolveLifecycleOwnerPlayerIdAsync(db, 0, ct);
+    }
+
+    private static IReadOnlyList<string> ExtractSlashCommandPlayerTargets(IReadOnlyCollection<SocketSlashCommandDataOption> options)
+    {
+        var targets = new List<string>();
+        foreach (var option in options)
+        {
+            AddSlashCommandPlayerTargets(targets, option);
+        }
+
+        return targets
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private static void AddSlashCommandPlayerTargets(List<string> targets, SocketSlashCommandDataOption option)
+    {
+        if (IsPlayerTargetOption(option.Name))
+        {
+            var raw = option.Value?.ToString();
+            if (!string.IsNullOrWhiteSpace(raw))
+            {
+                targets.AddRange(raw.Split(',')
+                    .Select(x => x.Trim())
+                    .Where(x => !string.IsNullOrWhiteSpace(x)));
+            }
+        }
+
+        if (option.Options is null) return;
+        foreach (var nested in option.Options)
+        {
+            AddSlashCommandPlayerTargets(targets, nested);
+        }
+    }
+
+    private static bool IsPlayerTargetOption(string optionName)
+    {
+        return string.Equals(optionName, "player", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(optionName, "players", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(optionName, "username", StringComparison.OrdinalIgnoreCase);
+    }
+
     private async Task ScheduleInteractionResponseDeleteAsync(SocketSlashCommand command, string? messageDescription = null)
     {
         await using var scope = scopeFactory.CreateAsyncScope();
@@ -3702,6 +3722,10 @@ public class DiscordPromotionBotWorker(
             foreach (var prop in doc.RootElement.EnumerateObject())
             {
                 values[prop.Name] = JsonValueToString(prop.Value);
+                if (string.Equals(prop.Name, "Options", StringComparison.OrdinalIgnoreCase))
+                {
+                    AddSlashCommandOptionMetadata(values, prop.Value);
+                }
             }
         }
         catch
@@ -3709,6 +3733,32 @@ public class DiscordPromotionBotWorker(
             // best-effort metadata for Discord display/action handling
         }
         return values;
+    }
+
+    private static void AddSlashCommandOptionMetadata(Dictionary<string, string> values, JsonElement options)
+    {
+        if (options.ValueKind != JsonValueKind.Array) return;
+
+        var index = 0;
+        foreach (var option in options.EnumerateArray())
+        {
+            if (option.ValueKind != JsonValueKind.Object) continue;
+            var name = option.TryGetProperty("Name", out var nameProp) ? JsonValueToString(nameProp) : "";
+            var value = option.TryGetProperty("Value", out var valueProp) ? JsonValueToString(valueProp) : "";
+            if (!string.IsNullOrWhiteSpace(name))
+            {
+                values[$"Option.{name}"] = value;
+            }
+
+            values[$"Option{index}.Name"] = name;
+            values[$"Option{index}.Value"] = value;
+            index++;
+
+            if (option.TryGetProperty("Options", out var nestedOptions))
+            {
+                AddSlashCommandOptionMetadata(values, nestedOptions);
+            }
+        }
     }
 
     private static string? PickLifecycleValue(Dictionary<string, string> metadata, params string[] keys)
@@ -7530,6 +7580,7 @@ public class DiscordPromotionBotWorker(
         var playerText = string.IsNullOrWhiteSpace(player) ? "Player" : $"`{EscapeInlineCode(player)}`";
         var action = PickLifecycleValue(row.Metadata, "Action");
         var commandName = PickLifecycleValue(row.Metadata, "Command", "CommandName");
+        var commandTarget = GetHistoryCommandTarget(row);
         var actor = PickLifecycleValue(row.Metadata, "HandledBy", "RequestedBy", "User", "IgnoredBy");
         var newPlayer = PickLifecycleValue(row.Metadata, "NewPlayer", "Username", "Player");
         var previousPlayer = PickLifecycleValue(row.Metadata, "SuggestedPrevious", "PreviousPlayer", "PreviousUsername");
@@ -7568,7 +7619,7 @@ public class DiscordPromotionBotWorker(
             "DISCORD_POSTED_MESSAGE_MISSING" => $"{playerText} Discord review card is missing.",
             "DISCORD_SLASH_COMMAND_USED" => string.IsNullOrWhiteSpace(commandName)
                 ? $"Slash command used{(string.IsNullOrWhiteSpace(actor) ? "" : $" by {EscapeHistoryText(actor)}")}."
-                : $"Slash command `/{EscapeInlineCode(commandName)}` used{(string.IsNullOrWhiteSpace(actor) ? "" : $" by {EscapeHistoryText(actor)}")}.",
+                : $"Slash command `/{EscapeInlineCode(commandName)}` used{FormatHistoryTargetClause(commandTarget)}{(string.IsNullOrWhiteSpace(actor) ? "" : $" by {EscapeHistoryText(actor)}")}.",
             "PLAYER_SNAPSHOT_CONTAMINATION_REQUIRED" => $"{playerText} has suspicious stat data and needs review.",
             "PET_HISCORES_DISCORD_POSTED" => $"Pet hiscores page `{EscapeInlineCode(PickLifecycleValue(row.Metadata, "Page") ?? "unknown")}` was posted.",
             "PET_HISCORES_BANNER_POSTED" => "Pet hiscores banner was posted.",
@@ -7605,9 +7656,34 @@ public class DiscordPromotionBotWorker(
 
     private static string? GetHistoryPlayerName(HistoryEventRow row)
     {
-        return row.EventType.StartsWith("WOM_ONLY_", StringComparison.OrdinalIgnoreCase)
-            ? PickLifecycleValue(row.Metadata, "Username", "Player") ?? row.Player
-            : row.Player ?? PickLifecycleValue(row.Metadata, "Username", "Player", "NewPlayer");
+        if (row.EventType.EndsWith("_ACTION_APPLIED", StringComparison.OrdinalIgnoreCase) ||
+            row.EventType.EndsWith("_ACTION_REQUIRED", StringComparison.OrdinalIgnoreCase) ||
+            row.EventType.EndsWith("_DISCORD_POSTED", StringComparison.OrdinalIgnoreCase) ||
+            row.EventType.StartsWith("WOM_ONLY_", StringComparison.OrdinalIgnoreCase))
+        {
+            return PickLifecycleValue(row.Metadata, "Username", "Player", "NewPlayer") ?? row.Player;
+        }
+
+        return row.Player ?? PickLifecycleValue(row.Metadata, "Username", "Player", "NewPlayer");
+    }
+
+    private static string? GetHistoryCommandTarget(HistoryEventRow row)
+    {
+        return PickLifecycleValue(
+            row.Metadata,
+            "Option.players",
+            "Option.player",
+            "Option.username",
+            "Player",
+            "Username",
+            "NewPlayer");
+    }
+
+    private static string FormatHistoryTargetClause(string? target)
+    {
+        return string.IsNullOrWhiteSpace(target)
+            ? ""
+            : $" for `{EscapeInlineCode(target)}`";
     }
 
     private static string FormatHistoryEventName(string eventType)
@@ -7874,7 +7950,7 @@ Shows all currently ignored players in:
         {
             await using var scope = scopeFactory.CreateAsyncScope();
             var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
-            var ownerId = await ResolveLifecycleOwnerPlayerIdAsync(db, 0, CancellationToken.None);
+            var ownerId = await ResolveSlashCommandOwnerPlayerIdAsync(db, command, CancellationToken.None);
             if (!ownerId.HasValue)
             {
                 logger.LogWarning("Unable to record slash command /{Command}; no valid player row exists for lifecycle ownership.", command.Data.Name);
