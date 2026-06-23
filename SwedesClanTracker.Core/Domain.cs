@@ -70,21 +70,28 @@ public class RankResult
     public string Explanation { get; init; } = "No rank requirement met.";
 }
 
+public sealed record RankRequirement(string Rank, string Description);
+
 public static class RankEvaluator
 {
-    private static readonly List<(string Rank, Func<PlayerSnapshot, bool> Rule, string Why)> Rules =
+    private sealed record RankEvaluationRule(string Rank, Func<PlayerSnapshot, bool> Rule, string Why);
+
+    private static readonly IReadOnlyList<RankEvaluationRule> Rules =
     [
-        ("Officer", s => s.TotalLevel >= 2100, "Total level >= 2100"),
-        ("Commander", s => s.TotalLevel >= 2300, "Total level >= 2300"),
-        ("Lieutenant", s => s.Ehb >= 750 || s.Ehp >= 1000, "EHB >= 750 OR EHP >= 1000"),
-        ("Captain", s => s.Ehb >= 1000 || s.PetCount >= 10 || s.Ehp >= 1500, "EHB >= 1000 OR pets >= 10 OR EHP >= 1500"),
-        ("Astral", s => s.Ehb >= 1250 || s.PetCount >= 15 || s.Ehp >= 1750 || s.Collections >= 800, "EHB >= 1250 OR pets >= 15 OR EHP >= 1750 OR collections >= 800"),
-        ("General", s => s.Ehb >= 1500 || s.PetCount >= 20 || s.Ehp >= 2000 || s.Collections >= 950, "EHB >= 1500 OR pets >= 20 OR EHP >= 2000 OR collections >= 950"),
-        ("Brigadier", s => s.Ehb >= 2000 || s.PetCount >= 30 || s.Ehp >= 2500 || s.Collections >= 1050, "EHB >= 2000 OR pets >= 30 OR EHP >= 2500 OR collections >= 1050"),
-        ("Admiral", s => s.Ehb >= 3000 || s.PetCount >= 40 || s.Ehp >= 4000 || s.Collections >= 1300, "EHB >= 3000 OR pets >= 40 OR EHP >= 4000 OR collections >= 1300"),
-        ("Marshal", s => s.Ehb >= 4000 || s.PetCount >= 50 || s.Ehp >= 5000 || s.Collections >= 1450, "EHB >= 4000 OR pets >= 50 OR EHP >= 5000 OR collections >= 1450"),
-        ("Beast", s => s.Ehb >= 5000 || s.PetCount >= 60 || s.Ehp >= 7000 || s.Collections >= 1550, "EHB >= 5000 OR pets >= 60 OR EHP >= 7000 OR collections >= 1550")
+        new("Officer", s => s.TotalLevel >= 2100, "Total level >= 2100"),
+        new("Commander", s => s.TotalLevel >= 2300, "Total level >= 2300"),
+        new("Lieutenant", s => s.Ehb >= 750 || s.Ehp >= 1000, "EHB >= 750 OR EHP >= 1000"),
+        new("Captain", s => s.Ehb >= 1000 || s.PetCount >= 10 || s.Ehp >= 1500, "EHB >= 1000 OR pets >= 10 OR EHP >= 1500"),
+        new("Astral", s => s.Ehb >= 1250 || s.PetCount >= 15 || s.Ehp >= 1750 || s.Collections >= 800, "EHB >= 1250 OR pets >= 15 OR EHP >= 1750 OR collections >= 800"),
+        new("General", s => s.Ehb >= 1500 || s.PetCount >= 20 || s.Ehp >= 2000 || s.Collections >= 950, "EHB >= 1500 OR pets >= 20 OR EHP >= 2000 OR collections >= 950"),
+        new("Brigadier", s => s.Ehb >= 2000 || s.PetCount >= 30 || s.Ehp >= 2500 || s.Collections >= 1050, "EHB >= 2000 OR pets >= 30 OR EHP >= 2500 OR collections >= 1050"),
+        new("Admiral", s => s.Ehb >= 3000 || s.PetCount >= 40 || s.Ehp >= 4000 || s.Collections >= 1300, "EHB >= 3000 OR pets >= 40 OR EHP >= 4000 OR collections >= 1300"),
+        new("Marshal", s => s.Ehb >= 4000 || s.PetCount >= 50 || s.Ehp >= 5000 || s.Collections >= 1450, "EHB >= 4000 OR pets >= 50 OR EHP >= 5000 OR collections >= 1450"),
+        new("Beast", s => s.Ehb >= 5000 || s.PetCount >= 60 || s.Ehp >= 7000 || s.Collections >= 1550, "EHB >= 5000 OR pets >= 60 OR EHP >= 7000 OR collections >= 1550")
     ];
+
+    public static IReadOnlyList<RankRequirement> Requirements =>
+        Rules.Select(x => new RankRequirement(x.Rank, x.Why)).ToArray();
 
     public static RankResult Evaluate(PlayerSnapshot snapshot)
     {

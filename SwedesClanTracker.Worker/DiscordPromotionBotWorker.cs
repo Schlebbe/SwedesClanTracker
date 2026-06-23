@@ -680,6 +680,9 @@ public class DiscordPromotionBotWorker(
             var help = new SlashCommandBuilder()
                 .WithName("help")
                 .WithDescription("Shows all available commands and what they do.");
+            var rankConditions = new SlashCommandBuilder()
+                .WithName("rank-conditions")
+                .WithDescription("Show the current tracker rank requirements.");
             var update = new SlashCommandBuilder()
                 .WithName("update")
                 .WithDescription("Prioritize a player for immediate stats update.")
@@ -738,6 +741,7 @@ public class DiscordPromotionBotWorker(
             await socketGuild.CreateApplicationCommandAsync(discordRankReviewPost.Build());
             await socketGuild.CreateApplicationCommandAsync(history.Build());
             await socketGuild.CreateApplicationCommandAsync(help.Build());
+            await socketGuild.CreateApplicationCommandAsync(rankConditions.Build());
             await socketGuild.CreateApplicationCommandAsync(update.Build());
             await socketGuild.CreateApplicationCommandAsync(add.Build());
             await socketGuild.CreateApplicationCommandAsync(remove.Build());
@@ -6459,6 +6463,12 @@ public class DiscordPromotionBotWorker(
                 return;
             }
 
+            if (string.Equals(command.Data.Name, "rank-conditions", StringComparison.OrdinalIgnoreCase))
+            {
+                await HandleRankConditionsSlashCommandAsync(command);
+                return;
+            }
+
             if (string.Equals(command.Data.Name, "unignore", StringComparison.OrdinalIgnoreCase))
             {
                 await HandleWomUnignoreSlashCommandAsync(command);
@@ -7875,6 +7885,9 @@ Posts review cards for actionable Discord rank role mismatches.
 **/lookup <player>**  
 Shows a player summary: rank, stats, pets, Temple/WOM status, and latest sync.
 
+**/rank-conditions**  
+Shows the current tracker rank requirements.
+
 **/update <player>**  
 Prioritizes a player in the update queue for a faster sync.
 
@@ -7921,6 +7934,29 @@ Shows all currently ignored players in:
 
         await RespondAndAutoDeleteAsync(command, helpText, ephemeral: true);
     }
+
+    private async Task HandleRankConditionsSlashCommandAsync(SocketSlashCommand command)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("**Recruit**: Default when no listed requirement is met.");
+        foreach (var requirement in RankEvaluator.Requirements)
+        {
+            sb.AppendLine($"**{requirement.Rank}**: {FormatRankRequirement(requirement.Description)}");
+        }
+
+        var embed = new EmbedBuilder()
+            .WithTitle("Current Rank Conditions")
+            .WithDescription(sb.ToString())
+            .WithColor(new Color(199, 163, 95))
+            .WithFooter("Higher matching rank wins.")
+            .WithTimestamp(DateTimeOffset.Now)
+            .Build();
+
+        await RespondAndAutoDeleteAsync(command, embed, ephemeral: true);
+    }
+
+    private static string FormatRankRequirement(string requirement) =>
+        requirement.Replace(" OR ", " / ", StringComparison.Ordinal);
 
     private async Task LogSlashCommandAsync(SocketSlashCommand command, bool adminLocked, bool allowed)
     {
@@ -8137,6 +8173,7 @@ Shows all currently ignored players in:
                string.Equals(commandName, "update", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(commandName, "history", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(commandName, "help", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(commandName, "rank-conditions", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(commandName, "show-ignored", StringComparison.OrdinalIgnoreCase);
     }
 

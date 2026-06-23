@@ -30,6 +30,12 @@ public class RankRulesTests
         Assert.Equal(RankRules.OrderedClanRanks.Skip(1), RankRules.AssignableClanRanks);
     }
 
+    [Fact]
+    public void RankEvaluatorRequirements_FollowAssignableClanRankOrder()
+    {
+        Assert.Equal(RankRules.AssignableClanRanks, RankEvaluator.Requirements.Select(x => x.Rank));
+    }
+
     [Theory]
     [InlineData("General", "general")]
     [InlineData("Deputy Owner", "deputy_owner")]
