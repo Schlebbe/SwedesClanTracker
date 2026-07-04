@@ -162,6 +162,13 @@ public class TempleClient(HttpClient httpClient, ILogger<TempleClient> logger) :
             if (!string.IsNullOrWhiteSpace(primaryEhbKey) &&
                 TryReadNumericProperty(data, primaryEhbKey, out var primaryEhb))
             {
+                if (primaryEhb == 0 &&
+                    TryReadHighestModeEhb(data, out var nonZeroFallbackEhb) &&
+                    nonZeroFallbackEhb > 0)
+                {
+                    return nonZeroFallbackEhb;
+                }
+
                 return primaryEhb;
             }
         }

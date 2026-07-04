@@ -72,6 +72,38 @@ public class TempleClientTests
     }
 
     [Fact]
+    public async Task GetPlayerStatsAsync_FallsBackToHighestModeEhbWhenPrimaryIsZero()
+    {
+        var client = CreateClient("""
+            {
+              "data": {
+                "info": {
+                  "Primary_ehb": "Uim_ehb",
+                  "Primary_ehp": "Im_ehp"
+                },
+                "Overall_level": 2185,
+                "Overall_ehp": 1060.4995,
+                "Collections": 490,
+                "Ehb": 612.5905,
+                "Im_ehb": 664.262,
+                "Uim_ehb": 0.0,
+                "1def_ehb": 0.0,
+                "Ehp": 537.6093,
+                "Im_ehp": 1060.4995,
+                "Uim_ehp": 0.0,
+                "1def_ehp": 0.0
+              }
+            }
+            """);
+
+        var stats = await client.GetPlayerStatsAsync("Dutten", CancellationToken.None);
+
+        Assert.NotNull(stats);
+        Assert.Equal(664.262, stats!.Ehb, 6);
+        Assert.Equal(1060.4995, stats.Ehp, 6);
+    }
+
+    [Fact]
     public async Task GetPlayerStatsAsync_IgnoresBossEhbFieldsDuringFallback()
     {
         var client = CreateClient("""

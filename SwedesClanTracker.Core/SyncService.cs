@@ -523,12 +523,10 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
                 .Select(x => new
                 {
                     x.Username,
-                    TotalLevelDelta = Math.Abs(x.Last!.TotalLevel - snapshot.TotalLevel),
-                    EhbDelta = Math.Abs(x.Last!.Ehb - snapshot.Ehb),
-                    EhpDelta = Math.Abs(x.Last!.Ehp - snapshot.Ehp)
+                    Match = RenameMatchRules.Evaluate(x.Last!, snapshot)
                 })
-                .Where(x => x.TotalLevelDelta <= 5 && x.EhbDelta <= 10 && x.EhpDelta <= 10)
-                .OrderBy(x => x.TotalLevelDelta + x.EhbDelta + x.EhpDelta)
+                .Where(x => x.Match.IsMatch)
+                .OrderBy(x => x.Match.Score)
                 .ThenBy(x => x.Username)
                 .ToList();
             var match = rankedCandidates.FirstOrDefault();
@@ -540,12 +538,16 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
                 {
                     NewPlayer = player.Username,
                     SuggestedPrevious = match.Username,
+                    match.Match.EhbIgnoredReason,
                     CandidatePreviousPlayers = rankedCandidates.Take(5).Select(x => new
                     {
                         PreviousPlayer = x.Username,
-                        x.TotalLevelDelta,
-                        x.EhbDelta,
-                        x.EhpDelta
+                        x.Match.TotalLevelDelta,
+                        x.Match.EhbDelta,
+                        x.Match.EhpDelta,
+                        x.Match.CollectionsDelta,
+                        x.Match.PetCountDelta,
+                        x.Match.EhbIgnoredReason
                     }),
                     Source = "sync-auto-rename",
                     DetectedAt = DateTimeOffset.UtcNow
