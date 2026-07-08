@@ -42,7 +42,11 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
             if (rosterSet.Contains(NormalizeUsername(player.Username)))
             {
                 player.LastSeen = now;
-                if (missingInWom && player.Status != PlayerStatus.REMOVED_CONFIRMED)
+                if (missingInWom && player.Status == PlayerStatus.MERGE_SUGGESTED)
+                {
+                    await EnsureOpenMergeSuggestedEventAsync(player, ct);
+                }
+                else if (missingInWom && player.Status != PlayerStatus.REMOVED_CONFIRMED)
                 {
                     player.Status = PlayerStatus.MISSING_PENDING_REVIEW;
                     await CloseOpenLifecycleEventsAsync(player.Id, ct, "NEW_PLAYER", "MERGE_SUGGESTED", "MERGE_ACTION_REQUIRED");
