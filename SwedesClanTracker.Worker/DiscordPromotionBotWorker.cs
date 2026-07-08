@@ -3147,6 +3147,9 @@ public class DiscordPromotionBotWorker(
             .ToList();
 
         var pages = BuildPetHiscorePages(rows.Select((x, i) => (Rank: i + 1, x.Username, x.Pets)).ToList());
+        var pageFingerprints = pages
+            .Select(page => ComputeRenderFingerprint(new { Content = page, Flags = MessageFlags.SuppressEmbeds.ToString() }))
+            .ToList();
 
         if (postedForChannel.Count == 0)
         {
@@ -3162,7 +3165,7 @@ public class DiscordPromotionBotWorker(
 
             for (var i = 0; i < pages.Count; i++)
             {
-                var msg = await channel.SendMessageAsync(pages[i]);
+                var msg = await channel.SendMessageAsync(pages[i], flags: MessageFlags.SuppressEmbeds);
                 db.LifecycleEvents.Add(new LifecycleEvent
                 {
                     PlayerId = ownerPlayerId.Value,
@@ -3171,7 +3174,8 @@ public class DiscordPromotionBotWorker(
                     {
                         ChannelId = _options.PetHiscoresChannelId,
                         DiscordMessageId = msg.Id,
-                        Page = i
+                        Page = i,
+                        RenderFingerprint = pageFingerprints[i]
                     }),
                     Status = "DONE",
                     CreatedAt = DateTimeOffset.UtcNow
@@ -3186,7 +3190,8 @@ public class DiscordPromotionBotWorker(
             {
                 Event = x,
                 Page = ExtractInt(x.MetadataJson, "Page") ?? 0,
-                MessageId = ExtractUlong(x.MetadataJson, "DiscordMessageId")
+                MessageId = ExtractUlong(x.MetadataJson, "DiscordMessageId"),
+                RenderFingerprint = ExtractString(x.MetadataJson, "RenderFingerprint")
             })
             .Where(x => x.MessageId.HasValue)
             .GroupBy(x => x.Page)
@@ -3198,7 +3203,7 @@ public class DiscordPromotionBotWorker(
         {
             for (var i = 0; i < pages.Count; i++)
             {
-                var msg = await channel.SendMessageAsync(pages[i]);
+                var msg = await channel.SendMessageAsync(pages[i], flags: MessageFlags.SuppressEmbeds);
                 db.LifecycleEvents.Add(new LifecycleEvent
                 {
                     PlayerId = ownerId.Value,
@@ -3207,7 +3212,8 @@ public class DiscordPromotionBotWorker(
                     {
                         ChannelId = _options.PetHiscoresChannelId,
                         DiscordMessageId = msg.Id,
-                        Page = i
+                        Page = i,
+                        RenderFingerprint = pageFingerprints[i]
                     }),
                     Status = "DONE",
                     CreatedAt = DateTimeOffset.UtcNow
@@ -3220,12 +3226,29 @@ public class DiscordPromotionBotWorker(
         for (var i = 0; i < pages.Count; i++)
         {
             var existing = mapped.FirstOrDefault(x => x.Page == i);
+            var pageFingerprint = pageFingerprints[i];
             if (existing is not null && existing.MessageId.HasValue)
             {
+                if (string.Equals(existing.RenderFingerprint, pageFingerprint, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
                 var (messageState, userMessage) = await TryGetTrackedUserMessageAsync(channel, existing.MessageId.Value);
                 if (messageState == TrackedMessageState.Found && userMessage is not null)
                 {
-                    await userMessage.ModifyAsync(p => p.Content = pages[i]);
+                    await userMessage.ModifyAsync(p =>
+                    {
+                        p.Content = pages[i];
+                        p.Flags = MessageFlags.SuppressEmbeds;
+                    });
+                    existing.Event.MetadataJson = JsonUtil.Serialize(new
+                    {
+                        ChannelId = _options.PetHiscoresChannelId,
+                        DiscordMessageId = userMessage.Id,
+                        Page = i,
+                        RenderFingerprint = pageFingerprint
+                    });
                     continue;
                 }
                 if (messageState == TrackedMessageState.Unknown)
@@ -3235,7 +3258,7 @@ public class DiscordPromotionBotWorker(
                 }
             }
 
-            var newMsg = await channel.SendMessageAsync(pages[i]);
+            var newMsg = await channel.SendMessageAsync(pages[i], flags: MessageFlags.SuppressEmbeds);
             db.LifecycleEvents.Add(new LifecycleEvent
             {
                 PlayerId = ownerId.Value,
@@ -3244,7 +3267,8 @@ public class DiscordPromotionBotWorker(
                 {
                     ChannelId = _options.PetHiscoresChannelId,
                     DiscordMessageId = newMsg.Id,
-                    Page = i
+                    Page = i,
+                    RenderFingerprint = pageFingerprint
                 }),
                 Status = "DONE",
                 CreatedAt = DateTimeOffset.UtcNow
@@ -3253,14 +3277,32 @@ public class DiscordPromotionBotWorker(
 
         if (mapped.Count > pages.Count)
         {
+            const string emptyPageContent = "Pet Hiscores\n\nNo entries for this page.";
+            var emptyPageFingerprint = ComputeRenderFingerprint(new { Content = emptyPageContent, Flags = MessageFlags.SuppressEmbeds.ToString() });
             for (var i = pages.Count; i < mapped.Count; i++)
             {
+                if (string.Equals(mapped[i].RenderFingerprint, emptyPageFingerprint, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
                 try
                 {
                     var msg = await channel.GetMessageAsync(mapped[i].MessageId!.Value);
                     if (msg is IUserMessage userMessage)
                     {
-                        await userMessage.ModifyAsync(p => p.Content = "Pet Hiscores\n\nNo entries for this page.");
+                        await userMessage.ModifyAsync(p =>
+                        {
+                            p.Content = emptyPageContent;
+                            p.Flags = MessageFlags.SuppressEmbeds;
+                        });
+                        mapped[i].Event.MetadataJson = JsonUtil.Serialize(new
+                        {
+                            ChannelId = _options.PetHiscoresChannelId,
+                            DiscordMessageId = userMessage.Id,
+                            Page = mapped[i].Page,
+                            RenderFingerprint = emptyPageFingerprint
+                        });
                     }
                 }
                 catch { }
@@ -3364,8 +3406,8 @@ public class DiscordPromotionBotWorker(
             "Samtliga medlemmar i Swedes med 10+ pets har möjligheten att bli addade till ⁠pet-hiscores. " +
             "Ladda ner pluginen **\"TempleOSRS\"**, kryssa i **\"Collection Log Update Button\"** och **\"Automatically Sync Collection Log\"** - gå sedan in på er collection log och klicka på **\"Temple\"** i det övre högra hörnet. " +
             "Om ni behöver hjälp med detta så pma <@214909384617099264> eller <@193851480422219777>. " +
-            "Om du har 30+ pets så har du chansen att få dina pets tillagda på din Templeprofil via Petcord <http://discord.gg/petcord>, Alice (sugarbunny.) är den som lägger till på din profil.\n\n**Pet Leaderboards**\n";
-        const string continuedHeader = "**Pet Leaderboards (forts.)**\n";
+            "Om du har 30+ pets så har du chansen att få dina pets tillagda på din Templeprofil via Petcord <https://discord.gg/petcord>, Alice (sugarbunny.) är den som lägger till på din profil.\n\n**Pet Leaderboards**\n";
+        const string continuedHeader = "";
         if (entries.Count == 0)
         {
             pages.Add($"{intro}> Inga spelare med 10+ pets just nu.");
@@ -3446,6 +3488,20 @@ public class DiscordPromotionBotWorker(
         }
 
         return values.Distinct().OrderBy(x => x).ToList();
+    }
+
+    private static string? ExtractString(string json, string property)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty(property, out var prop)) return null;
+            return prop.ValueKind == JsonValueKind.String ? prop.GetString() : null;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static ulong? ExtractUlong(string json, string property)
