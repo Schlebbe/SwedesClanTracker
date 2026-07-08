@@ -716,6 +716,9 @@ public class DiscordPromotionBotWorker(
                 .WithDescription("Update a player's WiseOldMan group role.")
                 .AddOption("player", ApplicationCommandOptionType.String, "Player username", isRequired: true)
                 .AddOption(BuildWomRoleOption());
+            var womCacheRefresh = new SlashCommandBuilder()
+                .WithName("wom-cache-refresh")
+                .WithDescription("Refresh the local WiseOldMan roster cache now.");
             var unignore = new SlashCommandBuilder()
                 .WithName("unignore")
                 .WithDescription("Remove ignore flags for WiseOldMan-only and WOM rank mismatch tracking.")
@@ -750,6 +753,7 @@ public class DiscordPromotionBotWorker(
             await socketGuild.CreateApplicationCommandAsync(womAdd.Build());
             await socketGuild.CreateApplicationCommandAsync(womRemove.Build());
             await socketGuild.CreateApplicationCommandAsync(womRoleUpdate.Build());
+            await socketGuild.CreateApplicationCommandAsync(womCacheRefresh.Build());
             await socketGuild.CreateApplicationCommandAsync(unignore.Build());
             await socketGuild.CreateApplicationCommandAsync(showIgnored.Build());
             await socketGuild.CreateApplicationCommandAsync(requeueReviewCard.Build());
@@ -6421,6 +6425,12 @@ public class DiscordPromotionBotWorker(
                 return;
             }
 
+            if (string.Equals(command.Data.Name, "wom-cache-refresh", StringComparison.OrdinalIgnoreCase))
+            {
+                await HandleWomCacheRefreshSlashCommandAsync(command);
+                return;
+            }
+
             if (string.Equals(command.Data.Name, "discord-guess", StringComparison.OrdinalIgnoreCase))
             {
                 await HandleDiscordGuessSlashCommandAsync(command);
@@ -7917,6 +7927,9 @@ Combo command: removes players from both TempleOSRS and Wise Old Man.
 **/wom-role-update <player> <rank>**  
 Updates a player's Wise Old Man group role.
 
+**/wom-cache-refresh**  
+Refreshes the local Wise Old Man roster cache immediately.
+
 ### Review / Ignore Handling
 **/requeue-review-card <player>**  
 Forces review card reposting/recreation for a player when the review is still active.
@@ -8174,6 +8187,7 @@ Shows all currently ignored players in:
                string.Equals(commandName, "history", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(commandName, "help", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(commandName, "rank-conditions", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(commandName, "wom-cache-refresh", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(commandName, "show-ignored", StringComparison.OrdinalIgnoreCase);
     }
 
@@ -8207,6 +8221,7 @@ Shows all currently ignored players in:
             string.Equals(commandName, "wom-add", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(commandName, "wom-remove", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(commandName, "wom-role-update", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(commandName, "wom-cache-refresh", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(commandName, "unignore", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(commandName, "show-ignored", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(commandName, "requeue-review-card", StringComparison.OrdinalIgnoreCase);
@@ -9202,6 +9217,37 @@ Shows all currently ignored players in:
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Failed to record WiseOldMan role update for {Player}.", playerName);
+        }
+    }
+
+    private async Task HandleWomCacheRefreshSlashCommandAsync(SocketSlashCommand command)
+    {
+        try
+        {
+            await using var scope = scopeFactory.CreateAsyncScope();
+            var wiseOldManClient = scope.ServiceProvider.GetRequiredService<IWiseOldManClient>();
+            await wiseOldManClient.InvalidateCacheAsync(CancellationToken.None);
+            var roles = await wiseOldManClient.GetMemberRolesAsync(CancellationToken.None);
+
+            logger.LogInformation(
+                "Wise Old Man roster cache refreshed by Discord slash command /{Command} from {User} ({UserId}); loaded {MemberCount} members.",
+                command.Data.Name,
+                command.User.Username,
+                command.User.Id,
+                roles.Count);
+
+            await RespondAndAutoDeleteAsync(
+                command,
+                $"Wise Old Man roster cache refreshed. Loaded {roles.Count.ToString(CultureInfo.InvariantCulture)} member role(s).",
+                ephemeral: true);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed handling /wom-cache-refresh.");
+            await RespondAndAutoDeleteAsync(
+                command,
+                "Failed to refresh the Wise Old Man roster cache. Check worker logs for details.",
+                ephemeral: true);
         }
     }
 
