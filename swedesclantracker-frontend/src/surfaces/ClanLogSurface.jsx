@@ -13,132 +13,37 @@ export function ClanLogSurface({ log, loading, error, onRetry }) {
   const columns = useMemo(() => buildColumns(activity), [activity]);
 
   return (
-    <div className="surface-grid activity-surface">
-      <header className="surface-header activity-header">
-        <div>
-          <p className="eyebrow">Activity Log</p>
-          <h2>{activity.title}</h2>
-          <p>{activity.subtitle}</p>
-        </div>
-        <StatusPill tone={activity.summary.important ? "info" : "neutral"}>
-          {activity.summary.important} important
-        </StatusPill>
+    <div className="page activity-page">
+      <header className="page-header">
+        <div><h1>Activity log</h1><p>Recent lifecycle and tracker events.</p></div>
+        <StatusPill tone={activity.summary.important ? "info" : "neutral"}>{activity.summary.important.toLocaleString()} important</StatusPill>
       </header>
 
-      {loading ? (
-        <StonePanel>
-          <StatusPill tone="info" loading>Loading activity log...</StatusPill>
+      {loading ? <StonePanel><StatusPill tone="info" loading>Loading activity…</StatusPill></StonePanel> : null}
+      {error ? <StonePanel tone="danger"><EmptyFeatureState title="Activity could not be loaded" message={error} tone="danger" action={<BeveledButton variant="ghost" onClick={onRetry}>Retry</BeveledButton>} /></StonePanel> : null}
+      {!loading && !error ? <>
+        <StonePanel className="activity-filter-panel" compact>
+          <div className="filter-row" aria-label="Activity filters">{activity.filters.map((item) => <BeveledButton key={item.id} variant={filter === item.id ? "secondary" : "ghost"} onClick={() => setFilter(item.id)}>{item.label}</BeveledButton>)}</div>
         </StonePanel>
-      ) : null}
-
-      {error ? (
-        <StonePanel tone="danger">
-          <EmptyFeatureState
-            title="Unable to load activity log"
-            message={error}
-            tone="danger"
-            action={<BeveledButton onClick={onRetry}>Retry</BeveledButton>}
-          />
+        <StonePanel title="Events" icon="activity" actions={<StatusPill tone="neutral">{rows.length.toLocaleString()} shown</StatusPill>}>
+          <DataTable columns={columns} rows={rows} className="activity-table" emptyTitle="No activity events" emptyMessage="No events match the selected filter." />
         </StonePanel>
-      ) : null}
-
-      {!loading && !error ? (
-        <>
-          <StonePanel icon="activity" className="activity-toolbar-panel" variant="toolbar" compact>
-            <div className="activity-toolbar" aria-label="Activity log filters">
-              {activity.filters.map((item) => (
-                <BeveledButton
-                  key={item.id}
-                  variant={filter === item.id ? "secondary" : "ghost"}
-                  className={filter === item.id ? "activity-filter-active" : ""}
-                  onClick={() => setFilter(item.id)}
-                >
-                  {item.label}
-                </BeveledButton>
-              ))}
-            </div>
-          </StonePanel>
-
-          <StonePanel
-            title="Clan Activity"
-            icon="activity"
-            actions={<StatusPill tone={rows.length ? "info" : "neutral"}>{rows.length} shown</StatusPill>}
-            className="activity-table-panel"
-            variant="table"
-          >
-            <DataTable
-              columns={columns}
-              rows={rows}
-              className="activity-table"
-              emptyTitle="No activity events"
-              emptyMessage="No clan-log rows match the current filter."
-            />
-          </StonePanel>
-
-          {activity.summary.routine ? (
-            <StonePanel title="Routine Bundle" icon="scroll" variant="muted" compact>
-              <p className="activity-routine-note">
-                {activity.summary.routine} routine entries are included under Sync/System and All.
-              </p>
-            </StonePanel>
-          ) : null}
-        </>
-      ) : null}
+      </> : null}
     </div>
   );
 }
 
 function buildColumns(activity) {
   const columns = [
-    {
-      key: "time",
-      header: "Time",
-      render: (row) => <span className="activity-time">{row.time}</span>,
-    },
-    {
-      key: "event",
-      header: "Event",
-      render: (row) => (
-        <div className="activity-event-cell">
-          <strong>{row.title}</strong>
-          <span>{row.typeLabel}</span>
-        </div>
-      ),
-    },
+    { key: "time", header: "Time", render: (row) => <span className="activity-time">{row.time}</span> },
+    { key: "event", header: "Event", render: (row) => <div className="event-cell"><strong>{row.title}</strong><span>{row.typeLabel}</span></div> },
   ];
 
-  if (activity.hasMemberColumn) {
-    columns.push({
-      key: "member",
-      header: "Member",
-      render: (row) => row.member ? <span className="activity-member">{row.member}</span> : "Not provided",
-    });
-  }
-
+  if (activity.hasMemberColumn) columns.push({ key: "member", header: "Member", render: (row) => row.member || "Unavailable" });
   columns.push(
-    {
-      key: "detail",
-      header: "Details",
-      render: (row) => <span className="activity-detail">{row.detail}</span>,
-    },
-    {
-      key: "status",
-      header: "Status",
-      render: (row) => <StatusPill tone={row.tone}>{row.statusLabel}</StatusPill>,
-    }
+    { key: "detail", header: "Details", render: (row) => <span className="activity-detail">{row.detail}</span> },
+    { key: "status", header: "Status", render: (row) => <StatusPill tone={row.tone}>{row.statusLabel}</StatusPill> },
   );
-
-  if (activity.hasActionColumn) {
-    columns.push({
-      key: "action",
-      header: "Action",
-      render: (row) => row.action ? (
-        <a className="osrs-button osrs-button-ghost activity-action-link" href={row.action.target}>
-          {row.action.label}
-        </a>
-      ) : "None",
-    });
-  }
-
+  if (activity.hasActionColumn) columns.push({ key: "action", header: "Action", render: (row) => row.action ? <a className="activity-action-link" href={row.action.target}>{row.action.label}</a> : "Unavailable" });
   return columns;
 }

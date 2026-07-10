@@ -87,11 +87,11 @@ Production safety rules:
 
 The current phase is:
 
-> Frontend-only OSRS Clan Hub MVP.
+> Frontend data-first overhaul.
 
 Primary goal:
 
-> Make the app look and navigate like the OSRS Clan Hub reference designs while preserving existing behavior and using only currently available API data.
+> Make the app a polished OSRS-inspired clan operations console while preserving existing behavior and using only currently available API data.
 
 Hard constraints for this phase:
 
@@ -100,7 +100,7 @@ Hard constraints for this phase:
 * Do not add migrations.
 * Do not change sync behavior.
 * Do not invent backend data.
-* Do not add fake production metrics.
+* Do not add fake production metrics or placeholder mockup content.
 * Do not introduce heavy UI frameworks.
 * Do not use official/copyrighted OSRS UI assets.
 * Keep Raspberry Pi deployment assumptions in mind.

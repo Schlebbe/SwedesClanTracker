@@ -27,7 +27,7 @@ export function mapClanLogToActivityLogViewModel(log) {
 
   return {
     title: "Activity Log",
-    subtitle: "Lifecycle and tracker events from the existing clan-log API.",
+    subtitle: "Recent lifecycle and tracker events.",
     filters: filters.map((filter) => ({
       id: filter,
       label: filterLabels[filter] ?? formatDisplayLabel(filter),

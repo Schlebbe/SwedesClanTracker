@@ -1,180 +1,126 @@
 import { BeveledButton } from "../components/osrs/BeveledButton";
-import { DataTable } from "../components/osrs/DataTable";
-import { IconGlyph } from "../components/osrs/IconGlyph";
+import { EmptyFeatureState } from "../components/osrs/EmptyFeatureState";
 import { StatusPill } from "../components/osrs/StatusPill";
 import { StonePanel } from "../components/osrs/StonePanel";
 import { mapHomeToDashboardViewModel } from "../data/viewModels/dashboardViewModel";
 
-export function DashboardSurface({ data, liveStatus, loading, error, onRetry, onOpenQueue }) {
-  if (loading) {
-    return <SurfaceMessage title="Dashboard" text="Loading dashboard overview..." tone="info" loading />;
-  }
-
-  if (error) {
-    return (
-      <SurfaceMessage
-        title="Dashboard"
-        text={`Unable to load dashboard: ${error}`}
-        tone="danger"
-        action={<BeveledButton variant="ghost" onClick={onRetry}>Retry</BeveledButton>}
-      />
-    );
-  }
-
-  if (!data) {
-    return (
-      <SurfaceMessage
-        title="Dashboard"
-        text="No dashboard data was returned by the API."
-        tone="warning"
-        action={<BeveledButton variant="ghost" onClick={onRetry}>Retry</BeveledButton>}
-      />
-    );
-  }
+export function DashboardSurface({ data, liveStatus, loading, error, onRetry, onOpenQueue, onOpenMembers }) {
+  if (loading) return <SurfaceState title="Dashboard" message="Loading tracker data…" loading />;
+  if (error) return <SurfaceState title="Dashboard" message={`Unable to load tracker data: ${error}`} tone="danger" action={<BeveledButton variant="ghost" onClick={onRetry}>Retry</BeveledButton>} />;
+  if (!data) return <SurfaceState title="Dashboard" message="No tracker data is available." tone="warning" action={<BeveledButton variant="ghost" onClick={onRetry}>Retry</BeveledButton>} />;
 
   const dashboard = mapHomeToDashboardViewModel(data, liveStatus);
+  const attention = dashboard.posture.filter((item) => item.value !== null && item.value > 0);
 
   return (
-    <div className="dashboard-target-surface" data-dashboard-visual-target="Dashboard.png">
-      <header className="dashboard-hero-frame">
-        <div className="dashboard-title-block">
-          <h2>{dashboard.title}</h2>
+    <div className="page dashboard-page">
+      <header className="page-header">
+        <div>
+          <h1>{dashboard.title}</h1>
           <p>{dashboard.subtitle}</p>
         </div>
-        <div className="dashboard-hero-actions" aria-label="Dashboard actions">
-          <BeveledButton variant="secondary" icon="download" disabled title="Export requires a roster export endpoint.">
-            Export Roster
-          </BeveledButton>
-          <BeveledButton variant="primary" icon="refresh" disabled title="Update Roster requires a safe app-facing sync trigger.">
-            Update Roster
-          </BeveledButton>
+        <div className="page-header-actions">
+          <BeveledButton variant="secondary" icon="members" onClick={onOpenMembers}>View members</BeveledButton>
+          <BeveledButton variant="primary" icon="review" onClick={onOpenQueue}>Review work</BeveledButton>
         </div>
       </header>
 
-      <section className="dashboard-kpi-row" aria-label="Dashboard metrics">
-        {dashboard.kpis.map((card) => (
-          <DashboardKpiCard key={card.key} card={card} />
+      <section className="summary-strip" aria-label="Tracker summary">
+        {dashboard.summary.map((item) => (
+          <div className="summary-item" key={item.key}>
+            <span>{item.label}</span>
+            <strong>{item.value === null ? "Unavailable" : item.value.toLocaleString()}</strong>
+            <small>{item.detail}</small>
+          </div>
         ))}
       </section>
 
-      <section className="dashboard-operations-grid" aria-label="Dashboard operations">
-        <StonePanel
-          title="Pending Admin Tasks"
-          icon="scroll"
-          variant="featured"
-          className="dashboard-work-panel dashboard-reference-panel"
-        >
-          <ul className="dashboard-task-grid">
-            {dashboard.adminTasks.map((task) => (
-              <DashboardTaskCard key={task.key} task={task} onOpenQueue={onOpenQueue} />
-            ))}
-          </ul>
-        </StonePanel>
-
-        <StonePanel title="Quick Tools" icon="tools" className="dashboard-tools-panel dashboard-reference-panel">
-          <div className="dashboard-tools-list">
-            {dashboard.quickTools.map((tool) => (
-              <BeveledButton
-                key={tool.key}
-                variant="secondary"
-                icon={tool.icon}
-                disabled
-                title={tool.reason}
-                className="dashboard-tool-button"
-              >
-                {tool.label}
-              </BeveledButton>
+      <div className="dashboard-grid">
+        <StonePanel title="Tracker health" icon="health" className="dashboard-health-panel">
+          <div className="health-list">
+            {dashboard.healthRows.map((row) => (
+              <div className="health-row" key={row.label}>
+                <span>{row.label}</span>
+                <div>
+                  <strong>{row.value}</strong>
+                  <small>{row.detail}</small>
+                </div>
+                <StatusPill tone={row.tone}>{row.value}</StatusPill>
+              </div>
             ))}
           </div>
         </StonePanel>
-      </section>
 
-      <StonePanel
-        title="Recent Clan Activity"
-        icon="activity"
-        variant="table"
-        className="dashboard-activity-panel dashboard-reference-panel"
-        footer={<button type="button" className="dashboard-table-link" disabled>View full activity log</button>}
-      >
-        <DataTable
-          className="dashboard-activity-table"
-          columns={[
-            { key: "time", header: "Time", render: (row) => <EmptyAwareText value={row.time} /> },
-            { key: "event", header: "Event", render: (row) => <EventCell row={row} /> },
-            { key: "member", header: "Member", render: (row) => <span className="dashboard-member-cell"><EmptyAwareText value={row.member} /></span> },
-            { key: "detail", header: "Details", render: (row) => <span className="dashboard-detail-cell"><EmptyAwareText value={row.detail} /></span> },
-            { key: "status", header: "Status", render: (row) => row.status ? <StatusPill tone={row.tone}>{row.status}</StatusPill> : <EmptyAwareText /> },
-            { key: "admin", header: "Admin", render: (row) => row.action ? <button type="button" className="dashboard-row-action" disabled>{row.action}</button> : <EmptyAwareText /> },
-          ]}
-          rows={dashboard.activityRows}
-          getRowKey={(row) => row.key}
-          emptyTitle="No recent clan activity available"
-          emptyMessage="The current API response did not include recent dashboard activity rows."
-        />
-      </StonePanel>
+        <StonePanel title="Roster attention" icon="member-alert" className="dashboard-attention-panel">
+          {attention.length ? (
+            <ul className="attention-list">
+              {attention.map((item) => (
+                <li key={item.label}>
+                  <div>
+                    <strong>{item.label}</strong>
+                    <span>{item.hint}</span>
+                  </div>
+                  <StatusPill tone={item.tone}>{item.value.toLocaleString()}</StatusPill>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <EmptyFeatureState title="Roster is clear" message="No stale, missing, merge, or rank-mismatch signals are open." />
+          )}
+        </StonePanel>
 
-      <footer className="dashboard-target-footer" aria-label="Dashboard footer">
-        {dashboard.footerItems.map((item) => (
-          <span key={item}>{item}</span>
-        ))}
-        <IconGlyph name="rank" className="dashboard-footer-mark" />
-      </footer>
+        <StonePanel title="Open work" icon="review" className="dashboard-work-panel">
+          {dashboard.workItems.length ? (
+            <ul className="work-list">
+              {dashboard.workItems.map((item) => (
+                <li key={item.id}>
+                  <div>
+                    <strong>{item.label}</strong>
+                    <span>{item.age}</span>
+                  </div>
+                  <StatusPill tone={item.tone}>{item.risk}</StatusPill>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <EmptyFeatureState title="No open work" message="The current API has no review cases waiting for action." />
+          )}
+          <div className="panel-action-row">
+            <BeveledButton variant="ghost" onClick={onOpenQueue}>Open review queues</BeveledButton>
+          </div>
+        </StonePanel>
+
+        <StonePanel title="Recent changes" icon="activity" className="dashboard-activity-panel">
+          {dashboard.activity.length ? (
+            <ul className="change-list">
+              {dashboard.activity.map((item) => (
+                <li key={item.id}>
+                  <time>{item.time}</time>
+                  <div>
+                    <strong>{item.title}</strong>
+                    <span>{item.category}</span>
+                  </div>
+                  <StatusPill tone={item.tone}>{item.category}</StatusPill>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <EmptyFeatureState title="No recent changes" message="The activity feed has no recent events." />
+          )}
+        </StonePanel>
+      </div>
     </div>
   );
 }
 
-function DashboardKpiCard({ card }) {
+function SurfaceState({ title, message, tone = "info", loading = false, action = null }) {
   return (
-    <article className={`dashboard-kpi-card dashboard-kpi-card-${card.tone}`} data-source={card.source}>
-      <header>
-        <IconGlyph name={card.icon} className="dashboard-kpi-icon" />
-        <span>{card.label}</span>
-      </header>
-      <strong>{card.value}</strong>
-      {card.detail ? <p>{card.detail}</p> : null}
-      {card.trend ? <small>{card.trend}</small> : null}
-      {card.source === "placeholder" ? (
-        <span className="dashboard-source-note" title={card.unavailableReason}>Visual placeholder</span>
-      ) : null}
-    </article>
-  );
-}
-
-function DashboardTaskCard({ task, onOpenQueue }) {
-  return (
-    <li className={`dashboard-task-card dashboard-task-card-${task.tone}`} data-source={task.source}>
-      <IconGlyph name={task.icon} className="dashboard-task-icon" />
-      <strong>{task.label}</strong>
-      <span className="dashboard-task-count">{task.count}</span>
-      <p>{task.detail}</p>
-      <BeveledButton variant="secondary" icon="review" onClick={onOpenQueue}>Review</BeveledButton>
-    </li>
-  );
-}
-
-function EventCell({ row }) {
-  return (
-    <span className="dashboard-event-cell">
-      <IconGlyph name={row.icon} className="dashboard-event-icon" />
-      <EmptyAwareText value={row.event} />
-    </span>
-  );
-}
-
-function EmptyAwareText({ value }) {
-  return value ? <span>{value}</span> : <span aria-label="Unavailable">-</span>;
-}
-
-function SurfaceMessage({ title, text, tone, action = null, loading = false }) {
-  return (
-    <div className="surface-grid">
-      <header className="surface-header">
-        <p className="eyebrow">{title}</p>
-      </header>
-      <section className="panel">
-        <StatusPill tone={tone ?? "neutral"} loading={loading}>{text}</StatusPill>
-        {action ? <div className="message-action">{action}</div> : null}
-      </section>
+    <div className="page surface-state">
+      <header className="page-header"><h1>{title}</h1></header>
+      <StonePanel tone={tone}>
+        <StatusPill tone={tone} loading={loading}>{message}</StatusPill>
+        {action ? <div className="panel-action-row">{action}</div> : null}
+      </StonePanel>
     </div>
   );
 }

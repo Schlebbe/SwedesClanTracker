@@ -3,138 +3,54 @@ import { BeveledButton } from "../components/osrs/BeveledButton";
 import { EmptyFeatureState } from "../components/osrs/EmptyFeatureState";
 import { StatusPill } from "../components/osrs/StatusPill";
 import { StonePanel } from "../components/osrs/StonePanel";
-import { UnavailableMetric } from "../components/osrs/UnavailableMetric";
 import { mapAdminQueueToReviewQueueViewModel } from "../data/viewModels/reviewQueueViewModel";
 
-export function AdminQueueSurface({
-  cases,
-  selectedCase,
-  selectedCaseId,
-  loading,
-  error,
-  detailLoading,
-  detailError,
-  onRetryList,
-  onRetryDetail,
-  onSelectCase,
-}) {
-  const queue = useMemo(
-    () => mapAdminQueueToReviewQueueViewModel(cases, selectedCase, selectedCaseId),
-    [cases, selectedCase, selectedCaseId]
-  );
+export function AdminQueueSurface({ cases, selectedCase, selectedCaseId, loading, error, detailLoading, detailError, onRetryList, onRetryDetail, onSelectCase }) {
+  const queue = useMemo(() => mapAdminQueueToReviewQueueViewModel(cases, selectedCase, selectedCaseId), [cases, selectedCase, selectedCaseId]);
 
   return (
-    <div className="surface-grid review-queues-surface">
-      <header className="surface-header review-header">
+    <div className="page review-page">
+      <header className="page-header">
         <div>
-          <p className="eyebrow">Review Queues</p>
-          <h2>Officer triage for member identity and rank decisions</h2>
-          <p>Grouped review cases using the app queue data that already exists.</p>
+          <h1>Review queues</h1>
+          <p>Cases that need a decision about identity, membership, or rank.</p>
         </div>
-        <StatusPill tone={queue.totalCount ? "warning" : "success"}>
-          {queue.totalCount} open
-        </StatusPill>
+        <StatusPill tone={queue.totalCount ? "warning" : "success"}>{queue.totalCount.toLocaleString()} open</StatusPill>
       </header>
 
-      {loading ? (
-        <StonePanel>
-          <StatusPill tone="info" loading>Loading review queues...</StatusPill>
-        </StonePanel>
-      ) : null}
-
-      {error ? (
-        <StonePanel tone="danger">
-          <EmptyFeatureState
-            title="Unable to load review queues"
-            message={error}
-            tone="danger"
-            action={<BeveledButton onClick={onRetryList}>Retry</BeveledButton>}
-          />
-        </StonePanel>
-      ) : null}
+      {loading ? <StonePanel><StatusPill tone="info" loading>Loading review queues…</StatusPill></StonePanel> : null}
+      {error ? <StonePanel tone="danger"><EmptyFeatureState title="Review queues could not be loaded" message={error} tone="danger" action={<BeveledButton variant="ghost" onClick={onRetryList}>Retry</BeveledButton>} /></StonePanel> : null}
 
       {!loading && !error ? (
-        <section className="review-layout">
+        <div className="review-layout">
           <div className="review-group-stack">
-            {queue.totalCount ? null : (
-              <StonePanel>
-                <EmptyFeatureState
-                  title="No open review cases"
-                  message="There are no rename, missing-member, or rank-review cases in the current admin queue."
-                />
-              </StonePanel>
-            )}
-
             {queue.groups.map((group) => (
-              <StonePanel
-                key={group.id}
-                title={group.label}
-                icon={groupIcon(group.id)}
-                actions={<StatusPill tone={group.items.length ? "warning" : "success"}>{group.items.length}</StatusPill>}
-                className="review-group-panel"
-                variant="featured"
-              >
+              <StonePanel key={group.id} title={group.label} icon={groupIcon(group.id)} actions={<StatusPill tone={group.items.length ? "warning" : "neutral"}>{group.items.length}</StatusPill>}>
                 {group.items.length ? (
-                  <ul className="review-card-grid">
+                  <ul className="review-card-list">
                     {group.items.map((item) => (
                       <li key={item.id}>
-                        <button
-                          type="button"
-                          className={selectedCaseId === item.caseId ? "review-card review-card-active" : "review-card"}
-                          disabled={!item.canOpenDetail}
-                          onClick={() => {
-                            if (item.canOpenDetail) onSelectCase(item.caseId);
-                          }}
-                        >
-                          <span className="review-card-head">
-                            <small>{item.type}</small>
-                            <StatusPill tone={item.riskTone}>{item.risk}</StatusPill>
-                          </span>
-                          <strong title={item.title}>{item.title}</strong>
-                          <span className="review-player" title={item.player}>{item.player}</span>
-                          <span className="review-card-meta">
-                            {item.confidenceLabel ? <StatusPill tone="info">confidence: {item.confidenceLabel}</StatusPill> : null}
-                            <span>{item.age}</span>
-                          </span>
-                          {item.recommendedAction ? <em>{item.recommendedAction}</em> : null}
+                        <button type="button" className={selectedCaseId === item.caseId ? "review-card review-card-active" : "review-card"} onClick={() => item.canOpenDetail && onSelectCase(item.caseId)}>
+                          <span className="review-card-top"><strong>{item.title}</strong><StatusPill tone={item.riskTone}>{item.risk}</StatusPill></span>
+                          <span>{item.player}</span>
+                          <small>{item.type} · {item.age}</small>
+                          {item.recommendedAction ? <small>{item.recommendedAction}</small> : null}
                         </button>
                       </li>
                     ))}
                   </ul>
-                ) : (
-                  <EmptyFeatureState
-                    title="Queue clear"
-                    message={`No ${group.label.toLowerCase()} are currently exposed by the admin queue.`}
-                  />
-                )}
+                ) : <EmptyFeatureState title="Queue clear" message={`No ${group.label.toLowerCase()} are open.`} />}
               </StonePanel>
             ))}
           </div>
 
-          <StonePanel title="Case Detail" icon="scroll" className="review-detail-panel" variant="table">
-            {detailLoading ? <StatusPill tone="info" loading>Loading case detail...</StatusPill> : null}
-
-            {detailError ? (
-              <EmptyFeatureState
-                title="Unable to load case detail"
-                message={detailError}
-                tone="danger"
-                action={<BeveledButton onClick={onRetryDetail}>Retry detail</BeveledButton>}
-              />
-            ) : null}
-
-            {!detailLoading && !detailError && queue.selectedCase ? (
-              <ReviewCaseDetail detail={queue.selectedCase} />
-            ) : null}
-
-            {!detailLoading && !detailError && !queue.selectedCase ? (
-              <EmptyFeatureState
-                title="No case selected"
-                message="Choose a review card to inspect the available evidence and recommendations."
-              />
-            ) : null}
+          <StonePanel title="Case details" icon="scroll" className="review-detail-panel">
+            {detailLoading ? <StatusPill tone="info" loading>Loading case…</StatusPill> : null}
+            {detailError ? <EmptyFeatureState title="Case details unavailable" message={detailError} tone="danger" action={<BeveledButton variant="ghost" onClick={onRetryDetail}>Retry</BeveledButton>} /> : null}
+            {!detailLoading && !detailError && queue.selectedCase ? <ReviewCaseDetail detail={queue.selectedCase} /> : null}
+            {!detailLoading && !detailError && !queue.selectedCase ? <EmptyFeatureState title="Select a case" message="Choose an open case to see the available evidence." /> : null}
           </StonePanel>
-        </section>
+        </div>
       ) : null}
     </div>
   );
@@ -144,73 +60,25 @@ function groupIcon(id) {
   if (id === "rsn-changes") return "name-change";
   if (id === "missing-members") return "member-alert";
   if (id === "rank-reviews") return "promotion";
-  return "scroll";
+  return "review";
 }
 
 function ReviewCaseDetail({ detail }) {
   return (
     <div className="review-detail">
-      <div className="review-detail-title">
-        <div>
-          <p className="eyebrow">{detail.type}</p>
-          <h3 title={detail.title}>{detail.title}</h3>
-          <p title={detail.player}>{detail.player}</p>
-        </div>
-        <StatusPill tone={detail.riskTone}>{detail.risk}</StatusPill>
-      </div>
-
-      <dl className="review-detail-grid">
-        <div>
-          <dt>Age</dt>
-          <dd>{detail.age}</dd>
-        </div>
-        {detail.confidenceLabel ? (
-          <div>
-            <dt>Confidence</dt>
-            <dd>{detail.confidenceLabel}</dd>
-          </div>
-        ) : null}
-        {detail.recommendedAction ? (
-          <div className="review-detail-wide">
-            <dt>Recommended Action</dt>
-            <dd>{detail.recommendedAction}</dd>
-          </div>
-        ) : null}
+      <div className="review-detail-heading"><div><span className="detail-type">{detail.type}</span><h2>{detail.title}</h2><p>{detail.player}</p></div><StatusPill tone={detail.riskTone}>{detail.risk}</StatusPill></div>
+      <dl className="review-facts">
+        <div><dt>Age</dt><dd>{detail.age}</dd></div>
+        {detail.confidenceLabel ? <div><dt>Confidence</dt><dd>{detail.confidenceLabel}</dd></div> : null}
+        {detail.recommendedAction ? <div className="review-fact-wide"><dt>Recommended action</dt><dd>{detail.recommendedAction}</dd></div> : null}
       </dl>
-
-      <ReviewDetailList title="Evidence" items={detail.evidence} emptyMessage="No evidence is currently provided for this case." />
-      <ReviewDetailList title="Alternatives" items={detail.alternatives} emptyMessage="No alternatives are currently provided for this case." />
-
-      {detail.dangerousNote ? (
-        <div className="review-danger-note">
-          <strong>Dangerous Action Note</strong>
-          <p>{detail.dangerousNote}</p>
-        </div>
-      ) : null}
-
-      <div className="review-detail-actions">
-        <UnavailableMetric
-          label="Direct case actions unavailable"
-          reason="The app queue currently exposes guidance only, not executable action contracts."
-        />
-      </div>
+      <DetailList title="Evidence" items={detail.evidence} emptyMessage="No evidence was returned for this case." />
+      <DetailList title="Other options" items={detail.alternatives} emptyMessage="No other options were returned for this case." />
+      {detail.dangerousNote ? <div className="review-warning"><strong>Before you act</strong><p>{detail.dangerousNote}</p></div> : null}
     </div>
   );
 }
 
-function ReviewDetailList({ title, items, emptyMessage }) {
-  return (
-    <section className="review-detail-section">
-      <h4>{title}</h4>
-      {items.length ? (
-        <ul className="review-detail-list">
-          {items.map((item) => (
-            <li key={item}>{item}</li>
-          ))}
-        </ul>
-      ) : (
-        <EmptyFeatureState title={`No ${title.toLowerCase()}`} message={emptyMessage} />
-      )}
-    </section>
-  );
+function DetailList({ title, items, emptyMessage }) {
+  return <section className="detail-list"><h3>{title}</h3>{items.length ? <ul>{items.map((item) => <li key={item}>{item}</li>)}</ul> : <p>{emptyMessage}</p>}</section>;
 }

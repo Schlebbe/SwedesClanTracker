@@ -10,7 +10,6 @@ import dashboard from "../../assets/icons/generated/dashboard.png";
 import danger from "../../assets/icons/generated/danger.png";
 import defaultIcon from "../../assets/icons/generated/default.png";
 import download from "../../assets/icons/generated/download.png";
-import future from "../../assets/icons/generated/future.png";
 import health from "../../assets/icons/generated/health.png";
 import memberAlert from "../../assets/icons/generated/member-alert.png";
 import members from "../../assets/icons/generated/members.png";
@@ -47,7 +46,6 @@ export const generatedIconSources = {
   danger,
   default: defaultIcon,
   download,
-  future,
   health,
   "member-alert": memberAlert,
   members,

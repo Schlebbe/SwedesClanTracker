@@ -12,7 +12,7 @@ export function mapRosterToRosterViewModel(rows) {
 
   return {
     title: "Clan Members",
-    subtitle: "Roster scanning, sync freshness, review flags, and profile entry points.",
+    subtitle: "Roster coverage and sync freshness.",
     rows: mappedRows,
     statusOptions,
     summary: {

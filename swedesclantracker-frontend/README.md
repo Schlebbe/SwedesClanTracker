@@ -1,8 +1,21 @@
-# React + Vite
+# Swedes Clan Tracker frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+The frontend is a React/Vite/Tailwind clan operations console. It uses the existing authenticated `/api` endpoints for tracker health, roster exploration, player profiles, review queues, activity, and readiness.
 
-Currently, two official plugins are available:
+## Local development
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react/README.md) uses [Babel](https://babeljs.io/) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+```powershell
+$env:VITE_API_PROXY_TARGET="http://<api-host-or-ip>"
+npm run dev -- --host 127.0.0.1 --port 5173
+```
+
+Production client requests remain relative to `/api`; the proxy target is a local development setting only.
+
+## Validation
+
+```text
+npm run build
+npm run lint
+```
+
+The UI intentionally does not display statistics that the current API does not provide, including XP, combat, skill, boss, raid, and collection-log metrics.
