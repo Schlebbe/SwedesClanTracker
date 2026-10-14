@@ -1,6 +1,8 @@
 <Solution>
   <Project Path="SwedesClanTracker.Api/SwedesClanTracker.Api.csproj" />
+  <Project Path="SwedesClanTracker.Api.Tests/SwedesClanTracker.Api.Tests.csproj" />
   <Project Path="SwedesClanTracker.Core.Tests/SwedesClanTracker.Core.Tests.csproj" />
   <Project Path="SwedesClanTracker.Core/SwedesClanTracker.Core.csproj" />
   <Project Path="SwedesClanTracker.Worker/SwedesClanTracker.Worker.csproj" />
+  <Project Path="SwedesClanTracker.Worker.Tests/SwedesClanTracker.Worker.Tests.csproj" />
 </Solution>

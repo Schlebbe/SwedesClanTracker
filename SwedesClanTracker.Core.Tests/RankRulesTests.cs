@@ -63,6 +63,15 @@ public class RankRulesTests
         Assert.True(RankRules.IsSpecialWomRole("Short green guy"));
     }
 
+    [Theory]
+    [InlineData("Goblin")]
+    [InlineData("future wom role")]
+    [InlineData("future_wom_role")]
+    public void IsSpecialWomRole_TreatsGoblinAndUnknownRolesAsSpecial(string role)
+    {
+        Assert.True(RankRules.IsSpecialWomRole(role));
+    }
+
     [Fact]
     public void IsSpecialWomRole_KeepsWilySpecial()
     {

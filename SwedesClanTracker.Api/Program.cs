@@ -9,6 +9,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Hosting.WindowsServices;
 using Microsoft.Extensions.Options;
 using SwedesClanTracker.Core;
+using SwedesClanTracker.Api.Services;
 
 var options = new WebApplicationOptions
 {
@@ -24,6 +25,7 @@ builder.Host.UseWindowsService(options =>
 });
 builder.Services.AddSystemd();
 builder.Services.AddTrackerCore(builder.Configuration);
+builder.Services.AddScoped<ReadOnlyConsoleQueryService>();
 builder.Services.AddControllers().AddJsonOptions(o =>
 {
     o.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
@@ -72,6 +74,8 @@ app.MapPost("/api/auth/logout", [Authorize] async (HttpContext ctx) =>
 });
 
 app.Run();
+
+public partial class Program;
 
 public record LoginRequest(string Username, string Password);
 public class AuthOptions { public string Username { get; set; } = ""; public string Password { get; set; } = ""; }

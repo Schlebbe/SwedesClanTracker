@@ -120,11 +120,14 @@ public static class RankRules
 
     private static readonly string[] SpecialWomRoles =
     [
-        "imp", "kitten", "administrator", "deputy owner", "owner", "short green guy", "recruit", "apothecary", "wily"
+        "imp", "kitten", "administrator", "deputy owner", "owner", "short green guy", "recruit", "apothecary", "wily", "goblin"
     ];
 
     private static readonly HashSet<string> NormalizedSpecialWomRoles =
         SpecialWomRoles.Select(NormalizeRankName).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+    private static readonly HashSet<string> NormalizedKnownNonClanWomRoles =
+        new(["member"], StringComparer.OrdinalIgnoreCase);
 
     public static IReadOnlyList<string> OrderedClanRanks => OrderedRankNames;
 
@@ -153,7 +156,9 @@ public static class RankRules
     public static bool IsSpecialWomRole(string role)
     {
         var normalized = NormalizeRankName(role);
-        return NormalizedSpecialWomRoles.Contains(normalized);
+        if (string.IsNullOrWhiteSpace(normalized) || NormalizedKnownNonClanWomRoles.Contains(normalized)) return false;
+
+        return NormalizedSpecialWomRoles.Contains(normalized) || !IsKnownClanRank(normalized);
     }
 
     public static bool IsExactKnownClanRankMatch(string left, string right)

@@ -183,32 +183,17 @@ public class ReviewController(TrackerDbContext db, IConfiguration config, IHttpC
         }
 
         QueueTempleMissingDiscordUpdate(p.Id, p.Username, "remove");
-        var replacementPlayerId = await db.Players
-            .Where(x => x.Id != p.Id)
-            .OrderBy(x => x.Id)
-            .Select(x => (int?)x.Id)
-            .FirstOrDefaultAsync(ct);
-        var statusRows = await db.LifecycleEvents
-            .Where(x => x.PlayerId == p.Id && x.EventType == AppStatusConstants.EventType)
-            .ToListAsync(ct);
-        if (replacementPlayerId.HasValue)
-        {
-            foreach (var status in statusRows) status.PlayerId = replacementPlayerId.Value;
-        }
-        else
-        {
-            db.LifecycleEvents.RemoveRange(statusRows);
-        }
 
-        var lifecycle = db.LifecycleEvents.Where(x => x.PlayerId == p.Id && x.EventType != AppStatusConstants.EventType);
-        var snapshots = db.PlayerSnapshots.Where(x => x.PlayerId == p.Id);
-        var promotions = db.PromotionCandidates.Where(x => x.PlayerId == p.Id);
-        db.LifecycleEvents.RemoveRange(lifecycle);
-        db.PlayerSnapshots.RemoveRange(snapshots);
-        db.PromotionCandidates.RemoveRange(promotions);
-        db.Players.Remove(p);
+        // Keep the player row, snapshots, and lifecycle evidence as a tombstone.
+        // A rename can be reported by WOM shortly after this action; deleting the
+        // history here makes that delayed signal impossible to reconcile safely.
+        p.Status = PlayerStatus.REMOVED_CONFIRMED;
+        await CloseReviewLifecycleEventsResolvedByStatusAsync(
+            p,
+            User.FindFirstValue(ClaimTypes.Name) ?? "web-admin",
+            ct);
         await db.SaveChangesAsync(ct);
-        return Ok(new { player = p.Username, action = "removed_from_db_and_wom" });
+        return Ok(new { player = p.Username, action = "removed_from_wom_and_tombstoned" });
     }
 
     [HttpPost("players/{id:int}/requeue-discord-card")]

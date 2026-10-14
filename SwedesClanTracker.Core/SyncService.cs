@@ -437,6 +437,11 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
     {
         var player = await db.Players.FirstOrDefaultAsync(x => x.Id == playerId, ct);
         if (player is null) return;
+        var renameRecheckRequested = player.Status == PlayerStatus.ACTIVE &&
+            await db.LifecycleEvents.AnyAsync(x =>
+                x.PlayerId == player.Id &&
+                x.EventType == RenameReviewEventTypes.RecheckRequested &&
+                x.Status == "OPEN", ct);
         var stats = await templeClient.GetPlayerStatsAsync(player.Username, ct);
         if (stats is null) return;
         var apiPets = await templeClient.GetPetsAsync(player.Username, ct);
@@ -511,7 +516,8 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
         player.EligibleRank = rankResult.Rank;
         player.LastSynced = syncedAt;
         await DismissSatisfiedPendingPromotionCandidatesAsync(player, syncedAt, ct);
-        if (player.Status is PlayerStatus.NEW_PENDING_REVIEW)
+        var shouldEvaluateRename = player.Status == PlayerStatus.NEW_PENDING_REVIEW || renameRecheckRequested;
+        if (shouldEvaluateRename)
         {
             var missingCandidates = await db.Players
                 .Where(x => x.Status == PlayerStatus.MISSING_PENDING_REVIEW && x.Id != player.Id)
@@ -553,28 +559,34 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
                         x.Match.PetCountDelta,
                         x.Match.EhbIgnoredReason
                     }),
-                    Source = "sync-auto-rename",
+                    Source = renameRecheckRequested ? "manual-update-rename-recheck" : "sync-auto-rename",
                     DetectedAt = DateTimeOffset.UtcNow
                 };
                 await UpsertOpenLifecycleEventAsync(player.Id, "MERGE_SUGGESTED", mergeMetadata, ct);
                 await UpsertOpenLifecycleEventAsync(player.Id, "MERGE_ACTION_REQUIRED", mergeMetadata, ct);
             }
-            else
+            else if (player.Status == PlayerStatus.NEW_PENDING_REVIEW)
             {
                 player.Status = PlayerStatus.ACTIVE;
                 await CloseOpenLifecycleEventsAsync(player.Id, ct, "NEW_PLAYER", "MERGE_SUGGESTED", "MERGE_ACTION_REQUIRED");
             }
+
+            if (renameRecheckRequested)
+            {
+                await CloseOpenLifecycleEventsAsync(player.Id, ct, RenameReviewEventTypes.RecheckRequested);
+            }
         }
 
-        var isImpAccount = await wiseOldManClient.IsImpAccountAsync(player.Username, ct);
-        if (isImpAccount)
+        var womRole = await wiseOldManClient.GetMemberRoleAsync(player.Username, ct);
+        var isRankUpgradeExcludedRole = RankRules.IsSpecialWomRole(womRole ?? "");
+        if (isRankUpgradeExcludedRole)
         {
-            var pendingForImp = await db.PromotionCandidates
+            var pendingForExcludedRole = await db.PromotionCandidates
                 .Where(x => x.PlayerId == player.Id && x.Status == PromotionStatus.PENDING)
                 .ToListAsync(ct);
-            if (pendingForImp.Count > 0)
+            if (pendingForExcludedRole.Count > 0)
             {
-                db.PromotionCandidates.RemoveRange(pendingForImp);
+                db.PromotionCandidates.RemoveRange(pendingForExcludedRole);
             }
         }
         else if (RankRules.RankOrder(player.EligibleRank) > RankRules.RankOrder(player.CurrentRank))

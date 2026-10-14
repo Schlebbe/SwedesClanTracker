@@ -1,18 +1,76 @@
-import { generatedIconSources } from "./generatedIconSources";
+import {
+  Activity,
+  AlertTriangle,
+  ArrowLeft,
+  ArrowRight,
+  BadgeCheck,
+  Bell,
+  CalendarDays,
+  CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  ClipboardList,
+  Clock3,
+  Database,
+  ExternalLink,
+  Filter,
+  History,
+  Info,
+  ListFilter,
+  LogOut,
+  Menu,
+  RefreshCw,
+  Search,
+  Settings,
+  Shield,
+  ShieldAlert,
+  SlidersHorizontal,
+  UserCircle2,
+  Users,
+  X,
+} from "lucide-react";
 
-export function IconGlyph({ name = "default", className = "", label }) {
+const iconByName = {
+  activity: Activity,
+  health: Activity,
+  stats: Activity,
+  alert: AlertTriangle,
+  "arrow-left": ArrowLeft,
+  "arrow-right": ArrowRight,
+  badge: BadgeCheck,
+  bell: Bell,
+  calendar: CalendarDays,
+  check: CheckCircle2,
+  "chevron-left": ChevronLeft,
+  "chevron-right": ChevronRight,
+  checklist: ClipboardList,
+  clock: Clock3,
+  database: Database,
+  external: ExternalLink,
+  history: History,
+  info: Info,
+  filter: Filter,
+  list: ListFilter,
+  logout: LogOut,
+  menu: Menu,
+  refresh: RefreshCw,
+  search: Search,
+  settings: Settings,
+  shield: Shield,
+  "shield-alert": ShieldAlert,
+  sliders: SlidersHorizontal,
+  profile: UserCircle2,
+  members: Users,
+  dashboard: Shield,
+  crest: Shield,
+  review: ClipboardList,
+  readiness: BadgeCheck,
+  "rank-mismatch": AlertTriangle,
+  close: X,
+};
+
+export function IconGlyph({ name = "info", className = "", label, size = 18, strokeWidth = 1.8 }) {
   const resolvedName = String(name || "default").toLowerCase();
-  const src = generatedIconSources[resolvedName];
-  const classes = [
-    "osrs-glyph",
-    src ? "osrs-image-icon" : "",
-    `osrs-glyph-${resolvedName}`,
-    className,
-  ].filter(Boolean).join(" ");
-
-  return (
-    <span className={classes} aria-hidden={label ? undefined : "true"} aria-label={label}>
-      {src ? <img src={src} alt="" draggable="false" /> : <span />}
-    </span>
-  );
+  const Icon = iconByName[resolvedName] ?? Info;
+  return <Icon className={className} size={size} strokeWidth={strokeWidth} aria-hidden={label ? undefined : "true"} aria-label={label} focusable="false" />;
 }

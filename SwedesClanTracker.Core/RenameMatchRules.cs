@@ -10,11 +10,19 @@ public sealed record RenameMatchEvaluation(
     double Score,
     string? EhbIgnoredReason);
 
+public static class RenameReviewEventTypes
+{
+    public const string RecheckRequested = "RENAME_RECHECK_REQUESTED";
+}
+
 public static class RenameMatchRules
 {
     public const int MaxTotalLevelDelta = 5;
     public const double MaxEhbDelta = 10;
     public const double MaxEhpDelta = 10;
+    public const double MaxEhbDeltaWithStrongIdentity = 15;
+    public const int MaxCollectionsDeltaWithStrongIdentity = 5;
+    public const int MaxPetCountDeltaWithStrongIdentity = 1;
     public const int MaxCollectionsDeltaWhenIgnoringZeroEhb = 2;
     public const int MaxPetCountDeltaWhenIgnoringZeroEhb = 1;
 
@@ -41,6 +49,28 @@ public static class RenameMatchRules
                 petCountDelta,
                 totalLevelDelta + ehbDelta + ehpDelta,
                 null);
+        }
+
+        // EHB can be recalculated between snapshots. Keep the stricter rule above,
+        // but allow a small EHB-only variance when the durable identity signals
+        // (total level, EHP, collections, and pets) still agree closely.
+        var strongIdentityMatch =
+            totalLevelDelta <= MaxTotalLevelDelta &&
+            ehbDelta <= MaxEhbDeltaWithStrongIdentity &&
+            ehpDelta <= MaxEhpDelta &&
+            collectionsDelta <= MaxCollectionsDeltaWithStrongIdentity &&
+            petCountDelta <= MaxPetCountDeltaWithStrongIdentity;
+        if (strongIdentityMatch)
+        {
+            return new RenameMatchEvaluation(
+                true,
+                totalLevelDelta,
+                ehbDelta,
+                ehpDelta,
+                collectionsDelta,
+                petCountDelta,
+                500 + totalLevelDelta + ehbDelta + ehpDelta + collectionsDelta + petCountDelta,
+                "strong-identity-match-with-tolerated-ehb-variance");
         }
 
         var zeroEhbLooksTransient =

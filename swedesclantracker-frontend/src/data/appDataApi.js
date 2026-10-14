@@ -1,5 +1,41 @@
 import { apiGet, apiPost } from "./apiClient";
 
+export function fetchSession(options) {
+  return apiGet("/auth/session", options);
+}
+
+export function fetchConsoleOverview(options) {
+  return apiGet("/app/console/overview", options);
+}
+
+export function fetchConsoleRoster(query = "", options) {
+  return apiGet(`/app/console/roster${query ? `?${query}` : ""}`, options);
+}
+
+export function fetchConsoleProfile(playerId, range = "90d", options) {
+  return apiGet(`/app/console/players/${encodeURIComponent(playerId)}/profile?range=${encodeURIComponent(range)}`, options);
+}
+
+export function fetchConsoleReviews(query = "", options) {
+  return apiGet(`/app/console/reviews${query ? `?${query}` : ""}`, options);
+}
+
+export function fetchConsoleReviewDetail(caseId, options) {
+  return apiGet(`/app/console/reviews/${encodeURIComponent(caseId)}`, options);
+}
+
+export function fetchIgnoredPolicies(options) {
+  return apiGet("/app/console/reviews/ignored-policies", options);
+}
+
+export function fetchConsoleActivity(query = "", options) {
+  return apiGet(`/app/console/activity${query ? `?${query}` : ""}`, options);
+}
+
+export function fetchConsoleSystem(options) {
+  return apiGet("/app/console/system", options);
+}
+
 export async function fetchHome() {
   return apiGet("/app/home");
 }

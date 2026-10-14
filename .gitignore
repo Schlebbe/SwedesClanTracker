@@ -46,3 +46,4 @@ deploy/env/discord-profiles.local.json
 # Local reference/source asset packs
 docs/reference/rpg-textures/
 docs/reference/fantasy-textures/
+design-qa.md

@@ -44,6 +44,7 @@ public class DiscordPromotionBotWorker(
         Malformed,
         Unknown
     }
+    private sealed record TempleRosterLookupResult(bool Succeeded, HashSet<string> Usernames);
 
     private static bool IsDiscordMessageMissingOrInaccessible(Discord.Net.HttpException ex)
     {
@@ -69,8 +70,8 @@ public class DiscordPromotionBotWorker(
     private static readonly TimeSpan DiscordMemberSearchTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan DiscordMemberSearchTotalTimeout = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan TempleNameChangeDetectionWindow = TimeSpan.FromHours(6);
-    private static readonly TimeSpan TempleNameChangeReminderInterval = TimeSpan.FromHours(2);
     private static readonly TimeSpan WomOnlyPostGracePeriod = TimeSpan.FromMinutes(5);
+    private const string TempleNameChangeResolvedByLiveCheckEventType = "TEMPLE_NAME_CHANGE_RESOLVED_BY_LIVE_CHECK";
     private static readonly string[] AdminHistoryEventTypes =
     [
         "PROMOTION_CANDIDATE_CREATED",
@@ -79,6 +80,8 @@ public class DiscordPromotionBotWorker(
         "MISSING_IN_ROSTER",
         "STATUS_UPDATED",
         "MERGE_SUGGESTED",
+        "RENAME_RECHECK_REQUESTED",
+        DiscordMergeCardRules.SupersededCardHandledEventType,
         "MERGE_ACTION_APPLIED",
         "TEMPLE_MISSING_ACTION_APPLIED",
         "WOM_MISSING_ACTION_APPLIED",
@@ -167,27 +170,6 @@ public class DiscordPromotionBotWorker(
         {
             await statusReporter.ReportAsync("Discord", "Error", $"Discord step failed: {friendlyStep}", ct, new { Step = stepName, Error = ex.GetType().Name });
             logger.LogError(ex, "Discord worker step failed: {Step}", stepName);
-        }
-    }
-
-    private static async Task ReassignOrRemoveStatusEventsAsync(TrackerDbContext db, int removedPlayerId)
-    {
-        var replacementPlayerId = await db.Players
-            .Where(x => x.Id != removedPlayerId)
-            .OrderBy(x => x.Id)
-            .Select(x => (int?)x.Id)
-            .FirstOrDefaultAsync();
-        var statusRows = await db.LifecycleEvents
-            .Where(x => x.PlayerId == removedPlayerId && x.EventType == AppStatusConstants.EventType)
-            .ToListAsync();
-
-        if (replacementPlayerId.HasValue)
-        {
-            foreach (var status in statusRows) status.PlayerId = replacementPlayerId.Value;
-        }
-        else
-        {
-            db.LifecycleEvents.RemoveRange(statusRows);
         }
     }
 
@@ -386,23 +368,10 @@ public class DiscordPromotionBotWorker(
             })
             .ToListAsync(ct);
 
-        var pendingPlayerIds = pending
-            .Select(x => x.PlayerId)
-            .Distinct()
-            .ToList();
-        var mergePendingPlayerIds = new HashSet<int>();
-        if (pendingPlayerIds.Count > 0)
-        {
-            var openMergePlayerIds = await db.LifecycleEvents
-                .Where(x =>
-                    x.EventType == "MERGE_ACTION_REQUIRED" &&
-                    x.Status == "OPEN" &&
-                    pendingPlayerIds.Contains(x.PlayerId))
-                .Select(x => x.PlayerId)
-                .Distinct()
-                .ToListAsync(ct);
-            mergePendingPlayerIds = openMergePlayerIds.ToHashSet();
-        }
+        var openMergeEvents = await db.LifecycleEvents
+            .Where(x => x.EventType == "MERGE_ACTION_REQUIRED" && x.Status == "OPEN")
+            .OrderBy(x => x.CreatedAt)
+            .ToListAsync(ct);
 
         foreach (var c in pending)
         {
@@ -464,7 +433,8 @@ public class DiscordPromotionBotWorker(
                 continue;
             }
 
-            var isMergePending = c.PlayerStatus == PlayerStatus.MERGE_SUGGESTED || mergePendingPlayerIds.Contains(c.PlayerId);
+            var isMergePending = c.PlayerStatus == PlayerStatus.MERGE_SUGGESTED ||
+                openMergeEvents.Any(x => IsMergeEventRelatedToPlayer(x, c.PlayerId, c.PlayerName));
             if (isMergePending)
             {
                 if (postedEvent is not null)
@@ -551,6 +521,7 @@ public class DiscordPromotionBotWorker(
                 if (lookupState == PostedMessageLookupState.Found && liveDiscordMessage is not null)
                 {
                     var latestStatusBeforePatch = await GetCurrentPromotionCandidateStatusAsync(db, c.Id, ct);
+                    var reenableRequested = IsPromotionReenableRequested(postedEvent);
                     var patchDecision = PromotionCardPatchGuard.Decide(
                         latestStatusBeforePatch ?? PromotionStatus.APPROVED,
                         HasPromotionActionButtons(liveDiscordMessage));
@@ -572,7 +543,7 @@ public class DiscordPromotionBotWorker(
                         continue;
                     }
 
-                    if (patchDecision == PromotionCardPatchDecision.SkipMessageNotActionable)
+                    if (patchDecision == PromotionCardPatchDecision.SkipMessageNotActionable && !reenableRequested)
                     {
                         logger.LogInformation(
                             "Skipping promotion card patch for candidate {CandidateId}; message {MessageId} has no actionable promotion buttons.",
@@ -581,7 +552,7 @@ public class DiscordPromotionBotWorker(
                         continue;
                     }
 
-                    if (ShouldSkipMessagePatch(liveDiscordMessage.Id, renderFingerprint))
+                    if (!reenableRequested && ShouldSkipMessagePatch(liveDiscordMessage.Id, renderFingerprint))
                     {
                         continue;
                     }
@@ -664,6 +635,9 @@ public class DiscordPromotionBotWorker(
             var discordRankAudit = new SlashCommandBuilder()
                 .WithName("discord-rank-audit")
                 .WithDescription("Audit exact Discord matches for rank-role mismatches and return a CSV.");
+            var womSpecialRankAudit = new SlashCommandBuilder()
+                .WithName("ungnomify")
+                .WithDescription("List special WOM roles with each player's current tracker rank.");
             var discordRankSet = new SlashCommandBuilder()
                 .WithName("discord-rank-set")
                 .WithDescription("Replace a Discord member's clan rank role with the selected rank.")
@@ -740,6 +714,7 @@ public class DiscordPromotionBotWorker(
             await socketGuild.CreateApplicationCommandAsync(discordGuess.Build());
             await socketGuild.CreateApplicationCommandAsync(discordRankCheck.Build());
             await socketGuild.CreateApplicationCommandAsync(discordRankAudit.Build());
+            await socketGuild.CreateApplicationCommandAsync(womSpecialRankAudit.Build());
             await socketGuild.CreateApplicationCommandAsync(discordRankSet.Build());
             await socketGuild.CreateApplicationCommandAsync(discordRankReviewPost.Build());
             await socketGuild.CreateApplicationCommandAsync(history.Build());
@@ -990,6 +965,37 @@ public class DiscordPromotionBotWorker(
             return;
         }
 
+        if ((action is "approve" or "dismiss") &&
+            await FindOpenMergeForPromotionAsync(db, candidate.PlayerId, player.Username, CancellationToken.None) is not null)
+        {
+            var postedEvent = await db.LifecycleEvents
+                .Where(x => x.EventType == "PROMOTION_DISCORD_POSTED")
+                .OrderByDescending(x => x.CreatedAt)
+                .ToListAsync();
+            postedEvent = postedEvent
+                .Where(x => MetadataIntEquals(x.MetadataJson, "CandidateId", candidate.Id))
+                .ToList();
+            var clickedPostedEvent = FindLifecycleEventByDiscordMessageId(postedEvent, component.Message.Id);
+            if (clickedPostedEvent is not null)
+            {
+                await SupersedePromotionCardForMergeAsync(
+                    db,
+                    clickedPostedEvent,
+                    candidate.Id,
+                    candidate.PlayerId,
+                    "merge-review-pending-action-guard",
+                    null,
+                    CancellationToken.None);
+                await db.SaveChangesAsync();
+            }
+
+            await RespondToComponentAsync(
+                component,
+                "Promotion paused while the rename review is open. No promotion action was applied.",
+                ephemeral: true);
+            return;
+        }
+
         SwedesClanTracker.Core.WomRoleUpdateResult? promotionWomUpdate = null;
         if (action == "approve")
         {
@@ -1114,6 +1120,17 @@ public class DiscordPromotionBotWorker(
             await RespondToComponentAsync(component, "Player not found.", ephemeral: true);
             return;
         }
+        var renameDetection = await TryPrepareRenameReviewBeforeSensitiveActionAsync(
+            db,
+            expectedPreviousPlayerId: player.Id,
+            expectedNewUsername: null,
+            expectedEitherUsername: null,
+            ct: CancellationToken.None);
+        if (renameDetection is not null)
+        {
+            await BlockSensitiveActionForRenameAsync(db, component, renameDetection, player.Id, CancellationToken.None);
+            return;
+        }
         if (action == "add")
         {
             var templeOk = await AddPlayerToTempleAsync(player.Username);
@@ -1157,11 +1174,22 @@ public class DiscordPromotionBotWorker(
                     return;
                 }
             }
-            await ReassignOrRemoveStatusEventsAsync(db, player.Id);
-            db.LifecycleEvents.RemoveRange(db.LifecycleEvents.Where(x => x.PlayerId == player.Id && x.EventType != AppStatusConstants.EventType));
-            db.PlayerSnapshots.RemoveRange(db.PlayerSnapshots.Where(x => x.PlayerId == player.Id));
-            db.PromotionCandidates.RemoveRange(db.PromotionCandidates.Where(x => x.PlayerId == player.Id));
-            db.Players.Remove(player);
+            player.Status = PlayerStatus.REMOVED_CONFIRMED;
+            await CloseOpenLifecycleEventsAsync(db, player.Id,
+                "NEW_PLAYER",
+                "MERGE_SUGGESTED",
+                "MERGE_ACTION_REQUIRED",
+                "MISSING_IN_ROSTER",
+                "TEMPLE_MISSING_ACTION_REQUIRED",
+                "WOM_MISSING_ACTION_REQUIRED",
+                "WOM_ONLY_ACTION_REQUIRED");
+            var pendingPromotions = await db.PromotionCandidates
+                .Where(x => x.PlayerId == player.Id && x.Status == PromotionStatus.PENDING)
+                .ToListAsync();
+            foreach (var pendingPromotion in pendingPromotions)
+            {
+                pendingPromotion.Status = PromotionStatus.DISMISSED;
+            }
         }
         else
         {
@@ -1214,6 +1242,18 @@ public class DiscordPromotionBotWorker(
             return;
         }
 
+        var renameDetection = await TryPrepareRenameReviewBeforeSensitiveActionAsync(
+            db,
+            expectedPreviousPlayerId: player.Id,
+            expectedNewUsername: null,
+            expectedEitherUsername: null,
+            ct: CancellationToken.None);
+        if (renameDetection is not null)
+        {
+            await BlockSensitiveActionForRenameAsync(db, component, renameDetection, player.Id, CancellationToken.None);
+            return;
+        }
+
         if (action == "reinstate")
         {
             var womOk = await AddPlayerToWomAsync(player.Username);
@@ -1250,11 +1290,22 @@ public class DiscordPromotionBotWorker(
                 }
             }
 
-            await ReassignOrRemoveStatusEventsAsync(db, player.Id);
-            db.LifecycleEvents.RemoveRange(db.LifecycleEvents.Where(x => x.PlayerId == player.Id && x.EventType != AppStatusConstants.EventType));
-            db.PlayerSnapshots.RemoveRange(db.PlayerSnapshots.Where(x => x.PlayerId == player.Id));
-            db.PromotionCandidates.RemoveRange(db.PromotionCandidates.Where(x => x.PlayerId == player.Id));
-            db.Players.Remove(player);
+            player.Status = PlayerStatus.REMOVED_CONFIRMED;
+            await CloseOpenLifecycleEventsAsync(db, player.Id,
+                "NEW_PLAYER",
+                "MERGE_SUGGESTED",
+                "MERGE_ACTION_REQUIRED",
+                "MISSING_IN_ROSTER",
+                "TEMPLE_MISSING_ACTION_REQUIRED",
+                "WOM_MISSING_ACTION_REQUIRED",
+                "WOM_ONLY_ACTION_REQUIRED");
+            var pendingPromotions = await db.PromotionCandidates
+                .Where(x => x.PlayerId == player.Id && x.Status == PromotionStatus.PENDING)
+                .ToListAsync();
+            foreach (var pendingPromotion in pendingPromotions)
+            {
+                pendingPromotion.Status = PromotionStatus.DISMISSED;
+            }
         }
         else
         {
@@ -1415,6 +1466,18 @@ public class DiscordPromotionBotWorker(
         if (requiredEvent.Status != "OPEN")
         {
             await RespondToComponentAsync(component, "This alert was already handled.", ephemeral: true);
+            return;
+        }
+
+        var renameDetection = await TryPrepareRenameReviewBeforeSensitiveActionAsync(
+            db,
+            expectedPreviousPlayerId: null,
+            expectedNewUsername: normalizedUsername,
+            expectedEitherUsername: null,
+            ct: CancellationToken.None);
+        if (renameDetection is not null)
+        {
+            await BlockSensitiveActionForRenameAsync(db, component, renameDetection, requiredEvent.PlayerId, CancellationToken.None);
             return;
         }
 
@@ -2393,25 +2456,35 @@ public class DiscordPromotionBotWorker(
         DateTimeOffset messageCreatedAt,
         CancellationToken ct)
     {
-        var hasScheduledDelete = await db.LifecycleEvents.AnyAsync(x =>
+        var messageIdText = messageId.ToString(CultureInfo.InvariantCulture);
+        var deleteRows = await db.LifecycleEvents
+            .Where(x =>
             (x.EventType == "PROMOTION_DISCORD_DELETE_SCHEDULED" ||
              x.EventType == "TEMPLE_MISSING_DISCORD_DELETE_SCHEDULED" ||
              x.EventType == "WOM_MISSING_DISCORD_DELETE_SCHEDULED" ||
              x.EventType == "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED") &&
-            x.Status == "OPEN", ct);
+            (x.Status == "OPEN" || x.Status == "DONE") &&
+            x.MetadataJson.Contains(messageIdText))
+            .ToListAsync(ct);
+        var hasScheduledDelete = deleteRows.Any(x =>
+            DiscordDeleteScheduleMatcher.MatchesOpenOrCompletedSchedule(x, messageId));
+
+        if (!hasScheduledDelete)
+        {
+            hasScheduledDelete = db.ChangeTracker
+                .Entries<LifecycleEvent>()
+                .Any(x =>
+                    x.State != EntityState.Deleted &&
+                    DiscordDeleteScheduleMatcher.MatchesOpenOrCompletedSchedule(x.Entity, messageId));
+        }
+
         if (hasScheduledDelete)
         {
-            var deleteRows = await db.LifecycleEvents
-                .Where(x =>
-                    (x.EventType == "PROMOTION_DISCORD_DELETE_SCHEDULED" ||
-                     x.EventType == "TEMPLE_MISSING_DISCORD_DELETE_SCHEDULED" ||
-                     x.EventType == "WOM_MISSING_DISCORD_DELETE_SCHEDULED" ||
-                     x.EventType == "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED") &&
-                    x.Status == "OPEN")
-                .ToListAsync(ct);
-            hasScheduledDelete = deleteRows.Any(x => MetadataUlongEquals(x.MetadataJson, "DiscordMessageId", messageId));
+            logger.LogDebug(
+                "Skipping Discord delete reconciliation for message {MessageId}; an open or completed delete schedule already exists.",
+                messageId);
+            return;
         }
-        if (hasScheduledDelete) return;
 
         var now = DateTimeOffset.UtcNow;
         var preferredDeleteAt = messageCreatedAt.AddMinutes(_discordDeleteDelayMinutes);
@@ -2426,10 +2499,26 @@ public class DiscordPromotionBotWorker(
                 try
                 {
                     await channel.DeleteMessageAsync(messageId);
+                    await RecordCompletedMessageDeleteAsync(
+                        db,
+                        preferredPlayerId,
+                        channelId,
+                        messageId,
+                        eventType,
+                        extraMetadata,
+                        ct);
                     return;
                 }
                 catch (Discord.Net.HttpException ex) when (IsDiscordMessageMissingOrInaccessible(ex))
                 {
+                    await RecordCompletedMessageDeleteAsync(
+                        db,
+                        preferredPlayerId,
+                        channelId,
+                        messageId,
+                        eventType,
+                        extraMetadata,
+                        ct);
                     return;
                 }
                 catch (Exception ex)
@@ -2467,6 +2556,43 @@ public class DiscordPromotionBotWorker(
             extraMetadata,
             scheduleDue,
             scheduleHard);
+    }
+
+    private async Task RecordCompletedMessageDeleteAsync(
+        TrackerDbContext db,
+        int preferredPlayerId,
+        ulong channelId,
+        ulong messageId,
+        string eventType,
+        object extraMetadata,
+        CancellationToken ct)
+    {
+        var ownerId = await ResolveLifecycleOwnerPlayerIdAsync(db, preferredPlayerId, ct);
+        if (!ownerId.HasValue)
+        {
+            logger.LogWarning(
+                "Unable to record completed Discord delete for message {MessageId}; no valid player row exists for lifecycle ownership.",
+                messageId);
+            return;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        db.LifecycleEvents.Add(new LifecycleEvent
+        {
+            PlayerId = ownerId.Value,
+            EventType = eventType,
+            MetadataJson = JsonUtil.Serialize(new
+            {
+                ChannelId = channelId,
+                DiscordMessageId = messageId,
+                DeleteAfterUtc = now,
+                HardDeleteAfterUtc = now,
+                Extra = extraMetadata
+            }),
+            Status = "DONE",
+            CreatedAt = now
+        });
+        await db.SaveChangesAsync(ct);
     }
 
     private async Task<int?> ResolveLifecycleOwnerPlayerIdAsync(TrackerDbContext db, int preferredPlayerId, CancellationToken ct)
@@ -2820,6 +2946,8 @@ public class DiscordPromotionBotWorker(
         if (_client is null) return;
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+
+        await ReconcileSupersededMergeCardsAsync(db, ct);
 
         var promotionPosted = await db.LifecycleEvents
             .Where(x => x.EventType == "PROMOTION_DISCORD_POSTED")
@@ -3721,6 +3849,36 @@ public class DiscordPromotionBotWorker(
         var metadata = ReadLifecycleMetadata(postedEvent.MetadataJson);
         var value = PickLifecycleValue(metadata, "SupersededByMerge");
         return string.Equals(value, "true", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsPromotionReenableRequested(LifecycleEvent postedEvent)
+    {
+        var metadata = ReadLifecycleMetadata(postedEvent.MetadataJson);
+        return string.Equals(
+            PickLifecycleValue(metadata, "ReenableAfterMergeAbort"),
+            "true",
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsMergeEventRelatedToPlayer(LifecycleEvent mergeEvent, int playerId, string username)
+    {
+        if (mergeEvent.PlayerId == playerId ||
+            ExtractInt(mergeEvent.MetadataJson, "PreviousPlayerId") == playerId ||
+            ExtractInt(mergeEvent.MetadataJson, "NewPlayerId") == playerId)
+        {
+            return true;
+        }
+
+        var metadata = ReadLifecycleMetadata(mergeEvent.MetadataJson);
+        var normalizedUsername = NormalizeUsername(username);
+        return string.Equals(
+                   NormalizeUsername(PickLifecycleValue(metadata, "SuggestedPrevious") ?? ""),
+                   normalizedUsername,
+                   StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(
+                   NormalizeUsername(PickLifecycleValue(metadata, "NewPlayer", "Username", "Player") ?? ""),
+                   normalizedUsername,
+                   StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsTempleNameChangeConfirmed(Dictionary<string, string> metadata)
@@ -5121,6 +5279,270 @@ public class DiscordPromotionBotWorker(
         await db.SaveChangesAsync(ct);
     }
 
+    private async Task ReconcileConfirmedTempleNameChangesAsync(TrackerDbContext db, CancellationToken ct)
+    {
+        var openRequirements = await db.LifecycleEvents
+            .Where(x => x.EventType == TempleNameChangeReviewEventTypes.Required && x.Status == "OPEN")
+            .OrderBy(x => x.CreatedAt)
+            .ThenBy(x => x.Id)
+            .ToListAsync(ct);
+        if (openRequirements.Count == 0) return;
+
+        var confirmedRequirements = openRequirements
+            .Where(x => IsTempleNameChangeConfirmed(ReadLifecycleMetadata(x.MetadataJson)))
+            .ToList();
+        if (confirmedRequirements.Count == 0) return;
+
+        var templeGroupId = configuration.GetValue<int?>("TempleOsrs:GroupId") ?? 449;
+        var templeRoster = await TryGetTempleGroupUsernamesAsync(templeGroupId, ct);
+        if (!templeRoster.Succeeded) return;
+
+        foreach (var requiredEvent in confirmedRequirements)
+        {
+            var metadata = ReadLifecycleMetadata(requiredEvent.MetadataJson);
+            if (!IsTempleNameChangeConfirmed(metadata)) continue;
+
+            var previousUsername = NormalizeUsername(PickLifecycleValue(metadata, "PreviousUsername") ?? "");
+            var newUsername = NormalizeUsername(PickLifecycleValue(metadata, "NewUsername") ?? "");
+            if (string.IsNullOrWhiteSpace(previousUsername) || string.IsNullOrWhiteSpace(newUsername)) continue;
+
+            // Do not resolve based on a failed/partial HTTP response. The new name must
+            // be present and the old name must be absent in the same successful roster read.
+            if (!templeRoster.Usernames.Contains(newUsername) || templeRoster.Usernames.Contains(previousUsername)) continue;
+
+            await ReconcileVerifiedTempleNameChangeAsync(
+                db,
+                requiredEvent,
+                metadata,
+                previousUsername,
+                newUsername,
+                ct);
+        }
+    }
+
+    private async Task ReconcileVerifiedTempleNameChangeAsync(
+        TrackerDbContext db,
+        LifecycleEvent requiredEvent,
+        Dictionary<string, string> metadata,
+        string previousUsername,
+        string newUsername,
+        CancellationToken ct)
+    {
+        var previousPlayerId = ExtractInt(requiredEvent.MetadataJson, "PreviousPlayerId") ?? requiredEvent.PlayerId;
+        var previousPlayer = await db.Players.FirstOrDefaultAsync(x => x.Id == previousPlayerId, ct);
+        if (previousPlayer is null)
+        {
+            previousPlayer = await db.Players.FirstOrDefaultAsync(
+                x => x.Username.ToLower() == previousUsername.ToLower(),
+                ct);
+        }
+
+        // A confirmed rename without its historical row cannot be reconciled safely.
+        // Keep the requirement open, but do not re-post it as a reminder.
+        if (previousPlayer is null)
+        {
+            logger.LogWarning(
+                "Temple rename verification found {NewUsername}, but historical player {PreviousUsername} was not found. Leaving requirement {RequiredEventId} open.",
+                newUsername,
+                previousUsername,
+                requiredEvent.Id);
+            return;
+        }
+        var matchingNewPlayers = await db.Players
+            .Where(x =>
+                x.Id != previousPlayer.Id &&
+                x.Status != PlayerStatus.REMOVED_CONFIRMED &&
+                x.Username.ToLower() == newUsername.ToLower())
+            .OrderBy(x => x.Id)
+            .ToListAsync(ct);
+
+        // Multiple rows with the same current name require a human decision. Do not
+        // guess which history should be merged.
+        if (matchingNewPlayers.Count > 1)
+        {
+            logger.LogWarning(
+                "Temple rename verification found multiple tracker rows for {NewUsername}; leaving requirement {RequiredEventId} open.",
+                newUsername,
+                requiredEvent.Id);
+            return;
+        }
+
+        var newPlayer = matchingNewPlayers.SingleOrDefault();
+        if (newPlayer is not null)
+        {
+            // Reuse the existing merge-review action. The live check only creates the
+            // review; the existing Confirm rename button remains the data-changing step.
+            newPlayer.Status = PlayerStatus.MERGE_SUGGESTED;
+            await CloseOpenLifecycleEventsAsync(db, newPlayer.Id, "NEW_PLAYER", "WOM_ONLY_ACTION_REQUIRED");
+            await EnsureOpenVerifiedRenameMergeReviewAsync(
+                db,
+                previousPlayer,
+                newPlayer,
+                requiredEvent,
+                previousUsername,
+                newUsername,
+                ct);
+            await SupersedePendingPromotionCardsForMergeReviewAsync(
+                db,
+                previousPlayer,
+                newPlayer,
+                "merge-review-created",
+                ct);
+            await CloseOpenTempleNameChangeForMergeAsync(db, previousUsername, newUsername, newPlayer.Id, ct);
+            return;
+        }
+
+        if (previousPlayer.Status == PlayerStatus.REMOVED_CONFIRMED)
+        {
+            logger.LogWarning(
+                "Temple rename verification found {NewUsername}, but historical player {PreviousUsername} is already removed and no duplicate row exists. Leaving requirement {RequiredEventId} open.",
+                newUsername,
+                previousUsername,
+                requiredEvent.Id);
+            return;
+        }
+
+        // If sync never created a second row, retain the historical snapshots by
+        // updating that one row in place after the same explicit confirmation + live check.
+        previousPlayer.Username = newUsername;
+        previousPlayer.Status = PlayerStatus.ACTIVE;
+        previousPlayer.LastSeen = DateTimeOffset.UtcNow;
+        await CloseOpenLifecycleEventsAsync(
+            db,
+            previousPlayer.Id,
+            "MISSING_IN_ROSTER",
+            "TEMPLE_MISSING_ACTION_REQUIRED",
+            "WOM_MISSING_ACTION_REQUIRED");
+        await CloseOpenWomOnlyRequiredEventsAsync(db, newUsername);
+
+        db.LifecycleEvents.Add(new LifecycleEvent
+        {
+            PlayerId = previousPlayer.Id,
+            EventType = TempleNameChangeResolvedByLiveCheckEventType,
+            MetadataJson = JsonUtil.Serialize(new
+            {
+                PreviousUsername = previousUsername,
+                NewUsername = newUsername,
+                RequiredEventId = requiredEvent.Id,
+                Source = "temple-live-check"
+            }),
+            Status = "DONE",
+            CreatedAt = DateTimeOffset.UtcNow
+        });
+        MarkTempleNameChangeResolvedByLiveCheck(requiredEvent, metadata);
+    }
+
+    private async Task SupersedePendingPromotionCardsForMergeReviewAsync(
+        TrackerDbContext db,
+        Player previousPlayer,
+        Player newPlayer,
+        string source,
+        CancellationToken ct)
+    {
+        var playerIds = new[] { previousPlayer.Id, newPlayer.Id }.Distinct().ToArray();
+        var pendingCandidates = await db.PromotionCandidates
+            .Where(x => x.Status == PromotionStatus.PENDING && playerIds.Contains(x.PlayerId))
+            .OrderBy(x => x.CreatedAt)
+            .ToListAsync(ct);
+        if (pendingCandidates.Count == 0) return;
+
+        var postedEvents = await db.LifecycleEvents
+            .Where(x => x.EventType == "PROMOTION_DISCORD_POSTED")
+            .OrderByDescending(x => x.CreatedAt)
+            .ToListAsync(ct);
+
+        foreach (var candidate in pendingCandidates)
+        {
+            foreach (var postedEvent in postedEvents.Where(x => MetadataIntEquals(x.MetadataJson, "CandidateId", candidate.Id)))
+            {
+                if (IsPromotionPostedSupersededByMerge(postedEvent)) continue;
+
+                await SupersedePromotionCardForMergeAsync(
+                    db,
+                    postedEvent,
+                    candidate.Id,
+                    candidate.PlayerId,
+                    source,
+                    null,
+                    ct);
+            }
+        }
+    }
+
+    private static async Task EnsureOpenVerifiedRenameMergeReviewAsync(
+        TrackerDbContext db,
+        Player previousPlayer,
+        Player newPlayer,
+        LifecycleEvent requiredEvent,
+        string previousUsername,
+        string newUsername,
+        CancellationToken ct)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var metadata = JsonUtil.Serialize(new
+        {
+            NewPlayer = newUsername,
+            SuggestedPrevious = previousUsername,
+            PreviousPlayerId = previousPlayer.Id,
+            NewPlayerId = newPlayer.Id,
+            TempleNameChangeRequiredEventId = requiredEvent.Id,
+            Source = "temple-name-change-live-verification",
+            ConfirmedAt = PickLifecycleValue(ReadLifecycleMetadata(requiredEvent.MetadataJson), "ConfirmedAt"),
+            DetectedAt = now
+        });
+
+        var suggestedEvent = await db.LifecycleEvents.FirstOrDefaultAsync(x =>
+            x.PlayerId == newPlayer.Id &&
+            x.EventType == "MERGE_SUGGESTED" &&
+            x.Status == "OPEN", ct);
+        if (suggestedEvent is null)
+        {
+            db.LifecycleEvents.Add(new LifecycleEvent
+            {
+                PlayerId = newPlayer.Id,
+                EventType = "MERGE_SUGGESTED",
+                MetadataJson = metadata,
+                Status = "OPEN",
+                CreatedAt = now
+            });
+        }
+        else
+        {
+            suggestedEvent.MetadataJson = metadata;
+        }
+
+        var requiredMergeEvent = await db.LifecycleEvents.FirstOrDefaultAsync(x =>
+            x.PlayerId == newPlayer.Id &&
+            x.EventType == "MERGE_ACTION_REQUIRED" &&
+            x.Status == "OPEN", ct);
+        if (requiredMergeEvent is null)
+        {
+            db.LifecycleEvents.Add(new LifecycleEvent
+            {
+                PlayerId = newPlayer.Id,
+                EventType = "MERGE_ACTION_REQUIRED",
+                MetadataJson = metadata,
+                Status = "OPEN",
+                CreatedAt = now
+            });
+        }
+        else
+        {
+            requiredMergeEvent.MetadataJson = metadata;
+        }
+    }
+
+    private static void MarkTempleNameChangeResolvedByLiveCheck(
+        LifecycleEvent requiredEvent,
+        Dictionary<string, string> metadata)
+    {
+        var verifiedAt = DateTimeOffset.UtcNow;
+        metadata["TempleVerifiedAt"] = verifiedAt.ToString("O", CultureInfo.InvariantCulture);
+        metadata["ResolutionSource"] = "temple-live-check";
+        requiredEvent.MetadataJson = JsonUtil.Serialize(metadata);
+        requiredEvent.Status = "DONE";
+    }
+
     private async Task PostTempleNameChangeNeededMessages(CancellationToken ct)
     {
         if (_client is null) return;
@@ -5130,8 +5552,14 @@ public class DiscordPromotionBotWorker(
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
 
+        // A confirmed rename is only considered complete after Temple confirms the new
+        // name is present and the old name is absent. This also gives us a safe point
+        // to reconcile the two tracker rows created by a historical rename.
+        await ReconcileConfirmedTempleNameChangesAsync(db, ct);
+        await db.SaveChangesAsync(ct);
+
         var detectionInput = await BuildTempleNameChangeDetectionInputAsync(db, ct);
-        var detection = TempleNameChangeDetector.Detect(detectionInput);
+        var detection = DetectUniqueTempleNameChangeCandidate(detectionInput);
         if (detection is null)
         {
             var openRequirements = await db.LifecycleEvents
@@ -5141,7 +5569,6 @@ public class DiscordPromotionBotWorker(
             {
                 await SuppressTempleNameChangeNoisyCardsAsync(db, openRequirement, ct);
             }
-            await PostDueConfirmedTempleNameChangeRemindersAsync(db, channel, openRequirements, ct);
             if (openRequirements.Count > 0) await db.SaveChangesAsync(ct);
             return;
         }
@@ -5295,192 +5722,151 @@ public class DiscordPromotionBotWorker(
         }
     }
 
-    private async Task PostDueConfirmedTempleNameChangeRemindersAsync(
+    private static TempleNameChangeDetection? DetectUniqueTempleNameChangeCandidate(TempleNameChangeDetectionInput input)
+    {
+        var detections = DetectTempleNameChangeCandidates(input);
+        return detections.Count == 1 ? detections[0] : null;
+    }
+
+    private static IReadOnlyList<TempleNameChangeDetection> DetectTempleNameChangeCandidates(TempleNameChangeDetectionInput input)
+    {
+        var detections = input.WomOnlyCandidates
+            .Select(candidate => TempleNameChangeDetector.Detect(input with { WomOnlyCandidates = [candidate] }))
+            .Where(x => x is not null)
+            .Select(x => x!)
+            .GroupBy(x => $"{x.PreviousPlayerId}:{NormalizeUsername(x.NewUsername).ToLowerInvariant()}")
+            .Select(x => x.First())
+            .ToList();
+
+        var ambiguousPreviousPlayerIds = detections
+            .GroupBy(x => x.PreviousPlayerId)
+            .Where(x => x.Select(candidate => NormalizeUsername(candidate.NewUsername)).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1)
+            .Select(x => x.Key)
+            .ToHashSet();
+
+        return detections
+            .Where(x => !ambiguousPreviousPlayerIds.Contains(x.PreviousPlayerId))
+            .ToList();
+    }
+
+    private async Task<TempleNameChangeDetection?> TryPrepareRenameReviewBeforeSensitiveActionAsync(
         TrackerDbContext db,
-        IMessageChannel channel,
-        IReadOnlyList<LifecycleEvent> openRequirements,
+        int? expectedPreviousPlayerId,
+        string? expectedNewUsername,
+        string? expectedEitherUsername,
         CancellationToken ct)
     {
-        if (openRequirements.Count == 0) return;
+        var input = await BuildTempleNameChangeDetectionInputAsync(db, ct);
+        var normalizedNewUsername = NormalizeUsername(expectedNewUsername ?? "");
+        var normalizedEitherUsername = NormalizeUsername(expectedEitherUsername ?? "");
+        var detection = DetectTempleNameChangeCandidates(input).FirstOrDefault(x =>
+            (expectedPreviousPlayerId.HasValue && x.PreviousPlayerId == expectedPreviousPlayerId.Value) ||
+            (!string.IsNullOrWhiteSpace(normalizedNewUsername) &&
+             string.Equals(NormalizeUsername(x.NewUsername), normalizedNewUsername, StringComparison.OrdinalIgnoreCase)) ||
+            (!string.IsNullOrWhiteSpace(normalizedEitherUsername) &&
+             (string.Equals(NormalizeUsername(x.PreviousUsername), normalizedEitherUsername, StringComparison.OrdinalIgnoreCase) ||
+              string.Equals(NormalizeUsername(x.NewUsername), normalizedEitherUsername, StringComparison.OrdinalIgnoreCase))));
+        if (detection is null) return null;
 
-        var now = DateTimeOffset.UtcNow;
-        var postedEvents = await db.LifecycleEvents
-            .Where(x => x.EventType == TempleNameChangeReviewEventTypes.DiscordPosted)
-            .OrderByDescending(x => x.CreatedAt)
-            .ToListAsync(ct);
-
-        foreach (var requiredEvent in openRequirements)
-        {
-            var metadata = ReadLifecycleMetadata(requiredEvent.MetadataJson);
-            var confirmedAt = PickLifecycleDateTimeOffset(metadata, "ConfirmedAt");
-            if (!confirmedAt.HasValue) continue;
-
-            var latestPostedEvent = postedEvents.FirstOrDefault(x => MetadataIntEquals(x.MetadataJson, "RequiredEventId", requiredEvent.Id));
-            var latestPostedMetadata = latestPostedEvent is null ? [] : ReadLifecycleMetadata(latestPostedEvent.MetadataJson);
-            var reminderPostedAt = PickLifecycleDateTimeOffset(latestPostedMetadata, "ReminderPostedAt");
-            var lastVisibleReminderAt = new DateTimeOffset?[]
-                {
-                    confirmedAt.Value,
-                    latestPostedEvent is not null && latestPostedEvent.CreatedAt > confirmedAt.Value ? latestPostedEvent.CreatedAt : null,
-                    reminderPostedAt
-                }
-                .Where(x => x.HasValue)
-                .Select(x => x!.Value)
-                .Max();
-            if (now - lastVisibleReminderAt < TempleNameChangeReminderInterval)
-            {
-                continue;
-            }
-
-            var previousUsername = NormalizeUsername(PickLifecycleValue(metadata, "PreviousUsername") ?? "");
-            var newUsername = NormalizeUsername(PickLifecycleValue(metadata, "NewUsername") ?? "");
-            if (string.IsNullOrWhiteSpace(previousUsername) || string.IsNullOrWhiteSpace(newUsername)) continue;
-
-            var rank = PickLifecycleValue(metadata, "Rank") ?? "Unknown";
-            var womRole = PickLifecycleValue(metadata, "WomRole") ?? "Unknown";
-            var previousDiscordGuess = await GuessDiscordMemberForNamesAsync([previousUsername], ct);
-            var newDiscordGuess = await GuessDiscordMemberForNamesAsync([newUsername], ct);
-            var renderFingerprint = ComputeRenderFingerprint(new
-            {
-                Type = "temple-name-change-needed-card",
-                Reminder = true,
-                RequiredEventId = requiredEvent.Id,
-                PreviousUsername = previousUsername,
-                NewUsername = newUsername,
-                Rank = rank,
-                WomRole = womRole,
-                ConfirmedAt = confirmedAt.Value,
-                PreviousDiscordGuess = FormatDiscordGuessForFingerprint(previousDiscordGuess),
-                NewDiscordGuess = FormatDiscordGuessForFingerprint(newDiscordGuess)
-            });
-            var embed = BuildTempleNameChangeNeededEmbed(
-                previousUsername,
-                newUsername,
-                rank,
-                womRole,
-                previousDiscordGuess,
-                newDiscordGuess);
-            var components = BuildTempleNameChangeNeededComponents(requiredEvent.Id);
-
-            if (latestPostedEvent is not null)
-            {
-                var lookupKey = $"temple-name-change-reminder:{requiredEvent.Id}";
-                if (IsLookupBackoffActive(lookupKey)) continue;
-                var (lookupState, liveDiscordMessage, channelId, messageId) = await TryGetPostedUserMessageAsync(latestPostedEvent, lookupKey);
-                if (lookupState == PostedMessageLookupState.Unknown)
-                {
-                    SetLookupBackoff(lookupKey);
-                    continue;
-                }
-                if (lookupState == PostedMessageLookupState.Malformed)
-                {
-                    latestPostedEvent.Status = "DONE";
-                    continue;
-                }
-                if (lookupState == PostedMessageLookupState.Found && liveDiscordMessage is not null)
-                {
-                    if (!ShouldSkipMessagePatch(liveDiscordMessage.Id, renderFingerprint))
-                    {
-                        await liveDiscordMessage.ModifyAsync(props =>
-                        {
-                            props.Embed = embed;
-                            props.Components = components;
-                        });
-                        RecordMessagePatched(liveDiscordMessage.Id, renderFingerprint);
-                    }
-                    latestPostedEvent.MetadataJson = JsonUtil.Serialize(new
-                    {
-                        RequiredEventId = requiredEvent.Id,
-                        PreviousUsername = previousUsername,
-                        NewUsername = newUsername,
-                        Reminder = true,
-                        ReminderForConfirmedAt = confirmedAt.Value,
-                        ReminderPostedAt = DateTimeOffset.UtcNow,
-                        PreviousDiscordGuess = FormatDiscordGuessForFingerprint(previousDiscordGuess),
-                        NewDiscordGuess = FormatDiscordGuessForFingerprint(newDiscordGuess),
-                        ChannelId = liveDiscordMessage.Channel.Id,
-                        DiscordMessageId = liveDiscordMessage.Id,
-                        RenderFingerprint = renderFingerprint
-                    });
-                    continue;
-                }
-                if (lookupState == PostedMessageLookupState.Missing)
-                {
-                    await RecordMissingTrackedMessageEventAsync(
-                        db,
-                        requiredEvent.PlayerId,
-                        "temple-name-change-reminder",
-                        latestPostedEvent.Id,
-                        requiredEvent.Id,
-                        channelId,
-                        messageId,
-                        "post-temple-name-change-reminder",
-                        ct);
-                }
-            }
-
-            var lease = await TryAcquirePostLeaseAsync(db, requiredEvent.PlayerId, $"temple-name-change-reminder:{requiredEvent.Id}", ct);
-            if (lease is null) continue;
-            try
-            {
-                await db.Entry(requiredEvent).ReloadAsync(ct);
-                if (requiredEvent.Status != "OPEN") continue;
-                var latestMetadata = ReadLifecycleMetadata(requiredEvent.MetadataJson);
-                if (!IsTempleNameChangeConfirmed(latestMetadata)) continue;
-                var latestConfirmedAt = PickLifecycleDateTimeOffset(latestMetadata, "ConfirmedAt");
-                if (!latestConfirmedAt.HasValue || DateTimeOffset.UtcNow - latestConfirmedAt.Value < TempleNameChangeReminderInterval)
-                {
-                    continue;
-                }
-
-                var msg = await channel.SendMessageAsync(embed: embed, components: components);
-                db.LifecycleEvents.Add(new LifecycleEvent
-                {
-                    PlayerId = requiredEvent.PlayerId,
-                    EventType = TempleNameChangeReviewEventTypes.DiscordPosted,
-                    MetadataJson = JsonUtil.Serialize(new
-                    {
-                        RequiredEventId = requiredEvent.Id,
-                        PreviousUsername = previousUsername,
-                        NewUsername = newUsername,
-                        Reminder = true,
-                        ReminderForConfirmedAt = latestConfirmedAt.Value,
-                        ReminderPostedAt = DateTimeOffset.UtcNow,
-                        PreviousDiscordGuess = FormatDiscordGuessForFingerprint(previousDiscordGuess),
-                        NewDiscordGuess = FormatDiscordGuessForFingerprint(newDiscordGuess),
-                        ChannelId = _options.ChannelId,
-                        DiscordMessageId = msg.Id,
-                        RenderFingerprint = renderFingerprint
-                    }),
-                    Status = "DONE",
-                    CreatedAt = DateTimeOffset.UtcNow
-                });
-                RecordMessagePatched(msg.Id, renderFingerprint);
-            }
-            finally
-            {
-                lease.Status = "DONE";
-                await db.SaveChangesAsync(ct);
-            }
-        }
+        await UpsertTempleNameChangeRequiredEventAsync(db, detection, ct);
+        await db.SaveChangesAsync(ct);
+        return detection;
     }
+
+    private async Task BlockSensitiveActionForRenameAsync(
+        TrackerDbContext db,
+        SocketMessageComponent component,
+        TempleNameChangeDetection detection,
+        int playerId,
+        CancellationToken ct)
+    {
+        var message = BuildRenameGuardMessage(detection);
+        db.LifecycleEvents.Add(new LifecycleEvent
+        {
+            PlayerId = detection.PreviousPlayerId,
+            EventType = "RENAME_ACTION_GUARD_BLOCKED",
+            MetadataJson = JsonUtil.Serialize(new
+            {
+                PreviousUsername = detection.PreviousUsername,
+                NewUsername = detection.NewUsername,
+                PreviousPlayerId = detection.PreviousPlayerId,
+                BlockedActionPlayerId = playerId,
+                Source = "discord-action-guard",
+                ChannelId = component.Channel.Id,
+                DiscordMessageId = component.Message.Id
+            }),
+            Status = "DONE",
+            CreatedAt = DateTimeOffset.UtcNow
+        });
+        await db.SaveChangesAsync(ct);
+
+        await UpdateComponentMessageAsync(
+            component,
+            BuildHandledEmbed(component.Message.Embeds.FirstOrDefault(), message, "rename"));
+        ScheduleChannelMessageDelete(
+            db,
+            playerId,
+            component.Channel.Id,
+            component.Message.Id,
+            "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED",
+            new { Reason = "rename-candidate-guarded-action" });
+        await db.SaveChangesAsync(ct);
+    }
+
+    private async Task<TempleNameChangeDetection?> TryPrepareRenameReviewForCommandAsync(
+        IReadOnlyList<string> usernames,
+        CancellationToken ct)
+    {
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        foreach (var username in usernames)
+        {
+            var detection = await TryPrepareRenameReviewBeforeSensitiveActionAsync(
+                db,
+                expectedPreviousPlayerId: null,
+                expectedNewUsername: null,
+                expectedEitherUsername: username,
+                ct);
+            if (detection is not null) return detection;
+        }
+
+        return null;
+    }
+
+    private static string BuildRenameGuardMessage(TempleNameChangeDetection detection) =>
+        $"Possible rename detected: `{detection.PreviousUsername}` -> `{detection.NewUsername}`. No action was applied; check the existing rename review.";
 
     private async Task<TempleNameChangeDetectionInput> BuildTempleNameChangeDetectionInputAsync(TrackerDbContext db, CancellationToken ct)
     {
         var now = DateTimeOffset.UtcNow;
         var recentCutoff = now - TempleNameChangeDetectionWindow;
-        var openEvents = await db.LifecycleEvents
+        var recentEvents = await db.LifecycleEvents
             .Where(x =>
-                x.Status == "OPEN" &&
+                x.CreatedAt >= recentCutoff &&
                 (x.EventType == "WOM_MISSING_ACTION_REQUIRED" ||
                  x.EventType == "TEMPLE_MISSING_ACTION_REQUIRED" ||
+                 x.EventType == "MISSING_IN_ROSTER" ||
                  x.EventType == "WOM_ONLY_ACTION_REQUIRED" ||
-                 x.EventType == "MERGE_ACTION_REQUIRED"))
+                 x.EventType == "WOM_ONLY_IGNORED" ||
+                 x.EventType == "MERGE_ACTION_REQUIRED" ||
+                 x.EventType == "WOM_MISSING_ACTION_APPLIED" ||
+                 x.EventType == "TEMPLE_MISSING_ACTION_APPLIED"))
             .ToListAsync(ct);
 
-        var playerIds = openEvents
+        var oldCandidateEvents = recentEvents
+            .Where(x => x.EventType is "WOM_MISSING_ACTION_REQUIRED" or "TEMPLE_MISSING_ACTION_REQUIRED" or "MISSING_IN_ROSTER")
+            .ToList();
+        var removedPlayerIds = recentEvents
+            .Where(x => x.EventType is "WOM_MISSING_ACTION_APPLIED" or "TEMPLE_MISSING_ACTION_APPLIED")
+            .Where(x => string.Equals(PickLifecycleValue(ReadLifecycleMetadata(x.MetadataJson), "Action"), "remove", StringComparison.OrdinalIgnoreCase))
+            .Select(x => x.PlayerId)
+            .ToHashSet();
+        var playerIds = oldCandidateEvents
             .Where(x => x.EventType is "WOM_MISSING_ACTION_REQUIRED" or "TEMPLE_MISSING_ACTION_REQUIRED")
             .Select(x => x.PlayerId)
+            .Concat(recentEvents
+                .Where(x => x.EventType == "MISSING_IN_ROSTER")
+                .Select(x => x.PlayerId))
             .Distinct()
             .ToList();
         var players = await db.Players
@@ -5489,15 +5875,21 @@ public class DiscordPromotionBotWorker(
             .ToListAsync(ct);
 
         var oldCandidates = players
-            .Where(x => x.Status == PlayerStatus.MISSING_PENDING_REVIEW)
+            .Where(x =>
+                x.Status == PlayerStatus.MISSING_PENDING_REVIEW ||
+                (x.Status == PlayerStatus.REMOVED_CONFIRMED && removedPlayerIds.Contains(x.Id)))
             .Select(x =>
             {
-                var womMissing = openEvents
+                var womMissing = oldCandidateEvents
                     .Where(ev => ev.PlayerId == x.Id && ev.EventType == "WOM_MISSING_ACTION_REQUIRED")
                     .OrderByDescending(ev => ev.CreatedAt)
                     .FirstOrDefault();
-                var templeMissing = openEvents
+                var templeMissing = oldCandidateEvents
                     .Where(ev => ev.PlayerId == x.Id && ev.EventType == "TEMPLE_MISSING_ACTION_REQUIRED")
+                    .OrderByDescending(ev => ev.CreatedAt)
+                    .FirstOrDefault();
+                var rosterMissing = oldCandidateEvents
+                    .Where(ev => ev.PlayerId == x.Id && ev.EventType == "MISSING_IN_ROSTER")
                     .OrderByDescending(ev => ev.CreatedAt)
                     .FirstOrDefault();
                 return new TempleNameChangeOldCandidate(
@@ -5505,16 +5897,21 @@ public class DiscordPromotionBotWorker(
                     x.Username,
                     x.CurrentRank,
                     womMissing?.Id,
-                    womMissing?.CreatedAt,
+                    womMissing?.CreatedAt ?? rosterMissing?.CreatedAt,
                     templeMissing?.Id,
-                    templeMissing?.CreatedAt);
+                    templeMissing?.CreatedAt ?? rosterMissing?.CreatedAt);
             })
             .Where(x =>
                 (x.WomMissingCreatedAt.HasValue && x.WomMissingCreatedAt >= recentCutoff) ||
                 (x.TempleMissingCreatedAt.HasValue && x.TempleMissingCreatedAt >= recentCutoff))
             .ToList();
 
-        var womOnlyCandidates = openEvents
+        var ignoredUsernames = recentEvents
+            .Where(x => x.EventType == "WOM_ONLY_IGNORED" && x.Status == "OPEN")
+            .Select(x => NormalizeUsername(PickLifecycleValue(ReadLifecycleMetadata(x.MetadataJson), "Username", "Player") ?? ""))
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var womOnlyCandidates = recentEvents
             .Where(x => x.EventType == "WOM_ONLY_ACTION_REQUIRED")
             .Select(x =>
             {
@@ -5524,10 +5921,11 @@ public class DiscordPromotionBotWorker(
                 return new TempleNameChangeWomOnlyCandidate(x.Id, username, role, x.CreatedAt);
             })
             .Where(x => !string.IsNullOrWhiteSpace(x.Username))
+            .Where(x => !ignoredUsernames.Contains(NormalizeUsername(x.Username)))
             .ToList();
 
-        var openMerges = openEvents
-            .Where(x => x.EventType == "MERGE_ACTION_REQUIRED")
+        var openMerges = recentEvents
+            .Where(x => x.EventType == "MERGE_ACTION_REQUIRED" && x.Status == "OPEN")
             .Select(x =>
             {
                 var metadata = ReadLifecycleMetadata(x.MetadataJson);
@@ -5579,8 +5977,6 @@ public class DiscordPromotionBotWorker(
             return string.Equals(NormalizeUsername(PickLifecycleValue(metadata, "PreviousUsername") ?? ""), NormalizeUsername(detection.PreviousUsername), StringComparison.OrdinalIgnoreCase) &&
                 string.Equals(NormalizeUsername(PickLifecycleValue(metadata, "NewUsername") ?? ""), NormalizeUsername(detection.NewUsername), StringComparison.OrdinalIgnoreCase);
         });
-
-        if (matching is null && openRequirements.Count > 0) return null;
 
         var metadataJson = JsonUtil.Serialize(new
         {
@@ -5667,7 +6063,8 @@ public class DiscordPromotionBotWorker(
         LifecycleEvent postedEvent,
         string previousUsername,
         string newUsername,
-        CancellationToken ct)
+        CancellationToken ct,
+        string? suppressionDescription = null)
     {
         var alreadySuppressed = await db.LifecycleEvents
             .Where(x => x.EventType == TempleNameChangeReviewEventTypes.SuppressedCard)
@@ -5681,9 +6078,8 @@ public class DiscordPromotionBotWorker(
         if (lookupState == PostedMessageLookupState.Unknown)
         {
             SetLookupBackoff(lookupKey);
-            return;
         }
-        if (lookupState == PostedMessageLookupState.Malformed)
+        else if (lookupState == PostedMessageLookupState.Malformed)
         {
             postedEvent.Status = "DONE";
             return;
@@ -5696,7 +6092,7 @@ public class DiscordPromotionBotWorker(
                 props.Components = new ComponentBuilder().Build();
                 props.Embed = BuildHandledEmbed(
                     liveDiscordMessage.Embeds.FirstOrDefault(),
-                    $"Suppressed by Temple name change review: {previousUsername} -> {newUsername}",
+                    suppressionDescription ?? $"Suppressed by Temple name change review: {previousUsername} -> {newUsername}",
                     "rename");
             });
             resolvedChannelId = liveDiscordMessage.Channel.Id;
@@ -5847,7 +6243,21 @@ public class DiscordPromotionBotWorker(
         return false;
     }
 
-    private static async Task CloseOpenTempleNameChangeForMergeAsync(
+    private static async Task<LifecycleEvent?> FindOpenMergeForPromotionAsync(
+        TrackerDbContext db,
+        int playerId,
+        string username,
+        CancellationToken ct)
+    {
+        var openMergeEvents = await db.LifecycleEvents
+            .Where(x => x.EventType == "MERGE_ACTION_REQUIRED" && x.Status == "OPEN")
+            .OrderBy(x => x.CreatedAt)
+            .ToListAsync(ct);
+
+        return openMergeEvents.FirstOrDefault(x => IsMergeEventRelatedToPlayer(x, playerId, username));
+    }
+
+    private async Task CloseOpenTempleNameChangeForMergeAsync(
         TrackerDbContext db,
         string previousUsername,
         string newUsername,
@@ -5859,6 +6269,10 @@ public class DiscordPromotionBotWorker(
         var openRequirements = await db.LifecycleEvents
             .Where(x => x.EventType == TempleNameChangeReviewEventTypes.Required && x.Status == "OPEN")
             .ToListAsync(ct);
+        var postedTempleNameChangeEvents = await db.LifecycleEvents
+            .Where(x => x.EventType == TempleNameChangeReviewEventTypes.DiscordPosted)
+            .OrderByDescending(x => x.CreatedAt)
+            .ToListAsync(ct);
         foreach (var requirement in openRequirements)
         {
             var metadata = ReadLifecycleMetadata(requirement.MetadataJson);
@@ -5868,6 +6282,19 @@ public class DiscordPromotionBotWorker(
                 !string.Equals(current, normalizedNew, StringComparison.OrdinalIgnoreCase))
             {
                 continue;
+            }
+
+            foreach (var postedEvent in postedTempleNameChangeEvents.Where(x =>
+                         MetadataIntEquals(x.MetadataJson, "RequiredEventId", requirement.Id)))
+            {
+                await SuppressTempleNameChangeNoisyCardAsync(
+                    db,
+                    requirement,
+                    postedEvent,
+                    previousUsername,
+                    newUsername,
+                    ct,
+                    $"Superseded by rename merge review: {previousUsername} -> {newUsername}");
             }
 
             requirement.Status = "DONE";
@@ -5896,6 +6323,10 @@ public class DiscordPromotionBotWorker(
 
         var oldPlayer = await db.Players.FirstOrDefaultAsync(x => x.Username.ToLower() == normalizedPrevious.ToLower(), ct);
         if (oldPlayer is null) return;
+        var newUsername = await db.Players
+            .Where(x => x.Id == mergePlayerId)
+            .Select(x => x.Username)
+            .FirstOrDefaultAsync(ct) ?? "";
 
         await CloseOpenLifecycleEventsAsync(db, oldPlayer.Id,
             "MISSING_IN_ROSTER",
@@ -5938,6 +6369,12 @@ public class DiscordPromotionBotWorker(
                 if (TryReadUlong(doc.RootElement, "ChannelId", out var channelId) &&
                     TryReadUlong(doc.RootElement, "DiscordMessageId", out var messageId))
                 {
+                    await MarkSupersededMissingCardHandledAsync(
+                        db,
+                        oldPosted,
+                        previousUsername,
+                        newUsername,
+                        ct);
                     ScheduleChannelMessageDelete(
                         db,
                         mergePlayerId,
@@ -5965,6 +6402,12 @@ public class DiscordPromotionBotWorker(
             if (TryReadUlong(doc.RootElement, "ChannelId", out var channelId) &&
                 TryReadUlong(doc.RootElement, "DiscordMessageId", out var messageId))
             {
+                await MarkSupersededMissingCardHandledAsync(
+                    db,
+                    oldWomPosted,
+                    previousUsername,
+                    newUsername,
+                    ct);
                 ScheduleChannelMessageDelete(
                     db,
                     mergePlayerId,
@@ -5977,6 +6420,162 @@ public class DiscordPromotionBotWorker(
         catch
         {
             // best effort
+        }
+    }
+
+    private async Task MarkSupersededMissingCardHandledAsync(
+        TrackerDbContext db,
+        LifecycleEvent postedEvent,
+        string previousUsername,
+        string newUsername,
+        CancellationToken ct)
+    {
+        var handledRows = await db.LifecycleEvents
+            .Where(x =>
+                x.EventType == DiscordMergeCardRules.SupersededCardHandledEventType &&
+                x.Status == "DONE")
+            .ToListAsync(ct);
+        if (handledRows.Any(x => MetadataIntEquals(x.MetadataJson, "PostedEventId", postedEvent.Id)) ||
+            db.ChangeTracker.Entries<LifecycleEvent>().Any(x =>
+                x.State != EntityState.Deleted &&
+                x.Entity.EventType == DiscordMergeCardRules.SupersededCardHandledEventType &&
+                MetadataIntEquals(x.Entity.MetadataJson, "PostedEventId", postedEvent.Id)))
+        {
+            return;
+        }
+
+        var lookupKey = $"merge-superseded-card:{postedEvent.Id}";
+        var (lookupState, liveDiscordMessage, resolvedChannelId, resolvedMessageId) =
+            await TryGetPostedUserMessageAsync(postedEvent, lookupKey);
+        if (lookupState == PostedMessageLookupState.Unknown)
+        {
+            SetLookupBackoff(lookupKey);
+            return;
+        }
+
+        var canRecordHandled = lookupState == PostedMessageLookupState.Missing;
+        if (lookupState == PostedMessageLookupState.Found && liveDiscordMessage is not null)
+        {
+            if (liveDiscordMessage.Components is null || liveDiscordMessage.Components.Count == 0)
+            {
+                canRecordHandled = true;
+            }
+            else
+            {
+                try
+                {
+                    await liveDiscordMessage.ModifyAsync(props =>
+                    {
+                        props.Components = new ComponentBuilder().Build();
+                        props.Embed = BuildHandledEmbed(
+                            liveDiscordMessage.Embeds.FirstOrDefault(),
+                            $"Superseded by rename review: {previousUsername} -> {newUsername}",
+                            "rename");
+                    });
+                    canRecordHandled = true;
+                }
+                catch (Discord.Net.HttpException ex) when (IsDiscordMessageMissingOrInaccessible(ex))
+                {
+                    canRecordHandled = true;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(
+                        ex,
+                        "Failed to mark superseded Discord card {MessageId} as handled; it will be retried.",
+                        liveDiscordMessage.Id);
+                }
+            }
+        }
+
+        if (!canRecordHandled) return;
+
+        db.LifecycleEvents.Add(new LifecycleEvent
+        {
+            PlayerId = postedEvent.PlayerId,
+            EventType = DiscordMergeCardRules.SupersededCardHandledEventType,
+            MetadataJson = JsonUtil.Serialize(new
+            {
+                PostedEventId = postedEvent.Id,
+                PostedEventType = postedEvent.EventType,
+                ChannelId = resolvedChannelId ?? ExtractUlong(postedEvent.MetadataJson, "ChannelId"),
+                DiscordMessageId = resolvedMessageId ?? ExtractUlong(postedEvent.MetadataJson, "DiscordMessageId"),
+                PreviousUsername = previousUsername,
+                NewUsername = newUsername,
+                Source = "merge-review"
+            }),
+            Status = "DONE",
+            CreatedAt = DateTimeOffset.UtcNow
+        });
+    }
+
+    private async Task ReconcileSupersededMergeCardsAsync(TrackerDbContext db, CancellationToken ct)
+    {
+        var openDeleteSchedules = await db.LifecycleEvents
+            .Where(x =>
+                x.Status == "OPEN" &&
+                (x.EventType == "TEMPLE_MISSING_DISCORD_DELETE_SCHEDULED" ||
+                 x.EventType == "WOM_MISSING_DISCORD_DELETE_SCHEDULED"))
+            .ToListAsync(ct);
+        var openDeleteMessageIds = openDeleteSchedules
+            .Select(x => ExtractUlong(x.MetadataJson, "DiscordMessageId"))
+            .Where(x => x.HasValue)
+            .Select(x => x!.Value)
+            .ToHashSet();
+
+        if (openDeleteMessageIds.Count == 0) return;
+
+        var completedMerges = await db.LifecycleEvents
+            .Where(x => x.EventType == "MERGE_ACTION_APPLIED" && x.Status == "DONE")
+            .OrderByDescending(x => x.CreatedAt)
+            .Take(100)
+            .ToListAsync(ct);
+
+        foreach (var mergeEvent in completedMerges)
+        {
+            var metadata = ReadLifecycleMetadata(mergeEvent.MetadataJson);
+            var action = PickLifecycleValue(metadata, "Action");
+            if (!string.Equals(action, "confirm", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(action, "reassign", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var previousUsername = PickLifecycleValue(metadata, "PreviousPlayer");
+            var newUsername = PickLifecycleValue(metadata, "CanonicalPlayer", "NewPlayer");
+            if (string.IsNullOrWhiteSpace(previousUsername) || string.IsNullOrWhiteSpace(newUsername)) continue;
+
+            var postedEvents = await db.LifecycleEvents
+                .Where(x =>
+                    x.PlayerId == mergeEvent.PlayerId &&
+                    (x.EventType == "TEMPLE_MISSING_DISCORD_POSTED" ||
+                     x.EventType == "WOM_MISSING_DISCORD_POSTED"))
+                .OrderByDescending(x => x.CreatedAt)
+                .Take(100)
+                .ToListAsync(ct);
+
+            foreach (var postedEvent in postedEvents)
+            {
+                var postedMessageId = ExtractUlong(postedEvent.MetadataJson, "DiscordMessageId");
+                if (!postedMessageId.HasValue || !openDeleteMessageIds.Contains(postedMessageId.Value)) continue;
+
+                var postedMetadata = ReadLifecycleMetadata(postedEvent.MetadataJson);
+                var postedUsername = PickLifecycleValue(postedMetadata, "Player", "Username");
+                if (!string.Equals(
+                        NormalizeUsername(postedUsername ?? ""),
+                        NormalizeUsername(previousUsername),
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                await MarkSupersededMissingCardHandledAsync(
+                    db,
+                    postedEvent,
+                    previousUsername,
+                    newUsername,
+                    ct);
+            }
         }
     }
 
@@ -6092,6 +6691,65 @@ public class DiscordPromotionBotWorker(
         }
     }
 
+    private async Task RestorePromotionCardsAfterMergeAbortAsync(
+        TrackerDbContext db,
+        LifecycleEvent mergeActionEvent,
+        CancellationToken ct)
+    {
+        var metadata = ReadLifecycleMetadata(mergeActionEvent.MetadataJson);
+        var previousUsername = PickLifecycleValue(metadata, "SuggestedPrevious", "PreviousPlayer");
+        var relatedPlayerIds = new HashSet<int> { mergeActionEvent.PlayerId };
+        if (!string.IsNullOrWhiteSpace(previousUsername))
+        {
+            var previousPlayerId = await db.Players
+                .Where(x => x.Username.ToLower() == previousUsername.ToLower())
+                .Select(x => (int?)x.Id)
+                .FirstOrDefaultAsync(ct);
+            if (previousPlayerId.HasValue) relatedPlayerIds.Add(previousPlayerId.Value);
+        }
+
+        var pendingCandidates = await db.PromotionCandidates
+            .Where(x => x.Status == PromotionStatus.PENDING && relatedPlayerIds.Contains(x.PlayerId))
+            .OrderBy(x => x.CreatedAt)
+            .ToListAsync(ct);
+        if (pendingCandidates.Count == 0) return;
+
+        var candidateIds = pendingCandidates.Select(x => x.Id).ToArray();
+        var postedEvents = await db.LifecycleEvents
+            .Where(x => x.EventType == "PROMOTION_DISCORD_POSTED")
+            .OrderByDescending(x => x.CreatedAt)
+            .ToListAsync(ct);
+        var scheduledDeletes = await db.LifecycleEvents
+            .Where(x => x.EventType == "PROMOTION_DISCORD_DELETE_SCHEDULED" && x.Status == "OPEN")
+            .ToListAsync(ct);
+
+        foreach (var postedEvent in postedEvents.Where(x =>
+                     ExtractInt(x.MetadataJson, "CandidateId") is int candidateId &&
+                     candidateIds.Contains(candidateId) &&
+                     IsPromotionPostedSupersededByMerge(x)))
+        {
+            var channelId = ExtractUlong(postedEvent.MetadataJson, "ChannelId");
+            var messageId = ExtractUlong(postedEvent.MetadataJson, "DiscordMessageId");
+            foreach (var scheduledDelete in scheduledDeletes.Where(x =>
+                         messageId.HasValue && MetadataUlongEquals(x.MetadataJson, "DiscordMessageId", messageId.Value)))
+            {
+                scheduledDelete.Status = "DONE";
+            }
+
+            postedEvent.MetadataJson = JsonUtil.Serialize(new
+            {
+                CandidateId = ExtractInt(postedEvent.MetadataJson, "CandidateId"),
+                DiscordMessageId = messageId,
+                ChannelId = channelId,
+                RenderFingerprint = (string?)null,
+                SupersededByMerge = false,
+                ReenableAfterMergeAbort = true,
+                ReenabledAt = DateTimeOffset.UtcNow,
+                MergeActionEventId = mergeActionEvent.Id
+            });
+        }
+    }
+
     private async Task ProcessMergeActionUpdates(CancellationToken ct)
     {
         if (_client is null) return;
@@ -6136,6 +6794,11 @@ public class DiscordPromotionBotWorker(
                     }
                 }
 
+                shouldRefreshPromotions = true;
+            }
+            else if (mergeAction == "abort")
+            {
+                await RestorePromotionCardsAfterMergeAbortAsync(db, update, ct);
                 shouldRefreshPromotions = true;
             }
 
@@ -6261,6 +6924,7 @@ public class DiscordPromotionBotWorker(
                     return;
                 }
 
+                var wasActive = foundPlayer.Status == PlayerStatus.ACTIVE;
                 var templeGroupId = configuration.GetValue<int?>("TempleOsrs:GroupId") ?? 449;
                 var inTemple = await IsPlayerInTempleGroupAsync(foundPlayer.Username, templeGroupId);
                 var suppressedByPendingMerge = await HasOpenMergePendingForPreviousUsernameAsync(updateDb, foundPlayer.Username, CancellationToken.None);
@@ -6301,6 +6965,30 @@ public class DiscordPromotionBotWorker(
                             {
                                 foundPlayer.Username,
                                 MissingAt = DateTimeOffset.UtcNow,
+                                Source = "discord-slash-update"
+                            }),
+                            Status = "OPEN",
+                            CreatedAt = DateTimeOffset.UtcNow
+                        });
+                    }
+                }
+
+                if (wasActive && inTemple)
+                {
+                    var hasOpenRenameRecheck = await updateDb.LifecycleEvents.AnyAsync(x =>
+                        x.PlayerId == foundPlayer.Id &&
+                        x.EventType == RenameReviewEventTypes.RecheckRequested &&
+                        x.Status == "OPEN");
+                    if (!hasOpenRenameRecheck)
+                    {
+                        updateDb.LifecycleEvents.Add(new LifecycleEvent
+                        {
+                            PlayerId = foundPlayer.Id,
+                            EventType = RenameReviewEventTypes.RecheckRequested,
+                            MetadataJson = JsonUtil.Serialize(new
+                            {
+                                Player = foundPlayer.Username,
+                                RequestedBy = command.User.Username,
                                 Source = "discord-slash-update"
                             }),
                             Status = "OPEN",
@@ -6355,11 +7043,11 @@ public class DiscordPromotionBotWorker(
                 }
 
                 petsPlayer.ManualPetOverride = petCount;
-                var isImp = await ReevaluatePlayerForManualPetsAsync(petDb, petWom, petsPlayer);
+                var isRankUpgradeExcludedRole = await ReevaluatePlayerForManualPetsAsync(petDb, petWom, petsPlayer);
                 await petDb.SaveChangesAsync();
 
-                await RespondAndAutoDeleteAsync(command, isImp
-                    ? $"Manual pets set: `{petsPlayer.Username}` -> `{petCount}`. Player has WiseOldMan role `imp` and is excluded from rank upgrades."
+                await RespondAndAutoDeleteAsync(command, isRankUpgradeExcludedRole
+                    ? $"Manual pets set: `{petsPlayer.Username}` -> `{petCount}`. Player has a non-clan WiseOldMan role and is excluded from rank upgrades."
                     : $"Manual pets set: `{petsPlayer.Username}` -> `{petCount}`. Rank eligibility has been re-evaluated.", ephemeral: false);
                 return;
             }
@@ -6372,6 +7060,12 @@ public class DiscordPromotionBotWorker(
                     await RespondAndAutoDeleteAsync(command, "No valid player names found.", ephemeral: false);
                     return;
                 }
+                var renameDetection = await TryPrepareRenameReviewForCommandAsync(players, CancellationToken.None);
+                if (renameDetection is not null)
+                {
+                    await RespondAndAutoDeleteAsync(command, BuildRenameGuardMessage(renameDetection), ephemeral: false);
+                    return;
+                }
                 await RespondAndAutoDeleteAsync(command, await ExecuteTempleAddAsync(players), ephemeral: false);
                 return;
             }
@@ -6382,6 +7076,13 @@ public class DiscordPromotionBotWorker(
                 if (players.Count == 0)
                 {
                     await RespondAndAutoDeleteAsync(command, "Please provide one or more valid player names.", ephemeral: false);
+                    return;
+                }
+
+                var renameDetection = await TryPrepareRenameReviewForCommandAsync(players, CancellationToken.None);
+                if (renameDetection is not null)
+                {
+                    await RespondAndAutoDeleteAsync(command, BuildRenameGuardMessage(renameDetection), ephemeral: false);
                     return;
                 }
 
@@ -6402,6 +7103,13 @@ public class DiscordPromotionBotWorker(
                     return;
                 }
 
+                var renameDetection = await TryPrepareRenameReviewForCommandAsync(players, CancellationToken.None);
+                if (renameDetection is not null)
+                {
+                    await RespondAndAutoDeleteAsync(command, BuildRenameGuardMessage(renameDetection), ephemeral: false);
+                    return;
+                }
+
                 var templeEmbed = await ExecuteTempleRemoveAsync(players);
                 await RespondAndAutoDeleteAsync(command, templeEmbed, ephemeral: false);
 
@@ -6416,6 +7124,12 @@ public class DiscordPromotionBotWorker(
                 if (players.Count == 0)
                 {
                     await RespondAndAutoDeleteAsync(command, "No valid player names found.", ephemeral: false);
+                    return;
+                }
+                var renameDetection = await TryPrepareRenameReviewForCommandAsync(players, CancellationToken.None);
+                if (renameDetection is not null)
+                {
+                    await RespondAndAutoDeleteAsync(command, BuildRenameGuardMessage(renameDetection), ephemeral: false);
                     return;
                 }
                 await RespondAndAutoDeleteAsync(command, await ExecuteTempleRemoveAsync(players), ephemeral: false);
@@ -6436,6 +7150,13 @@ public class DiscordPromotionBotWorker(
                     return;
                 }
 
+                var renameDetection = await TryPrepareRenameReviewForCommandAsync(players, CancellationToken.None);
+                if (renameDetection is not null)
+                {
+                    await RespondAndAutoDeleteAsync(command, BuildRenameGuardMessage(renameDetection), ephemeral: false);
+                    return;
+                }
+
                 await RespondAndAutoDeleteAsync(command, await ExecuteWomAddAsync(players), ephemeral: false);
                 return;
             }
@@ -6451,6 +7172,13 @@ public class DiscordPromotionBotWorker(
                         groupId: configuration.GetValue<int?>("WiseOldMan:GroupId") ?? 0,
                         players: [],
                         details: "Please provide one or more valid player names."), ephemeral: false);
+                    return;
+                }
+
+                var renameDetection = await TryPrepareRenameReviewForCommandAsync(players, CancellationToken.None);
+                if (renameDetection is not null)
+                {
+                    await RespondAndAutoDeleteAsync(command, BuildRenameGuardMessage(renameDetection), ephemeral: false);
                     return;
                 }
 
@@ -6502,6 +7230,12 @@ public class DiscordPromotionBotWorker(
             if (string.Equals(command.Data.Name, "discord-rank-audit", StringComparison.OrdinalIgnoreCase))
             {
                 await HandleDiscordRankAuditSlashCommandAsync(command);
+                return;
+            }
+
+            if (string.Equals(command.Data.Name, "ungnomify", StringComparison.OrdinalIgnoreCase))
+            {
+                await HandleWomSpecialRankAuditSlashCommandAsync(command);
                 return;
             }
 
@@ -6773,6 +7507,110 @@ public class DiscordPromotionBotWorker(
             await RespondAndAutoDeleteAsync(command, "Discord rank audit timed out. Try again after the member cache has warmed up.", ephemeral: false);
         }
     }
+
+    private async Task HandleWomSpecialRankAuditSlashCommandAsync(SocketSlashCommand command)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+        try
+        {
+            await using var scope = scopeFactory.CreateAsyncScope();
+            var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+            var wiseOldManClient = scope.ServiceProvider.GetRequiredService<IWiseOldManClient>();
+            var rows = await BuildWomSpecialRankAuditRowsAsync(db, wiseOldManClient, timeout.Token);
+            await RespondWithUngnomifyEmbedsAsync(command, rows);
+        }
+        catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+        {
+            logger.LogWarning("WOM special rank audit slash command timed out.");
+            await RespondAndAutoDeleteAsync(command, "WOM special rank audit timed out. Try again after the Wise Old Man cache has warmed up.", ephemeral: false);
+        }
+    }
+
+    private static async Task<IReadOnlyList<UngnomifyRow>> BuildWomSpecialRankAuditRowsAsync(
+        TrackerDbContext db,
+        IWiseOldManClient wiseOldManClient,
+        CancellationToken ct)
+    {
+        var trackedPlayers = await db.Players
+            .Where(x => x.Status != PlayerStatus.REMOVED_CONFIRMED)
+            .Select(x => new
+            {
+                x.Username,
+                x.CurrentRank
+            })
+            .ToListAsync(ct);
+
+        var trackedByUsername = trackedPlayers
+            .GroupBy(x => UsernameRules.NormalizeUsername(x.Username), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(x => x.Key, x => x.First(), StringComparer.OrdinalIgnoreCase);
+        var womRoles = await wiseOldManClient.GetMemberRolesAsync(ct);
+        var rows = new List<UngnomifyRow>();
+
+        foreach (var (usernameRaw, roleRaw) in womRoles)
+        {
+            var role = FormatWomSpecialRankAuditRole(roleRaw);
+            if (role is null) continue;
+
+            trackedByUsername.TryGetValue(UsernameRules.NormalizeUsername(usernameRaw), out var player);
+
+            rows.Add(new UngnomifyRow(
+                UsernameRules.NormalizeUsername(usernameRaw),
+                player is null ? "Untracked" : FormatAuditRank(player.CurrentRank),
+                role));
+        }
+
+        return rows
+            .OrderBy(x => WomSpecialRankAuditRoleSortOrder(x.SpecialRank))
+            .ThenBy(x => x.Username, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private async Task RespondWithUngnomifyEmbedsAsync(SocketSlashCommand command, IReadOnlyList<UngnomifyRow> rows)
+    {
+        if (rows.Count == 0)
+        {
+            await RespondAndAutoDeleteAsync(command, "No current Goblin or Short green guy roles were found.", ephemeral: false);
+            return;
+        }
+
+        foreach (var embed in BuildUngnomifyEmbeds(rows))
+        {
+            await RespondAndAutoDeleteAsync(command, embed, ephemeral: false);
+        }
+    }
+
+    private static IReadOnlyList<Embed> BuildUngnomifyEmbeds(IReadOnlyList<UngnomifyRow> rows)
+    {
+        const int rowsPerEmbed = 40;
+        var chunks = rows.Chunk(rowsPerEmbed).ToList();
+        return chunks.Select((chunk, index) =>
+        {
+            var builder = new EmbedBuilder()
+                .WithTitle(index == 0 ? "Ungnomify" : $"Ungnomify ({index + 1}/{chunks.Count})")
+                .WithDescription("Current Goblin and Short green guy roles.")
+                .WithColor(new Color(199, 163, 95))
+                .AddField("Name", string.Join("\n", chunk.Select(x => x.Username)), true)
+                .AddField("Current rank", string.Join("\n", chunk.Select(x => x.CurrentRank)), true)
+                .AddField("Special rank", string.Join("\n", chunk.Select(x => x.SpecialRank)), true)
+                .WithFooter($"Showing {chunk.Length} of {rows.Count} player(s).")
+                .WithTimestamp(DateTimeOffset.Now);
+            return builder.Build();
+        }).ToList();
+    }
+
+    private static string? FormatWomSpecialRankAuditRole(string role)
+    {
+        var normalized = RankRules.NormalizeRankName(role);
+        if (string.Equals(normalized, "goblin", StringComparison.OrdinalIgnoreCase)) return "Goblin";
+        if (string.Equals(normalized, "short green guy", StringComparison.OrdinalIgnoreCase)) return "Short green guy";
+        return null;
+    }
+
+    private static string FormatAuditRank(string rank) =>
+        string.IsNullOrWhiteSpace(rank) ? "Unavailable" : RankRules.NormalizeRankName(rank);
+
+    private static int WomSpecialRankAuditRoleSortOrder(string role) =>
+        string.Equals(role, "Goblin", StringComparison.OrdinalIgnoreCase) ? 0 : 1;
 
     private async Task HandleDiscordRankReviewPostSlashCommandAsync(SocketSlashCommand command)
     {
@@ -7400,12 +8238,16 @@ public class DiscordPromotionBotWorker(
             _ => 11
         };
 
-    private async Task RespondWithCsvAsync(SocketSlashCommand command, Embed embed, string csv, string fileName)
+    private async Task RespondWithCsvAsync(SocketSlashCommand command, Embed embed, string csv, string fileName, bool ephemeral = false)
     {
         await using var stream = new MemoryStream(Encoding.UTF8.GetBytes(csv));
-        var response = await command.FollowupWithFileAsync(stream, fileName, embed: embed, ephemeral: false);
+        var response = await command.FollowupWithFileAsync(stream, fileName, embed: embed, ephemeral: ephemeral);
         var messageDescription = BuildSlashEmbedCleanupDescription(command, embed);
-        if (command.ChannelId.HasValue)
+        if (ephemeral)
+        {
+            await ScheduleInteractionResponseDeleteAsync(command, messageDescription);
+        }
+        else if (command.ChannelId.HasValue)
         {
             await ScheduleChannelResponseDeleteAsync(command.ChannelId.Value, response.Id, $"slash-{command.CommandName}-followup", messageDescription);
         }
@@ -7942,6 +8784,9 @@ Checks an exact Discord match's rank role against the database.
 **/discord-rank-audit**  
 Runs a read-only exact-match rank role audit and attaches a CSV.
 
+**/ungnomify**
+Lists current Goblin and Short green guy roles with the player's current tracker rank.
+
 **/discord-rank-set <user> <rank>**  
 Replaces a Discord member's configured rank roles with the selected rank role.
 
@@ -8266,6 +9111,7 @@ Shows all currently ignored players in:
             string.Equals(commandName, "discord-guess", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(commandName, "discord-rank-check", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(commandName, "discord-rank-audit", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(commandName, "ungnomify", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(commandName, "discord-rank-set", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(commandName, "discord-rank-review-post", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(commandName, "history", StringComparison.OrdinalIgnoreCase) ||
@@ -9342,6 +10188,56 @@ Shows all currently ignored players in:
         }
     }
 
+    private async Task<TempleRosterLookupResult> TryGetTempleGroupUsernamesAsync(int groupId, CancellationToken ct)
+    {
+        if (groupId <= 0)
+        {
+            return new TempleRosterLookupResult(false, new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+        }
+
+        try
+        {
+            var client = httpClientFactory.CreateClient();
+            using var requestTimeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            requestTimeout.CancelAfter(TimeSpan.FromSeconds(10));
+            using var response = await client.GetAsync(
+                $"https://templeosrs.com/api/groupmembers.php?id={groupId}",
+                requestTimeout.Token);
+            if (!response.IsSuccessStatusCode)
+            {
+                logger.LogDebug("Temple roster lookup returned HTTP {StatusCode} for group {GroupId}.", response.StatusCode, groupId);
+                return new TempleRosterLookupResult(false, new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+            }
+
+            var json = await response.Content.ReadAsStringAsync(requestTimeout.Token);
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Array)
+            {
+                logger.LogDebug("Temple roster lookup returned a non-array payload for group {GroupId}.", groupId);
+                return new TempleRosterLookupResult(false, new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+            }
+
+            var usernames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var element in doc.RootElement.EnumerateArray())
+            {
+                if (element.ValueKind != JsonValueKind.String) continue;
+                var username = NormalizeUsername(element.GetString() ?? "");
+                if (!string.IsNullOrWhiteSpace(username)) usernames.Add(username);
+            }
+
+            return new TempleRosterLookupResult(true, usernames);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Temple roster lookup failed for group {GroupId}; rename reconciliation will remain pending.", groupId);
+            return new TempleRosterLookupResult(false, new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+        }
+    }
+
     private async Task<bool> IsPlayerInTempleGroupAsync(string username, int groupId)
     {
         try
@@ -9607,15 +10503,16 @@ Shows all currently ignored players in:
         var rankResult = RankEvaluator.Evaluate(snapshot);
         player.EligibleRank = rankResult.Rank;
 
-        var isImpAccount = await wiseOldManClient.IsImpAccountAsync(player.Username, CancellationToken.None);
-        if (isImpAccount)
+        var womRole = await wiseOldManClient.GetMemberRoleAsync(player.Username, CancellationToken.None);
+        var isRankUpgradeExcludedRole = RankRules.IsSpecialWomRole(womRole ?? "");
+        if (isRankUpgradeExcludedRole)
         {
-            var pendingForImp = await db.PromotionCandidates
+            var pendingForExcludedRole = await db.PromotionCandidates
                 .Where(x => x.PlayerId == player.Id && x.Status == PromotionStatus.PENDING)
                 .ToListAsync();
-            if (pendingForImp.Count > 0)
+            if (pendingForExcludedRole.Count > 0)
             {
-                db.PromotionCandidates.RemoveRange(pendingForImp);
+                db.PromotionCandidates.RemoveRange(pendingForExcludedRole);
             }
             return true;
         }
@@ -9745,5 +10642,10 @@ public sealed record DiscordRankAuditResult(
             match.MatchedValue,
             match.PlayerAlias);
 }
+
+public sealed record UngnomifyRow(
+    string Username,
+    string CurrentRank,
+    string SpecialRank);
 
 public record WomRoleChoice(string Label, string Value);
