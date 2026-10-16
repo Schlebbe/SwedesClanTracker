@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text;
 using System.Security.Cryptography;
 using System.Collections.Concurrent;
@@ -76,6 +77,7 @@ public class DiscordPromotionBotWorker(
     [
         "PROMOTION_CANDIDATE_CREATED",
         "PROMOTION_DISCORD_ACTION_APPLIED",
+        "PROMOTION_DISCORD_RANK_ACTION_APPLIED",
         "NEW_PLAYER",
         "MISSING_IN_ROSTER",
         "STATUS_UPDATED",
@@ -455,6 +457,7 @@ public class DiscordPromotionBotWorker(
             var womRole = await wiseOldManClient.GetMemberRoleAsync(c.PlayerName, ct);
             var candidateType = RankRules.ClassifyPromotionCandidate(c.NewRank, womRole);
             var discordGuess = await GuessDiscordMemberForPlayerAsync(db, c.PlayerId, c.PlayerName, ct);
+            var exactDiscordMatch = PromotionDiscordActionRules.FindUniqueExactMatch(discordGuess);
 
             var embed = BuildPromotionEmbed(
                 c.PlayerName,
@@ -477,6 +480,7 @@ public class DiscordPromotionBotWorker(
                 WomRole = string.IsNullOrWhiteSpace(womRole) ? "Unknown" : RankRules.NormalizeRankName(womRole),
                 CandidateType = candidateType.ToString(),
                 DiscordGuess = FormatDiscordGuessForFingerprint(discordGuess),
+                DiscordRankActionTargetUserId = exactDiscordMatch?.UserId,
                 Stats = BuildStatsSummary(c.Latest?.Ehb, c.Latest?.Ehp, c.Latest?.Collections, c.ManualPetOverride ?? c.StoredPetCount),
                 c.Reason,
                 LastSynced = FormatSwedishTime(c.LastSynced)
@@ -563,13 +567,12 @@ public class DiscordPromotionBotWorker(
                         props.Components = builder.Build();
                     });
                     RecordMessagePatched(liveDiscordMessage.Id, renderFingerprint);
-                    postedEvent.MetadataJson = JsonUtil.Serialize(new
-                    {
-                        CandidateId = c.Id,
-                        DiscordMessageId = liveDiscordMessage.Id,
-                        ChannelId = liveDiscordMessage.Channel.Id,
-                        RenderFingerprint = renderFingerprint
-                    });
+                    postedEvent.MetadataJson = BuildPromotionPostedMetadata(
+                        c.Id,
+                        liveDiscordMessage.Id,
+                        liveDiscordMessage.Channel.Id,
+                        renderFingerprint,
+                        discordGuess);
                     await db.SaveChangesAsync(ct);
                     continue;
                 }
@@ -587,7 +590,12 @@ public class DiscordPromotionBotWorker(
                 {
                     PlayerId = c.PlayerId,
                     EventType = "PROMOTION_DISCORD_POSTED",
-                    MetadataJson = JsonUtil.Serialize(new { CandidateId = c.Id, DiscordMessageId = msg.Id, ChannelId = _options.ChannelId, RenderFingerprint = renderFingerprint }),
+                    MetadataJson = BuildPromotionPostedMetadata(
+                        c.Id,
+                        msg.Id,
+                        _options.ChannelId,
+                        renderFingerprint,
+                        discordGuess),
                     Status = "DONE",
                     CreatedAt = DateTimeOffset.UtcNow
                 });
@@ -927,6 +935,24 @@ public class DiscordPromotionBotWorker(
         var action = parts[1];
         if (!int.TryParse(parts[2], out var candidateId)) return;
 
+        if (string.Equals(action, "discord-select", StringComparison.OrdinalIgnoreCase))
+        {
+            await HandlePromotionDiscordMemberPickerButtonAsync(component, candidateId);
+            return;
+        }
+
+        if (string.Equals(action, "discord-user-select", StringComparison.OrdinalIgnoreCase))
+        {
+            await HandlePromotionDiscordUserPickerButtonAsync(component, candidateId);
+            return;
+        }
+
+        if (string.Equals(action, "discord-rank", StringComparison.OrdinalIgnoreCase))
+        {
+            await HandlePromotionDiscordRankButtonAsync(component, candidateId);
+            return;
+        }
+
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
         var wiseOldManClient = scope.ServiceProvider.GetRequiredService<IWiseOldManClient>();
@@ -954,9 +980,9 @@ public class DiscordPromotionBotWorker(
                 component.Message.Id,
                 "PROMOTION_DISCORD_DELETE_SCHEDULED",
                 new { CandidateId = candidate.Id, Reason = "promotion-already-handled" },
-                now.AddSeconds(10),
-                now.AddMinutes(1),
-                dedupeCompletedSchedules: false);
+                now.AddMinutes(_discordDeleteDelayMinutes),
+                now.AddMinutes(_discordDeleteHardCapMinutes),
+                extendExistingSchedule: true);
             await db.SaveChangesAsync();
             var alreadyHandledAction = candidate.Status == PromotionStatus.APPROVED ? "approve" : "dismiss";
             var alreadyHandledText = $"Already handled ({candidate.Status})";
@@ -996,6 +1022,20 @@ public class DiscordPromotionBotWorker(
             return;
         }
 
+        var promotionPostedEvent = action == "approve"
+            ? await FindPromotionPostedEventAsync(db, candidate.PlayerId, candidate.Id, component.Message.Id)
+            : null;
+        IReadOnlyList<DiscordMemberGuessMatch> promotionDiscordMatchOptions = promotionPostedEvent is null
+            ? Array.Empty<DiscordMemberGuessMatch>()
+            : await ResolvePromotionDiscordMatchOptionsAsync(
+                db,
+                promotionPostedEvent,
+                player.Username,
+                ct: CancellationToken.None);
+        var promotionDiscordRankTargetUserId = PromotionDiscordActionRules
+            .FindUniqueExactMatch(new DiscordMemberGuessResult(promotionDiscordMatchOptions))?
+            .UserId;
+
         SwedesClanTracker.Core.WomRoleUpdateResult? promotionWomUpdate = null;
         if (action == "approve")
         {
@@ -1011,19 +1051,16 @@ public class DiscordPromotionBotWorker(
                 "discord",
                 CancellationToken.None);
             candidate.Status = PromotionStatus.APPROVED;
-            ScheduleDelete(candidate.Id, player.Id);
         }
         else if (action == "dismiss")
         {
             candidate.Status = PromotionStatus.DISMISSED;
-            ScheduleDelete(candidate.Id, player.Id);
         }
         else if (action == "rename")
         {
             player.Status = PlayerStatus.MERGE_SUGGESTED;
             await CloseOpenLifecycleEventsAsync(db, player.Id, "NEW_PLAYER", "DISCORD_MARK_RENAME_SUSPECT");
             await EnsureOpenMergeSuggestedEventAsync(db, player.Id, player.Username, component.User.Username);
-            ScheduleDelete(candidate.Id, player.Id);
             db.LifecycleEvents.Add(new LifecycleEvent
             {
                 PlayerId = player.Id,
@@ -1039,6 +1076,16 @@ public class DiscordPromotionBotWorker(
             return;
         }
 
+        if (promotionPostedEvent is not null)
+        {
+            SetPromotionDiscordRankActionMetadata(
+                promotionPostedEvent,
+                available: action == "approve" && promotionDiscordMatchOptions.Count > 0,
+                completed: false,
+                success: null,
+                details: null);
+        }
+
         db.LifecycleEvents.Add(new LifecycleEvent
         {
             PlayerId = player.Id,
@@ -1052,6 +1099,7 @@ public class DiscordPromotionBotWorker(
                 WomUpdateSuccess = promotionWomUpdate?.Success,
                 WomUpdateDetails = promotionWomUpdate?.Details,
                 WomUpdatedRole = promotionWomUpdate?.UpdatedRole,
+                DiscordRankActionTargetUserId = promotionDiscordRankTargetUserId,
                 Source = "discord",
                 ChannelId = component.Channel.Id,
                 DiscordMessageId = component.Message.Id
@@ -1061,9 +1109,881 @@ public class DiscordPromotionBotWorker(
         });
 
         await db.SaveChangesAsync();
+        ScheduleDelete(candidate.Id, player.Id);
         var handledText = $"Handled by {component.User.Username} ({action}) via discord";
-        await TryUpdatePromotionCardHandledAsync(component, handledText, action);
+        if (action == "approve" && promotionDiscordRankTargetUserId.HasValue)
+        {
+            handledText += ". Exact Discord match selected; use the button below to set the rank role.";
+        }
+        else if (action == "approve" && promotionDiscordMatchOptions.Count > 0)
+        {
+            handledText += ". Possible Discord matches found; choose a member before setting the rank role.";
+        }
+        else if (action == "approve")
+        {
+            handledText += ". No likely Discord match was found; use /discord-rank-set manually.";
+        }
+
+        var handledComponents = action != "approve"
+            ? null
+            : promotionDiscordRankTargetUserId.HasValue
+                ? BuildPromotionDiscordRankActionComponents(candidate.Id, candidate.NewRank)
+                : promotionDiscordMatchOptions.Count > 0
+                    ? BuildPromotionDiscordMemberPickerButtonComponents(candidate.Id)
+                    : null;
+        await TryUpdatePromotionCardHandledAsync(component, handledText, action, handledComponents);
         // Background reconciliation still runs for web/admin-originated updates and retry/delete scheduling.
+    }
+
+    private async Task HandlePromotionDiscordMemberPickerButtonAsync(SocketMessageComponent component, int candidateId)
+    {
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        var candidate = await db.PromotionCandidates.FirstOrDefaultAsync(x => x.Id == candidateId);
+        if (candidate is null)
+        {
+            await RespondToComponentAsync(component, "Promotion candidate not found.", ephemeral: true);
+            return;
+        }
+
+        if (candidate.Status != PromotionStatus.APPROVED)
+        {
+            await RespondToComponentAsync(component, "This promotion is not approved, so its Discord rank action is no longer valid.", ephemeral: true);
+            return;
+        }
+
+        var player = await db.Players.FirstOrDefaultAsync(x => x.Id == candidate.PlayerId);
+        if (player is null)
+        {
+            await RespondToComponentAsync(component, "Player not found.", ephemeral: true);
+            return;
+        }
+
+        var postedEvent = await FindPromotionPostedEventAsync(db, candidate.PlayerId, candidate.Id, component.Message.Id);
+        if (postedEvent is null)
+        {
+            await RespondToComponentAsync(component, "The promotion card could not be matched to its tracked Discord message.", ephemeral: true);
+            return;
+        }
+
+        var postedMetadata = ReadLifecycleMetadata(postedEvent.MetadataJson);
+        if (string.Equals(PickLifecycleValue(postedMetadata, "DiscordRankActionCompleted"), "true", StringComparison.OrdinalIgnoreCase))
+        {
+            await RespondToComponentAsync(component, "The Discord rank action on this promotion card has already been handled.", ephemeral: true);
+            return;
+        }
+
+        var matchOptions = await ResolvePromotionDiscordMatchOptionsAsync(
+            db,
+            postedEvent,
+            player.Username,
+            CancellationToken.None);
+        if (matchOptions.Count == 0)
+        {
+            await db.SaveChangesAsync();
+            await RespondToComponentAsync(component, "No Discord match candidates are available. Use /discord-rank-set manually.", ephemeral: true);
+            return;
+        }
+
+        await db.SaveChangesAsync();
+        var rank = RankRules.NormalizeRankName(candidate.NewRank);
+        var picker = BuildPromotionDiscordMemberPickerMenu(candidate.Id, rank, matchOptions);
+        var pickerText = $"Choose the Discord member whose rank should be set to {rank} for {player.Username}.";
+        if (component.HasResponded)
+        {
+            await component.FollowupAsync(text: pickerText, components: picker, ephemeral: true);
+        }
+        else
+        {
+            await component.RespondAsync(text: pickerText, components: picker, ephemeral: true);
+        }
+    }
+
+    private async Task HandlePromotionDiscordUserPickerButtonAsync(SocketMessageComponent component, int candidateId)
+    {
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        var candidate = await db.PromotionCandidates.FirstOrDefaultAsync(x => x.Id == candidateId);
+        if (candidate is null)
+        {
+            await RespondToComponentAsync(component, "Promotion candidate not found.", ephemeral: true);
+            return;
+        }
+
+        if (candidate.Status != PromotionStatus.APPROVED)
+        {
+            await RespondToComponentAsync(component, "This promotion is not approved, so its Discord rank action is no longer valid.", ephemeral: true);
+            return;
+        }
+
+        var player = await db.Players.FirstOrDefaultAsync(x => x.Id == candidate.PlayerId);
+        if (player is null)
+        {
+            await RespondToComponentAsync(component, "Player not found.", ephemeral: true);
+            return;
+        }
+
+        var postedEvent = await FindPromotionPostedEventAsync(db, candidate.PlayerId, candidate.Id, component.Message.Id);
+        if (postedEvent is null)
+        {
+            await RespondToComponentAsync(component, "The promotion card could not be matched to its tracked Discord message.", ephemeral: true);
+            return;
+        }
+
+        var postedMetadata = ReadLifecycleMetadata(postedEvent.MetadataJson);
+        if (string.Equals(PickLifecycleValue(postedMetadata, "DiscordRankActionCompleted"), "true", StringComparison.OrdinalIgnoreCase))
+        {
+            await RespondToComponentAsync(component, "The Discord rank action on this promotion card has already been handled.", ephemeral: true);
+            return;
+        }
+
+        var rank = RankRules.NormalizeRankName(candidate.NewRank);
+        var picker = BuildPromotionDiscordUserPickerMenu(candidate.Id, rank);
+        var pickerText = $"Choose any guild member whose rank should be set to {rank} for {player.Username}.";
+        if (component.HasResponded)
+        {
+            await component.FollowupAsync(text: pickerText, components: picker, ephemeral: true);
+        }
+        else
+        {
+            await component.RespondAsync(text: pickerText, components: picker, ephemeral: true);
+        }
+    }
+
+    private async Task HandlePromotionDiscordMemberSelectAsync(SocketMessageComponent component, string customId)
+    {
+        var parts = customId.Split(':');
+        if (parts.Length != 3 ||
+            !string.Equals(parts[0], "promo", StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(parts[1], "discord-member", StringComparison.OrdinalIgnoreCase) ||
+            !int.TryParse(parts[2], out var candidateId))
+        {
+            await RespondToComponentAsync(component, "Malformed Discord member selection.", ephemeral: true);
+            return;
+        }
+
+        var selectedValue = component.Data.Values.FirstOrDefault();
+        if (!ulong.TryParse(selectedValue, NumberStyles.None, CultureInfo.InvariantCulture, out var selectedUserId))
+        {
+            await RespondToComponentAsync(component, "No valid Discord member was selected.", ephemeral: true);
+            return;
+        }
+
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        var candidate = await db.PromotionCandidates.FirstOrDefaultAsync(x => x.Id == candidateId);
+        if (candidate is null)
+        {
+            await RespondToComponentAsync(component, "Promotion candidate not found.", ephemeral: true);
+            return;
+        }
+
+        if (candidate.Status != PromotionStatus.APPROVED)
+        {
+            await RespondToComponentAsync(component, "This promotion is not approved, so its Discord rank action is no longer valid.", ephemeral: true);
+            return;
+        }
+
+        var player = await db.Players.FirstOrDefaultAsync(x => x.Id == candidate.PlayerId);
+        if (player is null)
+        {
+            await RespondToComponentAsync(component, "Player not found.", ephemeral: true);
+            return;
+        }
+
+        var postedEvent = await FindPromotionPostedEventAsync(db, candidate.PlayerId, candidate.Id, component.Message.Id);
+        if (postedEvent is null)
+        {
+            await RespondToComponentAsync(component, "The promotion card could not be matched to its tracked Discord message.", ephemeral: true);
+            return;
+        }
+
+        var postedMetadata = ReadLifecycleMetadata(postedEvent.MetadataJson);
+        if (string.Equals(PickLifecycleValue(postedMetadata, "DiscordRankActionCompleted"), "true", StringComparison.OrdinalIgnoreCase))
+        {
+            await RespondToComponentAsync(component, "The Discord rank action on this promotion card has already been handled.", ephemeral: true);
+            return;
+        }
+
+        var matchOptions = await ResolvePromotionDiscordMatchOptionsAsync(
+            db,
+            postedEvent,
+            player.Username,
+            CancellationToken.None);
+        var selectedMatch = matchOptions.FirstOrDefault(x => x.UserId == selectedUserId);
+        if (selectedMatch is null)
+        {
+            await RespondToComponentAsync(component, "That Discord member is not one of the tracked match candidates.", ephemeral: true);
+            return;
+        }
+
+        SetPromotionDiscordRankActionSelectionMetadata(
+            postedEvent,
+            selectedMatch.UserId,
+            selectedMatch.DisplayLabel,
+            isCustomSelection: false);
+        SetPromotionDiscordRankActionMetadata(
+            postedEvent,
+            available: true,
+            completed: false,
+            success: null,
+            details: null);
+        await db.SaveChangesAsync();
+
+        var rank = RankRules.NormalizeRankName(candidate.NewRank);
+        var handledText = $"Discord member selected: {selectedMatch.DisplayLabel}. Use the button below to set the {rank} role.";
+        var publicMessageId = ExtractUlong(postedEvent.MetadataJson, "DiscordMessageId");
+        if (publicMessageId is ulong resolvedPublicMessageId)
+        {
+            await TryUpdatePromotionCardHandledAsync(
+                component.Channel,
+                resolvedPublicMessageId,
+                handledText,
+                "approve",
+                BuildPromotionDiscordRankActionComponents(candidate.Id, candidate.NewRank, allowAlternateSelection: true));
+        }
+        await RespondToComponentAsync(
+            component,
+            $"Selected {selectedMatch.DisplayLabel}. Confirm the {rank} role update with the button on the promotion card.",
+            ephemeral: true);
+    }
+
+    private async Task HandlePromotionDiscordUserSelectAsync(SocketMessageComponent component, string customId)
+    {
+        var parts = customId.Split(':');
+        if (parts.Length != 3 ||
+            !string.Equals(parts[0], "promo", StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(parts[1], "discord-user", StringComparison.OrdinalIgnoreCase) ||
+            !int.TryParse(parts[2], out var candidateId))
+        {
+            await RespondToComponentAsync(component, "Malformed Discord user selection.", ephemeral: true);
+            return;
+        }
+
+        var selectedValue = component.Data.Values.FirstOrDefault();
+        if (!ulong.TryParse(selectedValue, NumberStyles.None, CultureInfo.InvariantCulture, out var selectedUserId))
+        {
+            await RespondToComponentAsync(component, "No valid Discord user was selected.", ephemeral: true);
+            return;
+        }
+
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        var candidate = await db.PromotionCandidates.FirstOrDefaultAsync(x => x.Id == candidateId);
+        if (candidate is null)
+        {
+            await RespondToComponentAsync(component, "Promotion candidate not found.", ephemeral: true);
+            return;
+        }
+
+        if (candidate.Status != PromotionStatus.APPROVED)
+        {
+            await RespondToComponentAsync(component, "This promotion is not approved, so its Discord rank action is no longer valid.", ephemeral: true);
+            return;
+        }
+
+        var player = await db.Players.FirstOrDefaultAsync(x => x.Id == candidate.PlayerId);
+        if (player is null)
+        {
+            await RespondToComponentAsync(component, "Player not found.", ephemeral: true);
+            return;
+        }
+
+        var postedEvent = await FindPromotionPostedEventAsync(db, candidate.PlayerId, candidate.Id, component.Message.Id);
+        if (postedEvent is null)
+        {
+            await RespondToComponentAsync(component, "The promotion card could not be matched to its tracked Discord message.", ephemeral: true);
+            return;
+        }
+
+        var postedMetadata = ReadLifecycleMetadata(postedEvent.MetadataJson);
+        if (string.Equals(PickLifecycleValue(postedMetadata, "DiscordRankActionCompleted"), "true", StringComparison.OrdinalIgnoreCase))
+        {
+            await RespondToComponentAsync(component, "The Discord rank action on this promotion card has already been handled.", ephemeral: true);
+            return;
+        }
+
+        var guild = _client?.GetGuild(_options.GuildId);
+        if (guild is null)
+        {
+            await RespondToComponentAsync(component, "Discord guild is not available in the bot cache.", ephemeral: true);
+            return;
+        }
+
+        var guildUser = await ResolveGuildUserAsync(guild, selectedUserId, CancellationToken.None);
+        if (guildUser is null)
+        {
+            await RespondToComponentAsync(component, "The selected Discord user is not a member of this guild.", ephemeral: true);
+            return;
+        }
+
+        var selectedLabel = FormatPromotionDiscordUserLabel(guildUser);
+        SetPromotionDiscordRankActionSelectionMetadata(
+            postedEvent,
+            selectedUserId,
+            selectedLabel,
+            isCustomSelection: true);
+        SetPromotionDiscordRankActionMetadata(
+            postedEvent,
+            available: true,
+            completed: false,
+            success: null,
+            details: null);
+        await db.SaveChangesAsync();
+
+        var rank = RankRules.NormalizeRankName(candidate.NewRank);
+        var handledText = $"Discord member selected: {selectedLabel}. Use the button below to set the {rank} role.";
+        var publicMessageId = ExtractUlong(postedEvent.MetadataJson, "DiscordMessageId");
+        if (publicMessageId is ulong resolvedPublicMessageId)
+        {
+            await TryUpdatePromotionCardHandledAsync(
+                component.Channel,
+                resolvedPublicMessageId,
+                handledText,
+                "approve",
+                BuildPromotionDiscordRankActionComponents(candidate.Id, candidate.NewRank, allowAlternateSelection: true));
+        }
+
+        await RespondToComponentAsync(
+            component,
+            $"Selected {selectedLabel}. Confirm the {rank} role update with the button on the promotion card.",
+            ephemeral: true);
+    }
+
+    private async Task HandlePromotionDiscordRankButtonAsync(SocketMessageComponent component, int candidateId)
+    {
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        var candidate = await db.PromotionCandidates.FirstOrDefaultAsync(x => x.Id == candidateId);
+        if (candidate is null)
+        {
+            await RespondToComponentAsync(component, "Promotion candidate not found.", ephemeral: true);
+            return;
+        }
+
+        if (candidate.Status != PromotionStatus.APPROVED)
+        {
+            await RespondToComponentAsync(component, "This promotion is not approved, so its Discord rank action is no longer valid.", ephemeral: true);
+            return;
+        }
+
+        var player = await db.Players.FirstOrDefaultAsync(x => x.Id == candidate.PlayerId);
+        if (player is null)
+        {
+            await RespondToComponentAsync(component, "Player not found.", ephemeral: true);
+            return;
+        }
+
+        var postedEvent = await FindPromotionPostedEventAsync(db, candidate.PlayerId, candidate.Id, component.Message.Id);
+        if (postedEvent is null)
+        {
+            await RespondToComponentAsync(component, "The promotion card could not be matched to its tracked Discord message.", ephemeral: true);
+            return;
+        }
+
+        var postedMetadata = ReadLifecycleMetadata(postedEvent.MetadataJson);
+        if (string.Equals(PickLifecycleValue(postedMetadata, "DiscordRankActionCompleted"), "true", StringComparison.OrdinalIgnoreCase))
+        {
+            await RespondToComponentAsync(component, "The Discord rank action on this promotion card has already been handled.", ephemeral: true);
+            return;
+        }
+
+        var targetUserId = await ResolvePromotionDiscordRankTargetUserIdAsync(
+            db,
+            postedEvent,
+            player.Username,
+            ct: CancellationToken.None);
+        if (!targetUserId.HasValue)
+        {
+            await TryUpdatePromotionCardHandledAsync(
+                component,
+                "Discord rank was not changed. The exact Discord match is no longer available; use /discord-rank-set manually.",
+                "approve");
+            await RespondToComponentAsync(component, "No unique exact Discord match is available for the automatic action. Use /discord-rank-set manually.", ephemeral: true);
+            return;
+        }
+
+        try
+        {
+            var guild = _client?.GetGuild(_options.GuildId);
+            if (guild is null)
+            {
+                throw new InvalidOperationException("Discord guild is not available in the bot cache.");
+            }
+
+            var rankRoles = BuildDiscordRankRoleConfiguration(guild);
+            var normalizedNewRank = RankRules.NormalizeRankName(candidate.NewRank);
+            if (rankRoles.MissingRanks.Contains(normalizedNewRank, StringComparer.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException($"No configured Discord role ID exists for `{EscapeInlineCode(normalizedNewRank)}`.");
+            }
+
+            var selectedRole = rankRoles.RolesByRank[normalizedNewRank];
+            if (guild.GetRole(selectedRole.RoleId) is null)
+            {
+                throw new InvalidOperationException($"The configured Discord role for `{EscapeInlineCode(normalizedNewRank)}` was not found in this guild.");
+            }
+
+            var guildUser = await ResolveGuildUserAsync(guild, targetUserId.Value, CancellationToken.None);
+            if (guildUser is null)
+            {
+                throw new InvalidOperationException("The selected Discord member could not be resolved in this guild.");
+            }
+
+            var update = await ApplyPromotionDiscordRankRoleAsync(
+                guildUser,
+                candidate.OldRank,
+                candidate.NewRank,
+                selectedRole,
+                rankRoles);
+            var roleName = string.IsNullOrWhiteSpace(selectedRole.RoleName)
+                ? normalizedNewRank
+                : selectedRole.RoleName;
+            var removedText = update.RemovedRoles.Count == 0
+                ? "none"
+                : string.Join(", ", update.RemovedRoles.Select(x => x.RoleName));
+            var details = update.Success
+                ? update.AlreadyCorrect
+                    ? $"{player.Username} already has the {roleName} role. No role changes were needed."
+                    : $"Set {player.Username} to the {roleName} role. Removed: {removedText}."
+                : $"No roles were changed for {player.Username}. {update.Details} Use /discord-rank-set manually.";
+
+            SetPromotionDiscordRankActionMetadata(
+                postedEvent,
+                available: false,
+                completed: true,
+                success: update.Success,
+                details: details);
+            db.LifecycleEvents.Add(new LifecycleEvent
+            {
+                PlayerId = player.Id,
+                EventType = "PROMOTION_DISCORD_RANK_ACTION_APPLIED",
+                MetadataJson = JsonUtil.Serialize(new
+                {
+                    CandidateId = candidate.Id,
+                    DiscordUserId = targetUserId.Value,
+                    RequestedRank = candidate.NewRank,
+                    PreviousRank = candidate.OldRank,
+                    Success = update.Success,
+                    AlreadyCorrect = update.AlreadyCorrect,
+                    Details = update.Details,
+                    RemovedRoles = update.RemovedRoles.Select(x => x.Rank).ToArray(),
+                    HandledBy = component.User.Username,
+                    HandledByDiscordUserId = component.User.Id,
+                    Source = "discord",
+                    ChannelId = component.Channel.Id,
+                    DiscordMessageId = component.Message.Id
+                }),
+                Status = "DONE",
+                CreatedAt = DateTimeOffset.UtcNow
+            });
+            await db.SaveChangesAsync();
+
+            await TryUpdatePromotionCardHandledAsync(component, details, "approve");
+            await RespondToComponentAsync(
+                component,
+                update.Success
+                    ? $"Discord rank action completed: {details}"
+                    : $"Discord rank action stopped safely: {details}",
+                ephemeral: true);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed applying automatic Discord rank action for promotion candidate {CandidateId}.", candidateId);
+            var details = $"Discord rank update for {player.Username} to {RankRules.NormalizeRankName(candidate.NewRank)} did not complete. Verify the member's rank roles before retrying, then use /discord-rank-set manually if needed. {ex.Message}";
+            SetPromotionDiscordRankActionMetadata(
+                postedEvent,
+                available: false,
+                completed: true,
+                success: false,
+                details: details);
+            await db.SaveChangesAsync();
+            await TryUpdatePromotionCardHandledAsync(component, details, "approve");
+            await RespondToComponentAsync(component, details, ephemeral: true);
+        }
+    }
+
+    private sealed record PromotionDiscordRankRoleUpdateResult(
+        bool Success,
+        bool AlreadyCorrect,
+        string Details,
+        IReadOnlyList<DiscordRankRole> RemovedRoles);
+
+    private static async Task<PromotionDiscordRankRoleUpdateResult> ApplyPromotionDiscordRankRoleAsync(
+        IGuildUser guildUser,
+        string oldRank,
+        string newRank,
+        DiscordRankRole selectedRole,
+        DiscordRankRoleConfiguration rankRoles)
+    {
+        var existingRankRoles = GetDiscordRankRolesForUser(guildUser, rankRoles);
+        var decision = PromotionDiscordActionRules.EvaluateRankRoleState(
+            oldRank,
+            newRank,
+            existingRankRoles.Select(x => x.Rank));
+        if (!decision.CanApply)
+        {
+            return new PromotionDiscordRankRoleUpdateResult(false, false, decision.Details, []);
+        }
+
+        if (decision.Action == DiscordPromotionRankRoleAction.AlreadyCorrect)
+        {
+            return new PromotionDiscordRankRoleUpdateResult(true, true, decision.Details, []);
+        }
+
+        var userRoleIds = guildUser is SocketGuildUser socketUser
+            ? socketUser.Roles.Select(x => x.Id).ToHashSet()
+            : guildUser.RoleIds.ToHashSet();
+        if (!userRoleIds.Contains(selectedRole.RoleId))
+        {
+            await guildUser.AddRoleAsync(selectedRole.RoleId);
+        }
+
+        var removedRoles = new List<DiscordRankRole>();
+        if (decision.Action == DiscordPromotionRankRoleAction.Replace)
+        {
+            var previousRole = existingRankRoles.Single();
+            await guildUser.RemoveRoleAsync(previousRole.RoleId);
+            removedRoles.Add(previousRole);
+        }
+
+        return new PromotionDiscordRankRoleUpdateResult(true, false, decision.Details, removedRoles);
+    }
+
+    private static MessageComponent BuildPromotionDiscordRankActionComponents(int candidateId, string newRank) =>
+        BuildPromotionDiscordRankActionComponents(candidateId, newRank, allowAlternateSelection: false);
+
+    private static MessageComponent BuildPromotionDiscordRankActionComponents(
+        int candidateId,
+        string newRank,
+        bool allowAlternateSelection)
+    {
+        var builder = new ComponentBuilder()
+            .WithButton(
+                $"Set Discord rank: {RankRules.NormalizeRankName(newRank)}",
+                $"promo:discord-rank:{candidateId}",
+                ButtonStyle.Primary);
+
+        if (allowAlternateSelection)
+        {
+            builder.WithButton(
+                "Choose suggested match",
+                $"promo:discord-select:{candidateId}",
+                ButtonStyle.Secondary);
+            builder.WithButton(
+                "Choose any Discord user",
+                $"promo:discord-user-select:{candidateId}",
+                ButtonStyle.Secondary);
+        }
+
+        return builder.Build();
+    }
+
+    private static MessageComponent BuildPromotionDiscordMemberPickerButtonComponents(int candidateId) =>
+        new ComponentBuilder()
+            .WithButton(
+                "Choose suggested Discord user",
+                $"promo:discord-select:{candidateId}",
+                ButtonStyle.Secondary)
+            .WithButton(
+                "Choose any Discord user",
+                $"promo:discord-user-select:{candidateId}",
+                ButtonStyle.Secondary)
+            .Build();
+
+    private static MessageComponent BuildPromotionDiscordMemberPickerMenu(
+        int candidateId,
+        string newRank,
+        IReadOnlyList<DiscordMemberGuessMatch> matches)
+    {
+        var menu = new SelectMenuBuilder()
+            .WithCustomId($"promo:discord-member:{candidateId}")
+            .WithPlaceholder($"Choose Discord user for {RankRules.NormalizeRankName(newRank)}")
+            .WithMinValues(1)
+            .WithMaxValues(1);
+
+        foreach (var match in matches.Take(25).DistinctBy(x => x.UserId))
+        {
+            var label = ShortenHistoryText(
+                $"{match.DisplayLabel} ({match.Strength.ToString().ToLowerInvariant()}, {match.Score}%)",
+                100);
+            var description = ShortenHistoryText(
+                $"{match.MatchedField}: {match.MatchedValue}",
+                100);
+            menu.AddOption(
+                label,
+                match.UserId.ToString(CultureInfo.InvariantCulture),
+                description);
+        }
+
+        return new ComponentBuilder()
+            .WithSelectMenu(menu)
+            .WithButton(
+                "Choose a different Discord user",
+                $"promo:discord-user-select:{candidateId}",
+                ButtonStyle.Secondary)
+            .Build();
+    }
+
+    private static MessageComponent BuildPromotionDiscordUserPickerMenu(int candidateId, string newRank) =>
+        new ComponentBuilder()
+            .WithSelectMenu(
+                new SelectMenuBuilder()
+                    .WithCustomId($"promo:discord-user:{candidateId}")
+                    .WithType(ComponentType.UserSelect)
+                    .WithPlaceholder($"Choose any Discord user for {RankRules.NormalizeRankName(newRank)}")
+                    .WithMinValues(1)
+                    .WithMaxValues(1))
+            .Build();
+
+    private static string FormatPromotionDiscordUserLabel(IGuildUser user)
+    {
+        var displayName = string.IsNullOrWhiteSpace(user.DisplayName)
+            ? user.Username
+            : user.DisplayName;
+        return string.Equals(displayName, user.Username, StringComparison.OrdinalIgnoreCase)
+            ? displayName
+            : $"{displayName} (@{user.Username})";
+    }
+
+    private async Task<LifecycleEvent?> FindPromotionPostedEventAsync(
+        TrackerDbContext db,
+        int playerId,
+        int candidateId,
+        ulong messageId)
+    {
+        var postedEvents = await db.LifecycleEvents
+            .Where(x => x.EventType == "PROMOTION_DISCORD_POSTED" && x.PlayerId == playerId)
+            .OrderByDescending(x => x.CreatedAt)
+            .ToListAsync();
+
+        return postedEvents.FirstOrDefault(x =>
+                   MetadataIntEquals(x.MetadataJson, "CandidateId", candidateId) &&
+                   ExtractUlong(x.MetadataJson, "DiscordMessageId") == messageId) ??
+               postedEvents.FirstOrDefault(x => MetadataIntEquals(x.MetadataJson, "CandidateId", candidateId));
+    }
+
+    private async Task<ulong?> ResolvePromotionDiscordRankTargetUserIdAsync(
+        TrackerDbContext db,
+        LifecycleEvent postedEvent,
+        string playerName,
+        CancellationToken ct)
+    {
+        var metadata = ReadLifecycleMetadata(postedEvent.MetadataJson);
+
+        var selectedUserIdText = PickLifecycleValue(metadata, "DiscordRankActionSelectedUserId");
+        if (ulong.TryParse(selectedUserIdText, NumberStyles.None, CultureInfo.InvariantCulture, out var selectedUserId))
+        {
+            var isCustomSelection = bool.TryParse(
+                PickLifecycleValue(metadata, "DiscordRankActionSelectionIsCustom"),
+                out var parsedCustomSelection) && parsedCustomSelection;
+            if (isCustomSelection)
+            {
+                return selectedUserId;
+            }
+
+            var matchOptions = await ResolvePromotionDiscordMatchOptionsAsync(db, postedEvent, playerName, ct);
+            return matchOptions.Any(x => x.UserId == selectedUserId) ? selectedUserId : null;
+        }
+
+        if (metadata.ContainsKey("DiscordMatchIsUniqueExact"))
+        {
+            var isUniqueExact = bool.TryParse(
+                PickLifecycleValue(metadata, "DiscordMatchIsUniqueExact"),
+                out var parsed) && parsed;
+            return isUniqueExact ? ExtractUlong(postedEvent.MetadataJson, "DiscordMatchUserId") : null;
+        }
+
+        var guess = await GuessDiscordMemberForPlayerAsync(db, postedEvent.PlayerId, playerName, ct);
+        SetPromotionDiscordMatchMetadata(postedEvent, guess);
+        var exactMatch = PromotionDiscordActionRules.FindUniqueExactMatch(guess);
+        if (exactMatch is null) return null;
+
+        return exactMatch.UserId;
+    }
+
+    private async Task<IReadOnlyList<DiscordMemberGuessMatch>> ResolvePromotionDiscordMatchOptionsAsync(
+        TrackerDbContext db,
+        LifecycleEvent postedEvent,
+        string playerName,
+        CancellationToken ct)
+    {
+        var metadata = ReadLifecycleMetadata(postedEvent.MetadataJson);
+        if (metadata.ContainsKey("DiscordMatchCandidates"))
+        {
+            return ReadPromotionDiscordMatchCandidates(postedEvent.MetadataJson);
+        }
+
+        var guess = await GuessDiscordMemberForPlayerAsync(db, postedEvent.PlayerId, playerName, ct);
+        SetPromotionDiscordMatchMetadata(postedEvent, guess);
+        return guess.Matches;
+    }
+
+    private static string BuildPromotionPostedMetadata(
+        int candidateId,
+        ulong messageId,
+        ulong channelId,
+        string renderFingerprint,
+        DiscordMemberGuessResult discordGuess)
+    {
+        var exactDiscordMatch = PromotionDiscordActionRules.FindUniqueExactMatch(discordGuess);
+        return JsonUtil.Serialize(new
+        {
+            CandidateId = candidateId,
+            DiscordMessageId = messageId,
+            ChannelId = channelId,
+            RenderFingerprint = renderFingerprint,
+            DiscordMatchIsUniqueExact = exactDiscordMatch is not null,
+            DiscordMatchUserId = exactDiscordMatch?.UserId,
+            DiscordMatchStrength = exactDiscordMatch?.Strength.ToString(),
+            DiscordMatchCandidates = discordGuess.Matches.Select(BuildPromotionDiscordMatchCandidateMetadata).ToArray(),
+            DiscordRankActionAvailable = false,
+            DiscordRankActionCompleted = false
+        });
+    }
+
+    private static void SetPromotionDiscordMatchMetadata(
+        LifecycleEvent postedEvent,
+        DiscordMemberGuessResult discordGuess)
+    {
+        var exactDiscordMatch = PromotionDiscordActionRules.FindUniqueExactMatch(discordGuess);
+        var metadata = ParseLifecycleMetadataObject(postedEvent.MetadataJson);
+        metadata["DiscordMatchIsUniqueExact"] = exactDiscordMatch is not null;
+        metadata["DiscordMatchUserId"] = exactDiscordMatch is null
+            ? null
+            : JsonValue.Create(exactDiscordMatch.UserId);
+        metadata["DiscordMatchStrength"] = exactDiscordMatch?.Strength.ToString();
+        metadata["DiscordMatchCandidates"] = JsonSerializer.SerializeToNode(
+            discordGuess.Matches.Select(BuildPromotionDiscordMatchCandidateMetadata).ToArray());
+        postedEvent.MetadataJson = metadata.ToJsonString();
+    }
+
+    private static object BuildPromotionDiscordMatchCandidateMetadata(DiscordMemberGuessMatch match) =>
+        new
+        {
+            match.UserId,
+            match.DisplayLabel,
+            match.Mention,
+            match.Score,
+            Strength = match.Strength.ToString(),
+            match.MatchedField,
+            match.MatchedValue,
+            match.PlayerAlias,
+            match.FromDiscordSearch
+        };
+
+    private static IReadOnlyList<DiscordMemberGuessMatch> ReadPromotionDiscordMatchCandidates(string metadataJson)
+    {
+        var matches = new List<DiscordMemberGuessMatch>();
+        try
+        {
+            using var document = JsonDocument.Parse(metadataJson);
+            if (!document.RootElement.TryGetProperty("DiscordMatchCandidates", out var candidates) ||
+                candidates.ValueKind != JsonValueKind.Array)
+            {
+                return matches;
+            }
+
+            foreach (var candidate in candidates.EnumerateArray())
+            {
+                if (candidate.ValueKind != JsonValueKind.Object ||
+                    !TryReadUlong(candidate, "UserId", out var userId))
+                {
+                    continue;
+                }
+
+                var displayLabel = ReadStringProperty(candidate, "DisplayLabel") ?? $"Discord user {userId}";
+                var mention = ReadStringProperty(candidate, "Mention") ?? $"<@{userId}>";
+                var score = candidate.TryGetProperty("Score", out var scoreProperty) &&
+                            scoreProperty.TryGetInt32(out var parsedScore)
+                    ? parsedScore
+                    : 0;
+                var strength = Enum.TryParse<DiscordMemberMatchStrength>(
+                    ReadStringProperty(candidate, "Strength"),
+                    ignoreCase: true,
+                    out var parsedStrength)
+                    ? parsedStrength
+                    : DiscordMemberMatchStrength.Possible;
+                var matchedField = ReadStringProperty(candidate, "MatchedField") ?? "match";
+                var matchedValue = ReadStringProperty(candidate, "MatchedValue") ?? displayLabel;
+                var playerAlias = ReadStringProperty(candidate, "PlayerAlias") ?? "";
+                var fromDiscordSearch = candidate.TryGetProperty("FromDiscordSearch", out var searchProperty) &&
+                                        searchProperty.ValueKind == JsonValueKind.True;
+
+                matches.Add(new DiscordMemberGuessMatch(
+                    userId,
+                    displayLabel,
+                    mention,
+                    score,
+                    strength,
+                    matchedField,
+                    matchedValue,
+                    playerAlias,
+                    fromDiscordSearch));
+            }
+        }
+        catch
+        {
+            // Best-effort parsing for lifecycle metadata from older or malformed cards.
+        }
+
+        return matches;
+    }
+
+    private static void SetPromotionDiscordRankActionSelectionMetadata(
+        LifecycleEvent postedEvent,
+        ulong selectedUserId,
+        string selectedLabel,
+        bool isCustomSelection)
+    {
+        var metadata = ParseLifecycleMetadataObject(postedEvent.MetadataJson);
+        metadata["DiscordRankActionSelectedUserId"] = selectedUserId;
+        metadata["DiscordRankActionSelectedLabel"] = selectedLabel;
+        metadata["DiscordRankActionSelectionIsCustom"] = isCustomSelection;
+        postedEvent.MetadataJson = metadata.ToJsonString();
+    }
+
+    private static void SetPromotionDiscordRankActionMetadata(
+        LifecycleEvent postedEvent,
+        bool available,
+        bool completed,
+        bool? success,
+        string? details)
+    {
+        var metadata = ParseLifecycleMetadataObject(postedEvent.MetadataJson);
+        metadata["DiscordRankActionAvailable"] = available;
+        metadata["DiscordRankActionCompleted"] = completed;
+        if (success.HasValue)
+        {
+            metadata["DiscordRankActionSuccess"] = success.Value;
+        }
+        else
+        {
+            metadata.Remove("DiscordRankActionSuccess");
+        }
+
+        if (details is null)
+        {
+            metadata.Remove("DiscordRankActionDetails");
+        }
+        else
+        {
+            metadata["DiscordRankActionDetails"] = details;
+        }
+
+        postedEvent.MetadataJson = metadata.ToJsonString();
+    }
+
+    private static JsonObject ParseLifecycleMetadataObject(string metadataJson)
+    {
+        try
+        {
+            return JsonNode.Parse(metadataJson) as JsonObject ?? new JsonObject();
+        }
+        catch
+        {
+            return new JsonObject();
+        }
     }
 
     private async Task UpdateComponentMessageAsync(SocketMessageComponent component, Embed embed)
@@ -1078,16 +1998,21 @@ public class DiscordPromotionBotWorker(
         }
     }
 
-    private async Task TryUpdatePromotionCardHandledAsync(SocketMessageComponent component, string handledText, string action)
+    private async Task TryUpdatePromotionCardHandledAsync(
+        SocketMessageComponent component,
+        string handledText,
+        string action,
+        MessageComponent? components = null)
     {
         var embed = BuildHandledEmbed(component.Message.Embeds.FirstOrDefault(), handledText, action);
+        var resolvedComponents = components ?? new ComponentBuilder().Build();
         try
         {
             if (!component.HasResponded)
             {
                 await component.UpdateAsync(props =>
                 {
-                    props.Components = new ComponentBuilder().Build();
+                    props.Components = resolvedComponents;
                     props.Embed = embed;
                 });
                 return;
@@ -1097,7 +2022,7 @@ public class DiscordPromotionBotWorker(
             {
                 await userMessage.ModifyAsync(props =>
                 {
-                    props.Components = new ComponentBuilder().Build();
+                    props.Components = resolvedComponents;
                     props.Embed = embed;
                 });
             }
@@ -1105,6 +2030,31 @@ public class DiscordPromotionBotWorker(
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Failed to apply immediate promotion card handled update for message {MessageId}.", component.Message.Id);
+        }
+    }
+
+    private async Task TryUpdatePromotionCardHandledAsync(
+        IMessageChannel channel,
+        ulong messageId,
+        string handledText,
+        string action,
+        MessageComponent? components = null)
+    {
+        var resolvedComponents = components ?? new ComponentBuilder().Build();
+        try
+        {
+            var message = await channel.GetMessageAsync(messageId);
+            if (message is not IUserMessage userMessage) return;
+
+            await userMessage.ModifyAsync(props =>
+            {
+                props.Components = resolvedComponents;
+                props.Embed = BuildHandledEmbed(userMessage.Embeds.FirstOrDefault(), handledText, action);
+            });
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to update promotion card message {MessageId} after Discord member selection.", messageId);
         }
     }
 
@@ -1351,6 +2301,30 @@ public class DiscordPromotionBotWorker(
         {
             if (!component.HasResponded) await component.DeferAsync(ephemeral: true);
             var customId = component.Data.CustomId ?? "";
+            if (customId.StartsWith("promo:discord-user:", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!HasDiscordAdminRole(component.User))
+                {
+                    await RespondToComponentAsync(component, "You need the admin role for this action.", ephemeral: true);
+                    return;
+                }
+
+                await HandlePromotionDiscordUserSelectAsync(component, customId);
+                return;
+            }
+
+            if (customId.StartsWith("promo:", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!HasDiscordAdminRole(component.User))
+                {
+                    await RespondToComponentAsync(component, "You need the admin role for this action.", ephemeral: true);
+                    return;
+                }
+
+                await HandlePromotionDiscordMemberSelectAsync(component, customId);
+                return;
+            }
+
             if (customId.StartsWith("drankreview:", StringComparison.OrdinalIgnoreCase))
             {
                 if (!HasDiscordAdminRole(component.User))
@@ -2029,6 +3003,7 @@ public class DiscordPromotionBotWorker(
         ulong? messageId = null;
         var posted = db.LifecycleEvents
             .Where(x => x.EventType == "PROMOTION_DISCORD_POSTED")
+            .OrderByDescending(x => x.CreatedAt)
             .AsEnumerable();
         foreach (var ev in posted)
         {
@@ -2043,18 +3018,7 @@ public class DiscordPromotionBotWorker(
             catch { }
         }
 
-        if (messageId.HasValue)
-        {
-            var openDeleteEvents = db.LifecycleEvents
-                .Where(x =>
-                    x.EventType == "PROMOTION_DISCORD_DELETE_SCHEDULED" &&
-                    x.Status == "OPEN")
-                .ToList();
-            var hasOpenDeleteForMessage = openDeleteEvents.Any(x =>
-                MetadataUlongEquals(x.MetadataJson, "DiscordMessageId", messageId.Value));
-            if (hasOpenDeleteForMessage) return;
-        }
-        else
+        if (!messageId.HasValue)
         {
             var candidateDeleteEvents = db.LifecycleEvents
                 .Where(x => x.EventType == "PROMOTION_DISCORD_DELETE_SCHEDULED")
@@ -2065,16 +3029,22 @@ public class DiscordPromotionBotWorker(
         }
 
         var now = DateTimeOffset.UtcNow;
+        var deleteAfter = now.AddMinutes(_discordDeleteDelayMinutes);
+        var hardDeleteAfter = now.AddMinutes(_discordDeleteHardCapMinutes);
         ScheduleChannelMessageDelete(
             db,
             playerId,
             channelId,
             messageId,
             "PROMOTION_DISCORD_DELETE_SCHEDULED",
-            new { CandidateId = candidateId, Reason = "promotion-action-handled" },
-            now.AddSeconds(10),
-            now.AddMinutes(1),
-            dedupeCompletedSchedules: false);
+            new
+            {
+                CandidateId = candidateId,
+                Reason = "promotion-action-handled"
+            },
+            deleteAfter,
+            hardDeleteAfter,
+            extendExistingSchedule: true);
         db.SaveChanges();
     }
 
@@ -2087,8 +3057,14 @@ public class DiscordPromotionBotWorker(
         object extraMetadata,
         DateTimeOffset? deleteAfterUtc = null,
         DateTimeOffset? hardDeleteAfterUtc = null,
-        bool dedupeCompletedSchedules = true)
+        bool dedupeCompletedSchedules = true,
+        bool extendExistingSchedule = false)
     {
+        var now = DateTimeOffset.UtcNow;
+        var deleteAfter = deleteAfterUtc ?? now.AddMinutes(Math.Min(_discordDeleteDelayMinutes, _discordDeleteHardCapMinutes));
+        var hardDeleteAfter = hardDeleteAfterUtc ?? now.AddMinutes(_discordDeleteHardCapMinutes);
+        if (hardDeleteAfter < deleteAfter) hardDeleteAfter = deleteAfter;
+
         if (messageId.HasValue)
         {
             var scheduledDeleteEvents = db.LifecycleEvents
@@ -2099,14 +3075,19 @@ public class DiscordPromotionBotWorker(
                      x.EventType == "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED") &&
                     (dedupeCompletedSchedules || x.Status == "OPEN"))
                 .ToList();
-            var hasScheduledForMessage = scheduledDeleteEvents.Any(x =>
+            var existingSchedule = scheduledDeleteEvents.FirstOrDefault(x =>
                 MetadataUlongEquals(x.MetadataJson, "DiscordMessageId", messageId.Value));
-            if (hasScheduledForMessage) return;
+            if (existingSchedule is not null)
+            {
+                if (extendExistingSchedule && existingSchedule.Status == "OPEN")
+                {
+                    ExtendMessageDeleteSchedule(existingSchedule, deleteAfter, hardDeleteAfter, extraMetadata);
+                }
+
+                return;
+            }
         }
 
-        var now = DateTimeOffset.UtcNow;
-        var deleteAfter = deleteAfterUtc ?? now.AddMinutes(Math.Min(_discordDeleteDelayMinutes, _discordDeleteHardCapMinutes));
-        var hardDeleteAfter = hardDeleteAfterUtc ?? now.AddMinutes(_discordDeleteHardCapMinutes);
         db.LifecycleEvents.Add(new LifecycleEvent
         {
             PlayerId = playerId,
@@ -2122,6 +3103,30 @@ public class DiscordPromotionBotWorker(
             Status = "OPEN",
             CreatedAt = now
         });
+    }
+
+    private static void ExtendMessageDeleteSchedule(
+        LifecycleEvent scheduledDelete,
+        DateTimeOffset requestedDeleteAfterUtc,
+        DateTimeOffset requestedHardDeleteAfterUtc,
+        object extraMetadata)
+    {
+        var existingMetadata = ReadLifecycleMetadata(scheduledDelete.MetadataJson);
+        var existingDeleteAfterUtc = PickLifecycleDateTimeOffset(existingMetadata, "DeleteAfterUtc");
+        var existingHardDeleteAfterUtc = PickLifecycleDateTimeOffset(existingMetadata, "HardDeleteAfterUtc");
+        var deleteAfterUtc = existingDeleteAfterUtc.HasValue && existingDeleteAfterUtc.Value > requestedDeleteAfterUtc
+            ? existingDeleteAfterUtc.Value
+            : requestedDeleteAfterUtc;
+        var hardDeleteAfterUtc = existingHardDeleteAfterUtc.HasValue && existingHardDeleteAfterUtc.Value > requestedHardDeleteAfterUtc
+            ? existingHardDeleteAfterUtc.Value
+            : requestedHardDeleteAfterUtc;
+        if (hardDeleteAfterUtc < deleteAfterUtc) hardDeleteAfterUtc = deleteAfterUtc;
+
+        var metadata = ParseLifecycleMetadataObject(scheduledDelete.MetadataJson);
+        metadata["DeleteAfterUtc"] = deleteAfterUtc;
+        metadata["HardDeleteAfterUtc"] = hardDeleteAfterUtc;
+        metadata["Extra"] = JsonSerializer.SerializeToNode(extraMetadata);
+        scheduledDelete.MetadataJson = metadata.ToJsonString();
     }
 
     private void ScheduleWomRankMismatchMessageDelete(
@@ -2454,7 +3459,8 @@ public class DiscordPromotionBotWorker(
         string eventType,
         object extraMetadata,
         DateTimeOffset messageCreatedAt,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool extendExistingSchedule = false)
     {
         var messageIdText = messageId.ToString(CultureInfo.InvariantCulture);
         var deleteRows = await db.LifecycleEvents
@@ -2466,19 +3472,25 @@ public class DiscordPromotionBotWorker(
             (x.Status == "OPEN" || x.Status == "DONE") &&
             x.MetadataJson.Contains(messageIdText))
             .ToListAsync(ct);
-        var hasScheduledDelete = deleteRows.Any(x =>
+        var matchingDeleteRows = deleteRows.Where(x =>
             DiscordDeleteScheduleMatcher.MatchesOpenOrCompletedSchedule(x, messageId));
+        var hasScheduledDelete = matchingDeleteRows.Any();
+        var hasCompletedDelete = matchingDeleteRows.Any(x => x.Status == "DONE");
 
         if (!hasScheduledDelete)
         {
-            hasScheduledDelete = db.ChangeTracker
+            var trackedDeleteRows = db.ChangeTracker
                 .Entries<LifecycleEvent>()
-                .Any(x =>
+                .Where(x =>
                     x.State != EntityState.Deleted &&
-                    DiscordDeleteScheduleMatcher.MatchesOpenOrCompletedSchedule(x.Entity, messageId));
+                    DiscordDeleteScheduleMatcher.MatchesOpenOrCompletedSchedule(x.Entity, messageId))
+                .Select(x => x.Entity)
+                .ToList();
+            hasScheduledDelete = trackedDeleteRows.Count > 0;
+            hasCompletedDelete = trackedDeleteRows.Any(x => x.Status == "DONE");
         }
 
-        if (hasScheduledDelete)
+        if (hasCompletedDelete || (hasScheduledDelete && !extendExistingSchedule))
         {
             logger.LogDebug(
                 "Skipping Discord delete reconciliation for message {MessageId}; an open or completed delete schedule already exists.",
@@ -2555,7 +3567,8 @@ public class DiscordPromotionBotWorker(
             eventType,
             extraMetadata,
             scheduleDue,
-            scheduleHard);
+            scheduleHard,
+            extendExistingSchedule: extendExistingSchedule);
     }
 
     private async Task RecordCompletedMessageDeleteAsync(
@@ -2953,6 +3966,10 @@ public class DiscordPromotionBotWorker(
             .Where(x => x.EventType == "PROMOTION_DISCORD_POSTED")
             .OrderByDescending(x => x.CreatedAt)
             .ToListAsync(ct);
+        var promotionActions = await db.LifecycleEvents
+            .Where(x => x.EventType == "PROMOTION_DISCORD_ACTION_APPLIED")
+            .OrderByDescending(x => x.CreatedAt)
+            .ToListAsync(ct);
         foreach (var ev in promotionPosted)
         {
             try
@@ -2966,6 +3983,11 @@ public class DiscordPromotionBotWorker(
                 var candidate = await db.PromotionCandidates.FirstOrDefaultAsync(x => x.Id == candidateId, ct);
                 if (candidate is null || candidate.Status != PromotionStatus.PENDING)
                 {
+                    var handledEvent = promotionActions.FirstOrDefault(x =>
+                        x.PlayerId == ev.PlayerId &&
+                        MetadataIntEquals(x.MetadataJson, "CandidateId", candidateId));
+                    var messageCreatedAt = handledEvent?.CreatedAt ?? ev.CreatedAt;
+
                     await EnsureMessageDeleteScheduledOrDeletedAsync(
                         db,
                         ev.PlayerId,
@@ -2973,8 +3995,9 @@ public class DiscordPromotionBotWorker(
                         msgId,
                         "PROMOTION_DISCORD_DELETE_SCHEDULED",
                         new { CandidateId = candidateId, Reason = "reconcile-completed-promotion" },
-                        ev.CreatedAt,
-                        ct);
+                        messageCreatedAt,
+                        ct,
+                        extendExistingSchedule: true);
                 }
             }
             catch
@@ -3817,16 +4840,31 @@ public class DiscordPromotionBotWorker(
         if (!channelId.HasValue || !messageId.HasValue) return;
 
         var now = DateTimeOffset.UtcNow;
+        var hasPendingDiscordRankAction =
+            string.Equals(
+                PickLifecycleValue(ReadLifecycleMetadata(postedEvent.MetadataJson), "DiscordRankActionAvailable"),
+                "true",
+                StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(
+                PickLifecycleValue(ReadLifecycleMetadata(postedEvent.MetadataJson), "DiscordRankActionCompleted"),
+                "true",
+                StringComparison.OrdinalIgnoreCase);
         ScheduleChannelMessageDelete(
             db,
             playerId,
             channelId.Value,
             messageId.Value,
             "PROMOTION_DISCORD_DELETE_SCHEDULED",
-            new { CandidateId = candidateId, Reason = reason },
-            now.AddSeconds(10),
-            now.AddMinutes(1),
-            dedupeCompletedSchedules: false);
+            new
+            {
+                CandidateId = candidateId,
+                Reason = hasPendingDiscordRankAction
+                    ? "promotion-discord-rank-action-pending"
+                    : reason
+            },
+            now.AddMinutes(_discordDeleteDelayMinutes),
+            now.AddMinutes(_discordDeleteHardCapMinutes),
+            extendExistingSchedule: true);
         await db.SaveChangesAsync(ct);
     }
 
@@ -4231,17 +5269,23 @@ public class DiscordPromotionBotWorker(
                 var handledBy = ud.RootElement.TryGetProperty("HandledBy", out var h) ? h.GetString() ?? "web-admin" : "web-admin";
                 var source = ud.RootElement.TryGetProperty("Source", out var s) ? s.GetString() ?? "web" : "web";
 
-                var candidateOwnerId = await db.PromotionCandidates
+                var candidate = await db.PromotionCandidates
                     .Where(x => x.Id == candidateId)
-                    .Select(x => (int?)x.PlayerId)
+                    .Select(x => new
+                    {
+                        x.PlayerId,
+                        x.Status,
+                        x.NewRank,
+                        x.Player.Username
+                    })
                     .FirstOrDefaultAsync(ct);
                 var candidatePostedEvents = posted
                     .Where(x => MetadataIntEquals(x.MetadataJson, "CandidateId", candidateId))
                     .ToList();
-                if (candidateOwnerId.HasValue)
+                if (candidate is not null)
                 {
                     var ownerSpecific = candidatePostedEvents
-                        .Where(x => x.PlayerId == candidateOwnerId.Value)
+                        .Where(x => x.PlayerId == candidate.PlayerId)
                         .ToList();
                     if (ownerSpecific.Count > 0)
                     {
@@ -4252,6 +5296,44 @@ public class DiscordPromotionBotWorker(
                 var postEvent = candidatePostedEvents.FirstOrDefault(x => !IsPromotionPostedSupersededByMerge(x));
                 postEvent ??= candidatePostedEvents.FirstOrDefault();
                 if (postEvent is null) { u.Status = "DONE"; continue; }
+
+                var hasDiscordRankAction = false;
+                var discordRankTargetUserId = (ulong?)null;
+                IReadOnlyList<DiscordMemberGuessMatch> discordMatchOptions = Array.Empty<DiscordMemberGuessMatch>();
+                var completedDiscordRankAction = false;
+                string? completedDiscordRankActionDetails = null;
+                if (string.Equals(action, "approve", StringComparison.OrdinalIgnoreCase) &&
+                    candidate is not null &&
+                    candidate.Status == PromotionStatus.APPROVED)
+                {
+                    completedDiscordRankAction = string.Equals(
+                        PickLifecycleValue(ReadLifecycleMetadata(postEvent.MetadataJson), "DiscordRankActionCompleted"),
+                        "true",
+                        StringComparison.OrdinalIgnoreCase);
+                    completedDiscordRankActionDetails = PickLifecycleValue(
+                        ReadLifecycleMetadata(postEvent.MetadataJson),
+                        "DiscordRankActionDetails");
+                    if (!completedDiscordRankAction)
+                    {
+                        discordMatchOptions = await ResolvePromotionDiscordMatchOptionsAsync(
+                            db,
+                            postEvent,
+                            candidate.Username,
+                            ct);
+                        discordRankTargetUserId = await ResolvePromotionDiscordRankTargetUserIdAsync(
+                            db,
+                            postEvent,
+                            candidate.Username,
+                            ct);
+                        hasDiscordRankAction = discordMatchOptions.Count > 0;
+                        SetPromotionDiscordRankActionMetadata(
+                            postEvent,
+                            available: hasDiscordRankAction,
+                            completed: false,
+                            success: null,
+                            details: null);
+                    }
+                }
 
                 using var postDoc = JsonDocument.Parse(postEvent.MetadataJson);
                 if (!postDoc.RootElement.TryGetProperty("ChannelId", out var channelIdProp) ||
@@ -4271,18 +5353,46 @@ public class DiscordPromotionBotWorker(
                     channelIdProp.GetUInt64(),
                     messageIdProp.GetUInt64(),
                     "PROMOTION_DISCORD_DELETE_SCHEDULED",
-                    new { CandidateId = candidateId, Reason = "promotion-action-handled-web" },
-                    deleteNow.AddSeconds(10),
-                    deleteNow.AddMinutes(1),
-                    dedupeCompletedSchedules: false);
+                    new
+                    {
+                        CandidateId = candidateId,
+                        Reason = hasDiscordRankAction
+                            ? "promotion-action-handled-discord-rank-pending"
+                            : "promotion-action-handled-web"
+                    },
+                    deleteNow.AddMinutes(_discordDeleteDelayMinutes),
+                    deleteNow.AddMinutes(_discordDeleteHardCapMinutes),
+                    extendExistingSchedule: true);
                 if (msg is IUserMessage userMessage)
                 {
                     var handled = $"Handled by {handledBy} ({action}) via {source}";
+                    if (completedDiscordRankAction && !string.IsNullOrWhiteSpace(completedDiscordRankActionDetails))
+                    {
+                        handled += $". {completedDiscordRankActionDetails}";
+                    }
+                    else if (hasDiscordRankAction && discordRankTargetUserId.HasValue)
+                    {
+                        handled += ". Exact Discord match selected; use the button below to set the rank role.";
+                    }
+                    else if (hasDiscordRankAction)
+                    {
+                        handled += ". Possible Discord matches found; choose a member before setting the rank role.";
+                    }
+                    else if (string.Equals(action, "approve", StringComparison.OrdinalIgnoreCase))
+                    {
+                        handled += ". No likely Discord match was found; use /discord-rank-set manually.";
+                    }
+
+                    var components = discordRankTargetUserId.HasValue
+                        ? BuildPromotionDiscordRankActionComponents(candidateId, candidate?.NewRank ?? "Unknown")
+                        : hasDiscordRankAction
+                            ? BuildPromotionDiscordMemberPickerButtonComponents(candidateId)
+                        : new ComponentBuilder().Build();
                     try
                     {
                         await userMessage.ModifyAsync(props =>
                         {
-                            props.Components = new ComponentBuilder().Build();
+                            props.Components = components;
                             props.Embed = BuildHandledEmbed(userMessage.Embeds.FirstOrDefault(), handled, action);
                         });
                     }
