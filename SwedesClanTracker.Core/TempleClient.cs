@@ -178,6 +178,14 @@ public class TempleClient(HttpClient httpClient, ILogger<TempleClient> logger) :
 
     private static double? ResolvePrimaryEhp(JsonElement data)
     {
+        // Temple may report a confirmed GIM account's primary EHP as the main
+        // profile ("Ehp") while also exposing the GIM-specific value.
+        if (IsConfirmedGroupIronman(data) &&
+            TryReadNumericProperty(data, "Gim_ehp", out var gimEhp))
+        {
+            return gimEhp;
+        }
+
         if (data.TryGetProperty("info", out var info) &&
             info.ValueKind == JsonValueKind.Object)
         {
@@ -214,6 +222,14 @@ public class TempleClient(HttpClient httpClient, ILogger<TempleClient> logger) :
 
         if (TryReadHighestModeEhp(data, out var fallbackEhp)) return fallbackEhp;
         return TryReadNumericProperty(data, "Overall_ehp", out var overallEhp) ? overallEhp : null;
+    }
+
+    private static bool IsConfirmedGroupIronman(JsonElement data)
+    {
+        return data.TryGetProperty("info", out var info) &&
+            info.ValueKind == JsonValueKind.Object &&
+            TryReadNumericProperty(info, "GIM", out var gimMode) &&
+            gimMode > 0;
     }
 
     private static bool TryReadHighestModeEhb(JsonElement data, out double ehb)

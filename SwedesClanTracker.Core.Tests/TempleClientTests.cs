@@ -40,6 +40,61 @@ public class TempleClientTests
     }
 
     [Fact]
+    public async Task GetPlayerStatsAsync_UsesGimEhpForConfirmedGroupIronman()
+    {
+        var client = CreateClient("""
+            {
+              "data": {
+                "info": {
+                  "GIM": 13,
+                  "Primary_ehb": "Ehb",
+                  "Primary_ehp": "Ehp"
+                },
+                "Overall_level": 2375,
+                "Overall_ehp": 1084.2,
+                "Collections": 562,
+                "Ehb": 248.324,
+                "Ehp": 1084.2699,
+                "Gim_ehp": 1830.9487772224775
+              }
+            }
+            """);
+
+        var stats = await client.GetPlayerStatsAsync("Matteps", CancellationToken.None);
+
+        Assert.NotNull(stats);
+        Assert.Equal(248.324, stats!.Ehb, 6);
+        Assert.Equal(1830.9487772224775, stats.Ehp, 6);
+    }
+
+    [Fact]
+    public async Task GetPlayerStatsAsync_DoesNotUseGimEhpWhenAccountIsNotGroupIronman()
+    {
+        var client = CreateClient("""
+            {
+              "data": {
+                "info": {
+                  "GIM": 0,
+                  "Primary_ehb": "Ehb",
+                  "Primary_ehp": "Ehp"
+                },
+                "Overall_level": 2000,
+                "Overall_ehp": 100.0,
+                "Collections": 50,
+                "Ehb": 25.0,
+                "Ehp": 100.0,
+                "Gim_ehp": 999.0
+              }
+            }
+            """);
+
+        var stats = await client.GetPlayerStatsAsync("Example", CancellationToken.None);
+
+        Assert.NotNull(stats);
+        Assert.Equal(100.0, stats!.Ehp, 6);
+    }
+
+    [Fact]
     public async Task GetPlayerStatsAsync_FallsBackToHighestModeEhbWhenPrimaryIsInvalid()
     {
         var client = CreateClient("""
