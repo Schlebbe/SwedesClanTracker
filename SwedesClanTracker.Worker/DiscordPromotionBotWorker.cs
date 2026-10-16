@@ -62,6 +62,7 @@ public class DiscordPromotionBotWorker(
     private readonly ConcurrentDictionary<ulong, MessagePatchState> _messagePatchStateByMessageId = new();
     private static readonly TimeSpan MessagePatchMinInterval = TimeSpan.FromSeconds(5);
     private readonly SemaphoreSlim _discordMemberCacheLock = new(1, 1);
+    private readonly SemaphoreSlim _discordClearCommandLock = new(1, 1);
     private IReadOnlyList<DiscordMemberLookupCandidate>? _discordMemberCache;
     private DateTimeOffset _discordMemberCacheValidUntil = DateTimeOffset.MinValue;
     private static readonly TimeSpan DiscordGuessCommandTimeout = TimeSpan.FromSeconds(12);
@@ -70,6 +71,8 @@ public class DiscordPromotionBotWorker(
     private static readonly TimeSpan DiscordMemberWarmupDownloadTimeout = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan DiscordMemberSearchTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan DiscordMemberSearchTotalTimeout = TimeSpan.FromSeconds(8);
+    private static readonly TimeSpan DiscordBulkDeleteMaxAge = TimeSpan.FromDays(14);
+    private const int DiscordClearPageSize = 100;
     private static readonly TimeSpan TempleNameChangeDetectionWindow = TimeSpan.FromHours(6);
     private static readonly TimeSpan WomOnlyPostGracePeriod = TimeSpan.FromMinutes(5);
     private const string TempleNameChangeResolvedByLiveCheckEventType = "TEMPLE_NAME_CHANGE_RESOLVED_BY_LIVE_CHECK";
@@ -659,6 +662,9 @@ public class DiscordPromotionBotWorker(
                 .WithDescription("Show recent tracker history.")
                 .AddOption("rows", ApplicationCommandOptionType.Integer, "Number of recent rows to show (1-25).", isRequired: true)
                 .AddOption("everything", ApplicationCommandOptionType.Boolean, "Include bot/system diagnostic events.", isRequired: false);
+            var clear = new SlashCommandBuilder()
+                .WithName("clear")
+                .WithDescription("Clear user messages in the configured rank-up channel, keeping the quickguide.");
             var help = new SlashCommandBuilder()
                 .WithName("help")
                 .WithDescription("Shows all available commands and what they do.");
@@ -726,6 +732,7 @@ public class DiscordPromotionBotWorker(
             await socketGuild.CreateApplicationCommandAsync(discordRankSet.Build());
             await socketGuild.CreateApplicationCommandAsync(discordRankReviewPost.Build());
             await socketGuild.CreateApplicationCommandAsync(history.Build());
+            await socketGuild.CreateApplicationCommandAsync(clear.Build());
             await socketGuild.CreateApplicationCommandAsync(help.Build());
             await socketGuild.CreateApplicationCommandAsync(rankConditions.Build());
             await socketGuild.CreateApplicationCommandAsync(update.Build());
@@ -8367,6 +8374,12 @@ public class DiscordPromotionBotWorker(
                 return;
             }
 
+            if (string.Equals(command.Data.Name, "clear", StringComparison.OrdinalIgnoreCase))
+            {
+                await HandleClearSlashCommandAsync(command);
+                return;
+            }
+
             if (string.Equals(command.Data.Name, "help", StringComparison.OrdinalIgnoreCase))
             {
                 await HandleHelpSlashCommandAsync(command);
@@ -8470,6 +8483,191 @@ public class DiscordPromotionBotWorker(
         finally
         {
             logger.LogInformation("Discord slash end: {Command} in {ElapsedMs}ms", command.Data.Name, sw.ElapsedMilliseconds);
+        }
+    }
+
+    private async Task HandleClearSlashCommandAsync(SocketSlashCommand command)
+    {
+        var configuredChannelId = _options.ChannelId;
+        if (!DiscordClearRules.CanRunInConfiguredChannel(command.ChannelId, configuredChannelId))
+        {
+            await RespondAndAutoDeleteAsync(
+                command,
+                "For safety, /clear must be run in the configured #rank-up channel. No messages were touched.");
+            return;
+        }
+
+        if (!await _discordClearCommandLock.WaitAsync(0))
+        {
+            await RespondAndAutoDeleteAsync(
+                command,
+                "A /clear operation is already running. No messages were touched.");
+            return;
+        }
+
+        try
+        {
+            var resolvedChannel = await ResolveMessageChannelAsync(configuredChannelId);
+            if (resolvedChannel is null || resolvedChannel.Id != configuredChannelId)
+            {
+                logger.LogError(
+                    "Refusing /clear because the configured Discord channel {ConfiguredChannelId} could not be resolved exactly.",
+                    configuredChannelId);
+                await RespondAndAutoDeleteAsync(
+                    command,
+                    "The configured #rank-up channel could not be resolved exactly. No messages were touched.");
+                return;
+            }
+
+            if (resolvedChannel is not ITextChannel rankUpChannel)
+            {
+                logger.LogError(
+                    "Refusing /clear because configured Discord channel {ConfiguredChannelId} is not a text channel.",
+                    configuredChannelId);
+                await RespondAndAutoDeleteAsync(
+                    command,
+                    "The configured #rank-up channel is not a text channel. No messages were touched.");
+                return;
+            }
+
+            var messages = await GetAllDiscordMessagesForClearAsync(rankUpChannel, configuredChannelId);
+            var clearCandidates = messages
+                .Select(message => new DiscordClearMessage(
+                    message.Id,
+                    message.Timestamp,
+                    message.Source == MessageSource.User && !message.Author.IsBot))
+                .ToArray();
+            var messagesToDelete = DiscordClearRules
+                .SelectUserMessagesToDelete(clearCandidates)
+                .Select(candidate => candidate.Id)
+                .ToHashSet();
+
+            if (messagesToDelete.Count == 0)
+            {
+                await RespondAndAutoDeleteAsync(
+                    command,
+                    "No user messages were found to clear. The quickguide and all bot messages were left untouched.");
+                return;
+            }
+
+            var deletedCount = await DeleteDiscordMessagesForClearAsync(
+                rankUpChannel,
+                configuredChannelId,
+                messages.Where(message => messagesToDelete.Contains(message.Id)).ToArray());
+
+            await RespondAndAutoDeleteAsync(
+                command,
+                $"Removed {deletedCount} user message(s) from the configured #rank-up channel. " +
+                "The oldest user message (the quickguide) and all bot messages were left untouched.");
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(
+                ex,
+                "Failed handling /clear for the configured Discord channel {ConfiguredChannelId}.",
+                configuredChannelId);
+            await RespondAndAutoDeleteAsync(
+                command,
+                "Clear failed. Only the configured #rank-up channel was targeted; some eligible messages may have been removed before the failure.");
+        }
+        finally
+        {
+            _discordClearCommandLock.Release();
+        }
+    }
+
+    private static async Task<IReadOnlyList<IMessage>> GetAllDiscordMessagesForClearAsync(
+        IMessageChannel rankUpChannel,
+        ulong expectedChannelId)
+    {
+        EnsureClearChannel(rankUpChannel, expectedChannelId);
+
+        var messagesById = new Dictionary<ulong, IMessage>();
+        ulong? beforeMessageId = null;
+
+        while (true)
+        {
+            IEnumerable<IMessage> page = beforeMessageId is null
+                ? await rankUpChannel
+                    .GetMessagesAsync(DiscordClearPageSize, CacheMode.AllowDownload)
+                    .FlattenAsync()
+                : await rankUpChannel
+                    .GetMessagesAsync(beforeMessageId.Value, Direction.Before, DiscordClearPageSize, CacheMode.AllowDownload)
+                    .FlattenAsync();
+
+            var pageMessages = page.ToArray();
+            if (pageMessages.Length == 0)
+            {
+                break;
+            }
+
+            foreach (var message in pageMessages)
+            {
+                messagesById[message.Id] = message;
+            }
+
+            var oldestPageMessageId = pageMessages.Min(message => message.Id);
+            if (pageMessages.Length < DiscordClearPageSize || beforeMessageId == oldestPageMessageId)
+            {
+                break;
+            }
+
+            beforeMessageId = oldestPageMessageId;
+        }
+
+        return messagesById.Values
+            .OrderBy(message => message.Timestamp)
+            .ThenBy(message => message.Id)
+            .ToArray();
+    }
+
+    private static async Task<int> DeleteDiscordMessagesForClearAsync(
+        ITextChannel rankUpChannel,
+        ulong expectedChannelId,
+        IReadOnlyCollection<IMessage> messages)
+    {
+        EnsureClearChannel(rankUpChannel, expectedChannelId);
+
+        var bulkDeleteCutoff = DateTimeOffset.UtcNow - DiscordBulkDeleteMaxAge;
+        var recentMessages = messages
+            .Where(message => message.Timestamp > bulkDeleteCutoff)
+            .OrderByDescending(message => message.Id)
+            .ToArray();
+        var oldMessages = messages
+            .Where(message => message.Timestamp <= bulkDeleteCutoff)
+            .OrderByDescending(message => message.Id)
+            .ToArray();
+        var deletedCount = 0;
+
+        foreach (var batch in recentMessages.Chunk(DiscordClearPageSize))
+        {
+            if (batch.Length == 1)
+            {
+                await rankUpChannel.DeleteMessageAsync(batch[0].Id);
+            }
+            else
+            {
+                await rankUpChannel.DeleteMessagesAsync(batch.Select(message => message.Id));
+            }
+
+            deletedCount += batch.Length;
+        }
+
+        foreach (var message in oldMessages)
+        {
+            await rankUpChannel.DeleteMessageAsync(message.Id);
+            deletedCount++;
+        }
+
+        return deletedCount;
+    }
+
+    private static void EnsureClearChannel(IMessageChannel channel, ulong expectedChannelId)
+    {
+        if (expectedChannelId == 0 || channel.Id != expectedChannelId)
+        {
+            throw new InvalidOperationException(
+                $"Refusing Discord clear operation for channel {channel.Id}; expected configured channel {expectedChannelId}.");
         }
     }
 
@@ -9885,6 +10083,9 @@ public class DiscordPromotionBotWorker(
 **/history [rows]**  
 Shows recent admin history privately. Rows can be 1-25. Set `everything` to include bot/system events.
 
+**/clear**
+Clears user-posted messages from the configured #rank-up channel while keeping the oldest user message (the quickguide) and all bot messages. It must be run in that configured channel.
+
 **/discord-guess <player>**  
 Shows the bot's best Discord member match for a tracked player, including a clickable mention.
 
@@ -10196,6 +10397,7 @@ Shows all currently ignored players in:
         return string.Equals(commandName, "lookup", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(commandName, "update", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(commandName, "history", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(commandName, "clear", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(commandName, "help", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(commandName, "rank-conditions", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(commandName, "wom-cache-refresh", StringComparison.OrdinalIgnoreCase) ||
@@ -10225,6 +10427,7 @@ Shows all currently ignored players in:
             string.Equals(commandName, "discord-rank-set", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(commandName, "discord-rank-review-post", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(commandName, "history", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(commandName, "clear", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(commandName, "set-pets", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(commandName, "add", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(commandName, "remove", StringComparison.OrdinalIgnoreCase) ||
