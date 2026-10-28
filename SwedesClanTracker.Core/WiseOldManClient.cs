@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using Microsoft.Extensions.Configuration;
 
 namespace SwedesClanTracker.Core;
@@ -23,10 +22,16 @@ public sealed record WomRoleUpdateResult(
 
 public class WiseOldManClient(HttpClient httpClient, IConfiguration configuration) : IWiseOldManClient
 {
+    private sealed record RoleCacheSnapshot(
+        int GroupId,
+        DateTimeOffset ValidUntilUtc,
+        IReadOnlyDictionary<string, string> Roles,
+        long Generation);
+
     private static readonly SemaphoreSlim CacheLock = new(1, 1);
-    private static DateTimeOffset _cacheValidUntilUtc = DateTimeOffset.MinValue;
-    private static int _cachedGroupId = -1;
-    private static ConcurrentDictionary<string, string> _roleCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly IReadOnlyDictionary<string, string> EmptyRoles =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    private static RoleCacheSnapshot _cache = new(-1, DateTimeOffset.MinValue, EmptyRoles, 0);
     private static readonly TimeSpan CacheTtl = TimeSpan.FromMinutes(5);
 
     public async Task<string?> GetMemberRoleAsync(string username, CancellationToken ct)
@@ -97,7 +102,7 @@ public class WiseOldManClient(HttpClient httpClient, IConfiguration configuratio
 
                 if (invalidateCache)
                 {
-                    await TryInvalidateCacheAsync(ct);
+                    await TryInvalidateCacheAsync(CancellationToken.None);
                 }
 
                 return failedResult;
@@ -123,7 +128,7 @@ public class WiseOldManClient(HttpClient httpClient, IConfiguration configuratio
             {
                 // A successful PUT is authoritative. Cache invalidation is maintenance and
                 // must not turn an acknowledged role update into a failed approval.
-                await TryInvalidateCacheAsync(ct);
+                await TryInvalidateCacheAsync(CancellationToken.None);
             }
 
             return successfulResult;
@@ -138,7 +143,7 @@ public class WiseOldManClient(HttpClient httpClient, IConfiguration configuratio
     {
         try
         {
-            await InvalidateCacheAsync(ct);
+            await InvalidateCacheAsync(CancellationToken.None);
         }
         catch (OperationCanceledException)
         {
@@ -197,43 +202,38 @@ public class WiseOldManClient(HttpClient httpClient, IConfiguration configuratio
         }
     }
 
-    public async Task InvalidateCacheAsync(CancellationToken ct)
+    public Task InvalidateCacheAsync(CancellationToken ct)
     {
-        await CacheLock.WaitAsync(ct);
-        try
-        {
-            _cachedGroupId = -1;
-            _roleCache = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            _cacheValidUntilUtc = DateTimeOffset.MinValue;
-        }
-        finally
-        {
-            CacheLock.Release();
-        }
+        ct.ThrowIfCancellationRequested();
+        RequestCacheInvalidation();
+        return Task.CompletedTask;
     }
 
-    private async Task<ConcurrentDictionary<string, string>> GetRolesAsync(CancellationToken ct)
+    private async Task<IReadOnlyDictionary<string, string>> GetRolesAsync(CancellationToken ct)
     {
         var groupId = configuration.GetValue<int?>("WiseOldMan:GroupId") ?? 0;
-        if (groupId <= 0) return new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (groupId <= 0) return EmptyRoles;
 
         var now = DateTimeOffset.UtcNow;
-        if (_cachedGroupId == groupId && now <= _cacheValidUntilUtc && _roleCache.Count > 0)
+        var cache = Volatile.Read(ref _cache);
+        if (cache.GroupId == groupId && now <= cache.ValidUntilUtc && cache.Roles.Count > 0)
         {
-            return _roleCache;
+            return cache.Roles;
         }
 
         await CacheLock.WaitAsync(ct);
         try
         {
             now = DateTimeOffset.UtcNow;
-            if (_cachedGroupId == groupId && now <= _cacheValidUntilUtc && _roleCache.Count > 0)
+            cache = Volatile.Read(ref _cache);
+            if (cache.GroupId == groupId && now <= cache.ValidUntilUtc && cache.Roles.Count > 0)
             {
-                return _roleCache;
+                return cache.Roles;
             }
 
+            var fetchGeneration = cache.Generation;
             var csv = await httpClient.GetStringAsync($"https://api.wiseoldman.net/v2/groups/{groupId}/csv", ct);
-            var newCache = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var newCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             var lines = csv.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             for (var i = 1; i < lines.Length; i++)
             {
@@ -245,14 +245,34 @@ public class WiseOldManClient(HttpClient httpClient, IConfiguration configuratio
                 newCache[username] = role;
             }
 
-            _cachedGroupId = groupId;
-            _roleCache = newCache;
-            _cacheValidUntilUtc = DateTimeOffset.UtcNow.Add(CacheTtl);
-            return _roleCache;
+            var fetchedCache = new RoleCacheSnapshot(
+                groupId,
+                DateTimeOffset.UtcNow.Add(CacheTtl),
+                newCache,
+                fetchGeneration);
+            Interlocked.CompareExchange(ref _cache, fetchedCache, cache);
+            return newCache;
         }
         finally
         {
             CacheLock.Release();
+        }
+    }
+
+    private static void RequestCacheInvalidation()
+    {
+        while (true)
+        {
+            var current = Volatile.Read(ref _cache);
+            var invalidatedCache = new RoleCacheSnapshot(
+                -1,
+                DateTimeOffset.MinValue,
+                EmptyRoles,
+                current.Generation + 1);
+            if (ReferenceEquals(Interlocked.CompareExchange(ref _cache, invalidatedCache, current), current))
+            {
+                return;
+            }
         }
     }
 

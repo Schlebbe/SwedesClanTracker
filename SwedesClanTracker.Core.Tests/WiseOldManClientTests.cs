@@ -7,7 +7,7 @@ namespace SwedesClanTracker.Core.Tests;
 public sealed class WiseOldManClientTests
 {
     [Fact]
-    public async Task Successful_role_put_is_not_failed_when_cache_invalidation_times_out()
+    public async Task Successful_role_put_cannot_be_overwritten_by_an_inflight_stale_csv_fetch()
     {
         var handler = new CacheContendingHandler();
         using var httpClient = new HttpClient(handler);
@@ -25,15 +25,20 @@ public sealed class WiseOldManClientTests
         var csvFetch = client.GetMemberRolesAsync(csvCts.Token);
         await handler.CsvFetchStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
-        using var putCts = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+        using var putCts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
         var result = await client.UpdateMemberRoleAsync("Gynofobi", "Officer", putCts.Token);
 
         Assert.True(result.Success);
         Assert.Equal(200, result.HttpStatus);
         Assert.Equal(1, handler.PutCalls);
 
-        csvCts.Cancel();
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await csvFetch);
+        handler.ReleaseCsv.TrySetResult(true);
+        await csvFetch;
+
+        var roleAfterMutation = await client.GetMemberRoleAsync("Gynofobi", CancellationToken.None);
+
+        Assert.Equal("commander", roleAfterMutation);
+        Assert.Equal(2, handler.CsvCalls);
     }
 
     private sealed class CacheContendingHandler : HttpMessageHandler
@@ -41,7 +46,11 @@ public sealed class WiseOldManClientTests
         public TaskCompletionSource<bool> CsvFetchStarted { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        public TaskCompletionSource<bool> ReleaseCsv { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
         public int PutCalls { get; private set; }
+        public int CsvCalls { get; private set; }
 
         protected override async Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
@@ -49,8 +58,21 @@ public sealed class WiseOldManClientTests
         {
             if (request.Method == HttpMethod.Get)
             {
-                CsvFetchStarted.TrySetResult(true);
-                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                CsvCalls++;
+                if (CsvCalls == 1)
+                {
+                    CsvFetchStarted.TrySetResult(true);
+                    await ReleaseCsv.Task.WaitAsync(cancellationToken);
+                    return new HttpResponseMessage(HttpStatusCode.OK)
+                    {
+                        Content = new StringContent("username,role\nGynofobi,officer\n")
+                    };
+                }
+
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("username,role\nGynofobi,commander\n")
+                };
             }
 
             if (request.Method == HttpMethod.Put)
@@ -62,10 +84,7 @@ public sealed class WiseOldManClientTests
                 };
             }
 
-            return new HttpResponseMessage(HttpStatusCode.OK)
-            {
-                Content = new StringContent("username,role\nGynofobi,officer\n")
-            };
+            throw new InvalidOperationException($"Unexpected WOM request: {request.Method} {request.RequestUri}");
         }
     }
 }
