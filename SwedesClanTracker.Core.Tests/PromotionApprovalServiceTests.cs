@@ -85,6 +85,30 @@ public sealed class PromotionApprovalServiceTests
     }
 
     [Fact]
+    public async Task Successful_approval_closes_obsolete_open_rank_mismatch_events()
+    {
+        await using var db = CreateDbContext();
+        var (player, candidate) = AddPromotion(db, PromotionCandidateType.wom_already_at_new_rank, "Officer");
+        var mismatch = new LifecycleEvent
+        {
+            PlayerId = player.Id,
+            EventType = "WOM_RANK_MISMATCH_REQUIRED",
+            MetadataJson = "{\"ExpectedRank\":\"Recruit\",\"ActualWomRole\":\"Officer\"}",
+            Status = "OPEN",
+            CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-1)
+        };
+        db.LifecycleEvents.Add(mismatch);
+        await db.SaveChangesAsync();
+
+        var service = new PromotionApprovalService(db, new FakeWiseOldManClient());
+
+        var result = await service.ApproveAsync(candidate, player, "tester", "test", CancellationToken.None);
+
+        Assert.True(result.Approved);
+        Assert.Equal("DONE", mismatch.Status);
+    }
+
+    [Fact]
     public async Task Unknown_special_wom_role_stays_pending_without_role_update()
     {
         await using var db = CreateDbContext();

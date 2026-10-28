@@ -73,7 +73,11 @@ public sealed class PromotionApprovalService(
         }
 
         player.CurrentRank = candidate.NewRank;
-        await CloseOpenLifecycleEventsAsync(player.Id, ct, "WOM_RANK_MISMATCH_IGNORED");
+        await CloseOpenLifecycleEventsAsync(
+            player.Id,
+            ct,
+            "WOM_RANK_MISMATCH_REQUIRED",
+            "WOM_RANK_MISMATCH_IGNORED");
 
         var details = candidateType == PromotionCandidateType.wom_already_at_new_rank
             ? "Wise Old Man already matched the candidate when it was evaluated; database rank updated without a Wise Old Man request."

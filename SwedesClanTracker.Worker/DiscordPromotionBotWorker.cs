@@ -2723,6 +2723,13 @@ public class DiscordPromotionBotWorker(
         var matchingOpenMismatches = requiredEventId.HasValue
             ? openMismatches.Where(x => x.Id == requiredEventId.Value).ToList()
             : isLegacyStaleClick ? [] : openMismatches;
+
+        if (!DiscordPromotionInteractionRules.ShouldApplyWomRankMismatchAction(matchingOpenMismatches.Count > 0))
+        {
+            await RespondToComponentAsync(component, "This rank mismatch is no longer active; no changes were made.", ephemeral: true);
+            return;
+        }
+
         var metadataSource = matchingOpenMismatches.LastOrDefault() ??
             openMismatches.LastOrDefault() ??
             clickedPostedEvent ??

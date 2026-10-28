@@ -84,20 +84,23 @@ public class WiseOldManClient(HttpClient httpClient, IConfiguration configuratio
         {
             var response = await httpClient.SendAsync(request, ct);
             var responseText = await response.Content.ReadAsStringAsync(ct);
-            if (invalidateCache)
-            {
-                await InvalidateCacheAsync(ct);
-            }
 
             if (!response.IsSuccessStatusCode)
             {
-                return new WomRoleUpdateResult(
+                var failedResult = new WomRoleUpdateResult(
                     false,
                     (int)response.StatusCode,
                     $"WOM role update failed ({(int)response.StatusCode}): {Truncate(responseText, 180)}",
                     null,
                     null,
                     null);
+
+                if (invalidateCache)
+                {
+                    await TryInvalidateCacheAsync(ct);
+                }
+
+                return failedResult;
             }
 
             var updatedRole = normalizedRole;
@@ -108,17 +111,43 @@ public class WiseOldManClient(HttpClient httpClient, IConfiguration configuratio
                 updatedRole = parsedUpdatedRole;
             }
 
-            return new WomRoleUpdateResult(
+            var successfulResult = new WomRoleUpdateResult(
                 true,
                 (int)response.StatusCode,
                 "Role update accepted by WiseOldMan.",
                 updatedRole,
                 womPlayerId,
                 displayName);
+
+            if (invalidateCache)
+            {
+                // A successful PUT is authoritative. Cache invalidation is maintenance and
+                // must not turn an acknowledged role update into a failed approval.
+                await TryInvalidateCacheAsync(ct);
+            }
+
+            return successfulResult;
         }
         catch (Exception ex)
         {
             return new WomRoleUpdateResult(false, 0, $"WOM role update exception: {ex.GetType().Name}", null, null, null);
+        }
+    }
+
+    private async Task TryInvalidateCacheAsync(CancellationToken ct)
+    {
+        try
+        {
+            await InvalidateCacheAsync(ct);
+        }
+        catch (OperationCanceledException)
+        {
+            // The role PUT already completed. Cache invalidation can be retried by the
+            // next sync or an explicit cache refresh.
+        }
+        catch
+        {
+            // Cache maintenance must not change the result of the WOM mutation.
         }
     }
 

@@ -16,4 +16,14 @@ public sealed class DiscordPromotionInteractionRulesTests
     {
         Assert.Equal(expected, DiscordPromotionInteractionRules.ShouldDefer(hasResponded, isMergeManual));
     }
+
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(false, false)]
+    public void ShouldApplyWomRankMismatchAction_only_when_matching_event_is_open(
+        bool hasMatchingOpenMismatch,
+        bool expected)
+    {
+        Assert.Equal(expected, DiscordPromotionInteractionRules.ShouldApplyWomRankMismatchAction(hasMatchingOpenMismatch));
+    }
 }
