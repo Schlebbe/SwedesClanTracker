@@ -21,6 +21,9 @@ public class TrackerDbContext(DbContextOptions<TrackerDbContext> options) : DbCo
         modelBuilder.Entity<PromotionCandidate>(e =>
         {
             e.Property(x => x.Reason).HasMaxLength(2048).IsRequired();
+            e.Property(x => x.CandidateType);
+            e.Property(x => x.WomRoleAtEvaluation)
+                .HasMaxLength(64);
         });
     }
 }

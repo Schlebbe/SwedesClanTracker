@@ -14,6 +14,7 @@ public static class ServiceRegistration
         services.AddHttpClient<IWiseOldManClient, WiseOldManClient>();
         services.AddScoped<ITrackerSyncService, TrackerSyncService>();
         services.AddScoped<IMergeReviewService, MergeReviewService>();
+        services.AddScoped<IPromotionApprovalService, PromotionApprovalService>();
         return services;
     }
 }

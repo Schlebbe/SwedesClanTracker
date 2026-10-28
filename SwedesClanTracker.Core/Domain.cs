@@ -49,6 +49,8 @@ public class PromotionCandidate
     public string OldRank { get; set; } = "";
     public string NewRank { get; set; } = "";
     public string Reason { get; set; } = "";
+    public PromotionCandidateType CandidateType { get; set; } = PromotionCandidateType.unknown_wom_role;
+    public string? WomRoleAtEvaluation { get; set; }
     public PromotionStatus Status { get; set; } = PromotionStatus.PENDING;
     public DateTimeOffset CreatedAt { get; set; }
     public Player Player { get; set; } = null!;

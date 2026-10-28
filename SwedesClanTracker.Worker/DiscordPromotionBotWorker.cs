@@ -189,111 +189,6 @@ public class DiscordPromotionBotWorker(
         }
     }
 
-    private static async Task<SwedesClanTracker.Core.WomRoleUpdateResult> ApplyWomRoleUpdateForApprovedPromotionAsync(
-        TrackerDbContext db,
-        IWiseOldManClient wiseOldManClient,
-        Player player,
-        PromotionCandidate candidate,
-        string handledBy,
-        ulong handledByDiscordUserId,
-        string source,
-        CancellationToken ct)
-    {
-        var womRoleBefore = await wiseOldManClient.GetMemberRoleAsync(player.Username, ct);
-        var result = await wiseOldManClient.UpdateMemberRoleAsync(player.Username, candidate.NewRank, ct);
-        var womRoleAfter = result.UpdatedRole ?? womRoleBefore;
-
-        db.LifecycleEvents.Add(new LifecycleEvent
-        {
-            PlayerId = player.Id,
-            EventType = "WOM_ROLE_UPDATE_APPLIED",
-            MetadataJson = JsonUtil.Serialize(new
-            {
-                CandidateId = candidate.Id,
-                Player = player.Username,
-                RequestedRole = candidate.NewRank,
-                PreviousWomRole = womRoleBefore,
-                UpdatedRole = result.UpdatedRole,
-                Success = result.Success,
-                HttpStatus = result.HttpStatus,
-                WiseOldManPlayerId = result.WomPlayerId,
-                WiseOldManDisplayName = result.DisplayName,
-                Details = result.Details,
-                HandledBy = handledBy,
-                HandledByDiscordUserId = handledByDiscordUserId,
-                Source = $"promotion-approval-{source}"
-            }),
-            Status = "DONE",
-            CreatedAt = DateTimeOffset.UtcNow
-        });
-
-        if (IsRankAligned(candidate.NewRank, womRoleAfter))
-        {
-            await CloseOpenLifecycleEventsAsync(db, player.Id, "WOM_RANK_MISMATCH_REQUIRED");
-        }
-        else
-        {
-            await EnsurePromotionWomRankMismatchLifecycleAsync(db, player, womRoleAfter, source, ct);
-        }
-
-        return result;
-    }
-
-    private static async Task EnsurePromotionWomRankMismatchLifecycleAsync(
-        TrackerDbContext db,
-        Player player,
-        string? womRole,
-        string source,
-        CancellationToken ct)
-    {
-        if (player.Status != PlayerStatus.ACTIVE) return;
-        if (string.IsNullOrWhiteSpace(womRole)) return;
-        if (string.Equals(player.CurrentRank, "Recruit", StringComparison.OrdinalIgnoreCase)) return;
-        if (RankRules.IsSpecialWomRole(womRole)) return;
-        if (IsRankAligned(player.CurrentRank, womRole)) return;
-
-        var now = DateTimeOffset.UtcNow;
-        var direction = GetWomRankMismatchDirection(player.CurrentRank, womRole);
-        var openMismatches = await db.LifecycleEvents
-            .Where(x =>
-                x.PlayerId == player.Id &&
-                x.EventType == "WOM_RANK_MISMATCH_REQUIRED" &&
-                x.Status == "OPEN")
-            .ToListAsync(ct);
-
-        var metadata = JsonUtil.Serialize(new
-        {
-            player.Username,
-            ExpectedRank = player.CurrentRank,
-            ActualWomRole = womRole,
-            Direction = direction,
-            Source = $"promotion-approval-{source}",
-            DetectedAt = now
-        });
-
-        if (openMismatches.Count > 0)
-        {
-            foreach (var ev in openMismatches)
-            {
-                ev.MetadataJson = metadata;
-            }
-            return;
-        }
-
-        db.LifecycleEvents.Add(new LifecycleEvent
-        {
-            PlayerId = player.Id,
-            EventType = "WOM_RANK_MISMATCH_REQUIRED",
-            MetadataJson = metadata,
-            Status = "OPEN",
-            CreatedAt = now
-        });
-    }
-
-    private static bool IsRankAligned(string expectedRank, string? actualRank) =>
-        !string.IsNullOrWhiteSpace(actualRank) &&
-        string.Equals(RankRules.NormalizeRankName(expectedRank), RankRules.NormalizeRankName(actualRank), StringComparison.OrdinalIgnoreCase);
-
     private static async Task EnsureOpenMergeSuggestedEventAsync(TrackerDbContext db, int playerId, string username, string handledBy)
     {
         var hasOpenMerge = await db.LifecycleEvents.AnyAsync(x =>
@@ -343,7 +238,6 @@ public class DiscordPromotionBotWorker(
 
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
-        var wiseOldManClient = scope.ServiceProvider.GetRequiredService<IWiseOldManClient>();
 
         var pending = await db.PromotionCandidates
             .Where(x => x.Status == PromotionStatus.PENDING)
@@ -355,6 +249,8 @@ public class DiscordPromotionBotWorker(
                 x.OldRank,
                 x.NewRank,
                 x.Reason,
+                x.CandidateType,
+                x.WomRoleAtEvaluation,
                 PlayerStatus = x.Player.Status,
                 PlayerName = x.Player.Username,
                 CurrentRank = x.Player.CurrentRank,
@@ -457,8 +353,8 @@ public class DiscordPromotionBotWorker(
                 continue;
             }
 
-            var womRole = await wiseOldManClient.GetMemberRoleAsync(c.PlayerName, ct);
-            var candidateType = RankRules.ClassifyPromotionCandidate(c.NewRank, womRole);
+            var candidateType = c.CandidateType;
+            var womRole = c.WomRoleAtEvaluation;
             var discordGuess = await GuessDiscordMemberForPlayerAsync(db, c.PlayerId, c.PlayerName, ct);
             var exactDiscordMatch = PromotionDiscordActionRules.FindUniqueExactMatch(discordGuess);
 
@@ -466,7 +362,7 @@ public class DiscordPromotionBotWorker(
                 c.PlayerName,
                 c.OldRank,
                 c.NewRank,
-                string.IsNullOrWhiteSpace(womRole) ? "Unknown" : RankRules.NormalizeRankName(womRole),
+                string.IsNullOrWhiteSpace(womRole) ? "Unknown" : womRole,
                 ToPromotionUpdateTargetLabel(candidateType),
                 discordGuess,
                 BuildStatsSummary(c.Latest?.Ehb, c.Latest?.Ehp, c.Latest?.Collections, c.ManualPetOverride ?? c.StoredPetCount),
@@ -480,7 +376,7 @@ public class DiscordPromotionBotWorker(
                 c.PlayerName,
                 c.OldRank,
                 c.NewRank,
-                WomRole = string.IsNullOrWhiteSpace(womRole) ? "Unknown" : RankRules.NormalizeRankName(womRole),
+                WomRole = string.IsNullOrWhiteSpace(womRole) ? "Unknown" : womRole,
                 CandidateType = candidateType.ToString(),
                 DiscordGuess = FormatDiscordGuessForFingerprint(discordGuess),
                 DiscordRankActionTargetUserId = exactDiscordMatch?.UserId,
@@ -803,9 +699,9 @@ public class DiscordPromotionBotWorker(
             var isPromoButton = parts.Length == 3 &&
                 string.Equals(parts[0], "promo", StringComparison.OrdinalIgnoreCase);
 
-            // Promo actions update the originating card immediately via UpdateAsync.
-            // Keep them non-deferred so we can acknowledge with UpdateMessage in-band.
-            if (!component.HasResponded && !isMergeManual && !isPromoButton)
+            // Acknowledge every non-manual interaction before any database, Discord, or WOM work.
+            // The promotion card is updated afterward through ModifyAsync.
+            if (DiscordPromotionInteractionRules.ShouldDefer(component.HasResponded, isMergeManual))
             {
                 await component.DeferAsync();
             }
@@ -962,7 +858,7 @@ public class DiscordPromotionBotWorker(
 
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
-        var wiseOldManClient = scope.ServiceProvider.GetRequiredService<IWiseOldManClient>();
+        var promotionApprovalService = scope.ServiceProvider.GetRequiredService<IPromotionApprovalService>();
         var candidate = await db.PromotionCandidates.FirstOrDefaultAsync(x => x.Id == candidateId);
         if (candidate is null)
         {
@@ -1046,18 +942,22 @@ public class DiscordPromotionBotWorker(
         SwedesClanTracker.Core.WomRoleUpdateResult? promotionWomUpdate = null;
         if (action == "approve")
         {
-            player.CurrentRank = candidate.NewRank;
-            await CloseOpenLifecycleEventsAsync(db, player.Id, "WOM_RANK_MISMATCH_IGNORED");
-            promotionWomUpdate = await ApplyWomRoleUpdateForApprovedPromotionAsync(
-                db,
-                wiseOldManClient,
-                player,
+            var approval = await promotionApprovalService.ApproveAsync(
                 candidate,
+                player,
                 component.User.Username,
-                component.User.Id,
                 "discord",
                 CancellationToken.None);
-            candidate.Status = PromotionStatus.APPROVED;
+            if (!approval.Approved)
+            {
+                await RespondToComponentAsync(
+                    component,
+                    $"Promotion remains pending. {approval.Details}",
+                    ephemeral: true);
+                return;
+            }
+
+            promotionWomUpdate = approval.WomUpdate;
         }
         else if (action == "dismiss")
         {
@@ -11847,6 +11747,8 @@ Shows all currently ignored players in:
             OldRank = player.CurrentRank,
             NewRank = player.EligibleRank,
             Reason = rankResult.Explanation,
+            CandidateType = RankRules.ClassifyPromotionCandidate(player.EligibleRank, womRole),
+            WomRoleAtEvaluation = string.IsNullOrWhiteSpace(womRole) ? null : RankRules.NormalizeRankName(womRole),
             Status = PromotionStatus.PENDING,
             CreatedAt = DateTimeOffset.UtcNow
         });

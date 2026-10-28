@@ -595,12 +595,15 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
                 x.PlayerId == player.Id && x.Status == PromotionStatus.PENDING && x.NewRank == player.EligibleRank, ct);
             if (!exists)
             {
+                var candidateType = RankRules.ClassifyPromotionCandidate(player.EligibleRank, womRole);
                 db.PromotionCandidates.Add(new PromotionCandidate
                 {
                     PlayerId = player.Id,
                     OldRank = player.CurrentRank,
                     NewRank = player.EligibleRank,
                     Reason = rankResult.Explanation,
+                    CandidateType = candidateType,
+                    WomRoleAtEvaluation = NormalizeObservedWomRole(womRole),
                     Status = PromotionStatus.PENDING,
                     CreatedAt = DateTimeOffset.UtcNow
                 });
@@ -613,7 +616,9 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
                         player.Username,
                         OldRank = player.CurrentRank,
                         NewRank = player.EligibleRank,
-                        Reason = rankResult.Explanation
+                        Reason = rankResult.Explanation,
+                        CandidateType = candidateType,
+                        WomRoleAtEvaluation = NormalizeObservedWomRole(womRole)
                     }),
                     Status = "DONE",
                     CreatedAt = DateTimeOffset.UtcNow
@@ -623,6 +628,9 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
 
         await db.SaveChangesAsync(ct);
     }
+
+    private static string? NormalizeObservedWomRole(string? womRole) =>
+        string.IsNullOrWhiteSpace(womRole) ? null : RankRules.NormalizeRankName(womRole);
 
     private async Task DismissSatisfiedPendingPromotionCandidatesAsync(Player player, DateTimeOffset now, CancellationToken ct)
     {

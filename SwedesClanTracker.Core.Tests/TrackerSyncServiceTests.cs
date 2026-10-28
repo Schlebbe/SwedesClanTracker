@@ -130,6 +130,66 @@ public class TrackerSyncServiceTests
     }
 
     [Fact]
+    public async Task ProcessPlayerAsync_persists_database_only_promotion_classification()
+    {
+        await using var db = CreateDbContext();
+        var player = new Player
+        {
+            Username = "Gynofobi",
+            CurrentRank = "Recruit",
+            EligibleRank = "Recruit",
+            Status = PlayerStatus.ACTIVE,
+            LastSeen = DateTimeOffset.UtcNow
+        };
+        db.Players.Add(player);
+        await db.SaveChangesAsync();
+
+        var service = new TrackerSyncService(
+            db,
+            new FakeTempleClient([], new PlayerStatsDto(2100, 0, 0, 0)),
+            new FakeWiseOldManClient(new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["Gynofobi"] = "Officer"
+            }));
+
+        await service.ProcessPlayerAsync(player.Id, CancellationToken.None);
+
+        var candidate = await db.PromotionCandidates.SingleAsync();
+        Assert.Equal(PromotionCandidateType.wom_already_at_new_rank, candidate.CandidateType);
+        Assert.Equal("Officer", candidate.WomRoleAtEvaluation);
+    }
+
+    [Fact]
+    public async Task SyncRosterAndQueueAsync_creates_rank_mismatch_after_database_only_rank_is_applied()
+    {
+        await using var db = CreateDbContext();
+        var player = new Player
+        {
+            Username = "Gynofobi",
+            CurrentRank = "Officer",
+            EligibleRank = "Officer",
+            Status = PlayerStatus.ACTIVE,
+            LastSeen = DateTimeOffset.UtcNow.AddMinutes(-10)
+        };
+        db.Players.Add(player);
+        await db.SaveChangesAsync();
+
+        var service = new TrackerSyncService(
+            db,
+            new FakeTempleClient(["Gynofobi"]),
+            new FakeWiseOldManClient(new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["Gynofobi"] = "Member"
+            }));
+
+        await service.SyncRosterAndQueueAsync(CancellationToken.None);
+
+        Assert.Contains(
+            await db.LifecycleEvents.ToListAsync(),
+            x => x.EventType == "WOM_RANK_MISMATCH_REQUIRED" && x.Status == "OPEN");
+    }
+
+    [Fact]
     public async Task ProcessPlayerAsync_rechecks_active_player_rename_and_creates_merge_suggestion()
     {
         await using var db = CreateDbContext();
