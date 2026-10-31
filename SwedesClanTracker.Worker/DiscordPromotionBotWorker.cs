@@ -734,7 +734,10 @@ public class DiscordPromotionBotWorker(
                 catch (Exception ex)
                 {
                     logger.LogError(ex, "Failed handling Discord button.");
-                    await RespondToComponentAsync(component, "Failed to handle action.", ephemeral: true);
+                    await RespondToComponentAsync(
+                        component,
+                        DiscordCommandErrorMessages.Format(ex, "Failed to handle action."),
+                        ephemeral: true);
                 }
                 finally
                 {
@@ -746,7 +749,10 @@ public class DiscordPromotionBotWorker(
         catch (Exception ex)
         {
             logger.LogError(ex, "Failed handling Discord button.");
-            await RespondToComponentAsync(component, "Failed to handle action.", ephemeral: true);
+            await RespondToComponentAsync(
+                component,
+                DiscordCommandErrorMessages.Format(ex, "Failed to handle action."),
+                ephemeral: true);
         }
         finally
         {
@@ -8432,8 +8438,11 @@ public class DiscordPromotionBotWorker(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Failed handling /lookup.");
-            await RespondAndAutoDeleteAsync(command, "Command failed.", ephemeral: true);
+            logger.LogError(ex, "Failed handling /{Command}.", command.Data.Name);
+            await RespondAndAutoDeleteAsync(
+                command,
+                DiscordCommandErrorMessages.Format(ex),
+                ephemeral: true);
         }
         finally
         {
@@ -11413,10 +11422,12 @@ Shows all currently ignored players in:
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Failed handling /wom-cache-refresh.");
+            logger.LogError(ex, "Failed handling /{Command}.", command.Data.Name);
             await RespondAndAutoDeleteAsync(
                 command,
-                "Failed to refresh the Wise Old Man roster cache. Check worker logs for details.",
+                DiscordCommandErrorMessages.Format(
+                    ex,
+                    "Failed to refresh the Wise Old Man roster cache. Check worker logs for details."),
                 ephemeral: true);
         }
     }
