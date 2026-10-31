@@ -5,6 +5,176 @@ namespace SwedesClanTracker.Core.Tests;
 
 public class TrackerSyncServiceTests
 {
+    [Theory]
+    [InlineData("rate-limit")]
+    [InlineData("http")]
+    [InlineData("timeout")]
+    [InlineData("http-timeout")]
+    public async Task SyncRosterAndQueueAsync_persists_temple_discovery_before_wom_failure(
+        string failureKind)
+    {
+        await using var db = CreateDbContext();
+        var originalLastSeen = DateTimeOffset.UtcNow.AddHours(-1);
+        var existingPlayer = new Player
+        {
+            Id = 217,
+            Username = "Muzmatch",
+            CurrentRank = "Officer",
+            EligibleRank = "Officer",
+            Status = PlayerStatus.ACTIVE,
+            LastSeen = originalLastSeen
+        };
+        db.Players.Add(existingPlayer);
+        db.LifecycleEvents.Add(new LifecycleEvent
+        {
+            PlayerId = existingPlayer.Id,
+            EventType = "WOM_RANK_MISMATCH_REQUIRED",
+            MetadataJson = "{\"Username\":\"Muzmatch\",\"ExpectedRank\":\"Officer\"}",
+            Status = "OPEN",
+            CreatedAt = originalLastSeen
+        });
+        await db.SaveChangesAsync();
+
+        var womFailure = CreateWomFetchFailure(failureKind);
+        var wom = new FakeWiseOldManClient(
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
+            womFailure);
+        var service = new TrackerSyncService(
+            db,
+            new FakeTempleClient(["Jay Hood"]),
+            wom);
+
+        var thrown = await Record.ExceptionAsync(
+            () => service.SyncRosterAndQueueAsync(CancellationToken.None));
+
+        Assert.NotNull(thrown);
+        Assert.Equal(womFailure.GetType(), thrown!.GetType());
+        Assert.Equal(1, wom.GetMemberRolesCalls);
+
+        // The failed sync leaves the DbContext with tracked entities. Clear it
+        // and requery so this assertion proves both rows were durably written.
+        db.ChangeTracker.Clear();
+        var discovered = await db.Players.SingleAsync(x => x.Username == "Jay Hood");
+        Assert.Equal(PlayerStatus.NEW_PENDING_REVIEW, discovered.Status);
+        var newPlayerEvents = await db.LifecycleEvents
+            .Where(x => x.PlayerId == discovered.Id && x.EventType == "NEW_PLAYER")
+            .ToListAsync();
+        var newPlayerEvent = Assert.Single(newPlayerEvents);
+        Assert.Equal("OPEN", newPlayerEvent.Status);
+
+        var unchangedExisting = await db.Players.SingleAsync(x => x.Id == existingPlayer.Id);
+        Assert.Equal(PlayerStatus.ACTIVE, unchangedExisting.Status);
+        Assert.Equal("Officer", unchangedExisting.CurrentRank);
+        Assert.Equal("Officer", unchangedExisting.EligibleRank);
+        Assert.Equal(originalLastSeen, unchangedExisting.LastSeen);
+        var unchangedReview = await db.LifecycleEvents.SingleAsync(x =>
+            x.PlayerId == existingPlayer.Id && x.EventType == "WOM_RANK_MISMATCH_REQUIRED");
+        Assert.Equal("OPEN", unchangedReview.Status);
+        Assert.DoesNotContain(
+            await db.LifecycleEvents.Select(x => x.EventType).ToListAsync(),
+            x => x is "WOM_MISSING_ACTION_REQUIRED" or "WOM_ONLY_ACTION_REQUIRED");
+    }
+
+    [Fact]
+    public async Task SyncRosterAndQueueAsync_success_queues_existing_members_before_new_discoveries()
+    {
+        await using var db = CreateDbContext();
+        db.Players.Add(new Player
+        {
+            Username = "Zed",
+            CurrentRank = "Officer",
+            EligibleRank = "Officer",
+            Status = PlayerStatus.ACTIVE,
+            LastSeen = DateTimeOffset.UtcNow.AddHours(-1),
+            LastSynced = DateTimeOffset.UtcNow.AddHours(-1)
+        });
+        await db.SaveChangesAsync();
+
+        var service = new TrackerSyncService(
+            db,
+            new FakeTempleClient(["Zed", "Jay_Hood", " Aaron "]),
+            new FakeWiseOldManClient(new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["Zed"] = "officer",
+                ["Jay Hood"] = "member",
+                ["Aaron"] = "member"
+            }));
+
+        var queue = await service.SyncRosterAndQueueAsync(CancellationToken.None);
+
+        var queuedNames = queue
+            .Select(id => db.Players.Single(x => x.Id == id).Username)
+            .ToArray();
+        Assert.Equal(["Zed", "Aaron", "Jay Hood"], queuedNames);
+        Assert.Equal(2, await db.LifecycleEvents.CountAsync(x => x.EventType == "NEW_PLAYER"));
+    }
+
+    [Fact]
+    public async Task SyncRosterAndQueueAsync_recovery_queues_persisted_temple_discoveries_without_duplicates()
+    {
+        await using var db = CreateDbContext();
+        var wom = new MutableWiseOldManClient
+        {
+            GetMemberRolesException = new WiseOldManRateLimitException(
+                DateTimeOffset.UtcNow.AddMinutes(1),
+                "Wise Old Man is cooling down.")
+        };
+        var temple = new FakeTempleClient([" Muzmatch ", "Jay_Hood", "Jay Hood", "muzmatch"]);
+        var service = new TrackerSyncService(db, temple, wom);
+
+        await Assert.ThrowsAsync<WiseOldManRateLimitException>(
+            () => service.SyncRosterAndQueueAsync(CancellationToken.None));
+
+        db.ChangeTracker.Clear();
+        var persistedPlayers = await db.Players.OrderBy(x => x.Username).ToListAsync();
+        Assert.Equal(["Jay Hood", "Muzmatch"], persistedPlayers.Select(x => x.Username));
+        Assert.Equal(2, await db.LifecycleEvents.CountAsync(x => x.EventType == "NEW_PLAYER"));
+
+        wom.GetMemberRolesException = null;
+        wom.Roles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["Jay Hood"] = "member",
+            ["Muzmatch"] = "officer"
+        };
+
+        var queue = await service.SyncRosterAndQueueAsync(CancellationToken.None);
+
+        db.ChangeTracker.Clear();
+        var queuedNames = queue
+            .Select(id => db.Players.Single(x => x.Id == id).Username)
+            .ToArray();
+        Assert.Equal(["Jay Hood", "Muzmatch"], queuedNames);
+        Assert.Equal(2, await db.Players.CountAsync());
+        Assert.Equal(2, await db.LifecycleEvents.CountAsync(x => x.EventType == "NEW_PLAYER"));
+        Assert.All(
+            await db.LifecycleEvents.Where(x => x.EventType == "NEW_PLAYER").ToListAsync(),
+            x => Assert.Equal("OPEN", x.Status));
+        Assert.All(
+            await db.Players.ToListAsync(),
+            x => Assert.Equal(PlayerStatus.NEW_PENDING_REVIEW, x.Status));
+    }
+
+    [Fact]
+    public async Task SyncRosterAndQueueAsync_propagates_wom_cancellation_after_temple_discovery_is_saved()
+    {
+        await using var db = CreateDbContext();
+        using var cancellation = new CancellationTokenSource();
+        var wom = new CancelingWiseOldManClient(cancellation);
+        var service = new TrackerSyncService(
+            db,
+            new FakeTempleClient(["Jay Hood"]),
+            wom);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => service.SyncRosterAndQueueAsync(cancellation.Token));
+
+        db.ChangeTracker.Clear();
+        Assert.True(await db.Players.AnyAsync(x => x.Username == "Jay Hood"));
+        Assert.True(await db.LifecycleEvents.AnyAsync(x =>
+            x.EventType == "NEW_PLAYER" && x.Status == "OPEN"));
+        Assert.Equal(1, wom.GetMemberRolesCalls);
+    }
+
     [Fact]
     public async Task SyncRosterAndQueueAsync_keeps_merge_review_open_when_new_name_is_missing_from_wom()
     {
@@ -250,6 +420,20 @@ public class TrackerSyncServiceTests
         Assert.Equal("DONE", recheckEvent.Status);
     }
 
+    private static Exception CreateWomFetchFailure(string failureKind) =>
+        failureKind switch
+        {
+            "rate-limit" => new WiseOldManRateLimitException(
+                DateTimeOffset.UtcNow.AddMinutes(1),
+                "Wise Old Man is cooling down."),
+            "http" => new HttpRequestException("Wise Old Man is unavailable."),
+            "timeout" => new TimeoutException("Wise Old Man timed out."),
+            "http-timeout" => new TaskCanceledException(
+                "Wise Old Man HTTP request timed out.",
+                new TimeoutException("Wise Old Man request timed out.")),
+            _ => throw new ArgumentOutOfRangeException(nameof(failureKind), failureKind, "Unknown WOM failure kind.")
+        };
+
     private static TrackerDbContext CreateDbContext()
     {
         var options = new DbContextOptionsBuilder<TrackerDbContext>()
@@ -270,18 +454,94 @@ public class TrackerSyncServiceTests
             Task.FromResult(pets);
     }
 
-    private sealed class FakeWiseOldManClient(IReadOnlyDictionary<string, string> roles) : IWiseOldManClient
+    private sealed class FakeWiseOldManClient(
+        IReadOnlyDictionary<string, string> roles,
+        Exception? getMemberRolesException = null) : IWiseOldManClient
     {
+        public int GetMemberRolesCalls { get; private set; }
+
         public Task<string?> GetMemberRoleAsync(string username, CancellationToken ct) =>
             Task.FromResult(roles.TryGetValue(username, out var role) ? role : null);
 
-        public Task<IReadOnlyDictionary<string, string>> GetMemberRolesAsync(CancellationToken ct) =>
-            Task.FromResult(roles);
+        public Task<IReadOnlyDictionary<string, string>> GetMemberRolesAsync(CancellationToken ct)
+        {
+            GetMemberRolesCalls++;
+            return getMemberRolesException is null
+                ? Task.FromResult(roles)
+                : Task.FromException<IReadOnlyDictionary<string, string>>(getMemberRolesException);
+        }
 
         public Task<bool> IsImpAccountAsync(string username, CancellationToken ct) =>
             Task.FromResult(false);
 
         public Task<WomRoleUpdateResult> UpdateMemberRoleAsync(string username, string role, CancellationToken ct, bool invalidateCache = true) =>
+            Task.FromResult(new WomRoleUpdateResult(true, 200, "ok", role, null, username));
+
+        public Task<(bool Success, string Details)> RemoveMemberAsync(string username, CancellationToken ct) =>
+            Task.FromResult((true, "ok"));
+
+        public Task InvalidateCacheAsync(CancellationToken ct) =>
+            Task.CompletedTask;
+    }
+
+    private sealed class MutableWiseOldManClient : IWiseOldManClient
+    {
+        public IReadOnlyDictionary<string, string> Roles { get; set; } =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        public Exception? GetMemberRolesException { get; set; }
+        public int GetMemberRolesCalls { get; private set; }
+
+        public Task<string?> GetMemberRoleAsync(string username, CancellationToken ct) =>
+            Task.FromResult(Roles.TryGetValue(username, out var role) ? role : null);
+
+        public Task<IReadOnlyDictionary<string, string>> GetMemberRolesAsync(CancellationToken ct)
+        {
+            GetMemberRolesCalls++;
+            return GetMemberRolesException is null
+                ? Task.FromResult(Roles)
+                : Task.FromException<IReadOnlyDictionary<string, string>>(GetMemberRolesException);
+        }
+
+        public Task<bool> IsImpAccountAsync(string username, CancellationToken ct) =>
+            Task.FromResult(false);
+
+        public Task<WomRoleUpdateResult> UpdateMemberRoleAsync(
+            string username,
+            string role,
+            CancellationToken ct,
+            bool invalidateCache = true) =>
+            Task.FromResult(new WomRoleUpdateResult(true, 200, "ok", role, null, username));
+
+        public Task<(bool Success, string Details)> RemoveMemberAsync(string username, CancellationToken ct) =>
+            Task.FromResult((true, "ok"));
+
+        public Task InvalidateCacheAsync(CancellationToken ct) =>
+            Task.CompletedTask;
+    }
+
+    private sealed class CancelingWiseOldManClient(CancellationTokenSource cancellation) : IWiseOldManClient
+    {
+        public int GetMemberRolesCalls { get; private set; }
+
+        public Task<string?> GetMemberRoleAsync(string username, CancellationToken ct) =>
+            Task.FromResult<string?>(null);
+
+        public Task<IReadOnlyDictionary<string, string>> GetMemberRolesAsync(CancellationToken ct)
+        {
+            GetMemberRolesCalls++;
+            cancellation.Cancel();
+            return Task.FromCanceled<IReadOnlyDictionary<string, string>>(cancellation.Token);
+        }
+
+        public Task<bool> IsImpAccountAsync(string username, CancellationToken ct) =>
+            Task.FromResult(false);
+
+        public Task<WomRoleUpdateResult> UpdateMemberRoleAsync(
+            string username,
+            string role,
+            CancellationToken ct,
+            bool invalidateCache = true) =>
             Task.FromResult(new WomRoleUpdateResult(true, 200, "ok", role, null, username));
 
         public Task<(bool Success, string Details)> RemoveMemberAsync(string username, CancellationToken ct) =>

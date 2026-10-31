@@ -19,7 +19,6 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
             .Select(NormalizeUsername)
             .Where(x => !string.IsNullOrWhiteSpace(x))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var womRoles = await wiseOldManClient.GetMemberRolesAsync(ct);
         var existing = await db.Players
             .OrderBy(x => x.LastSynced == null ? 0 : 1)
             .ThenBy(x => x.LastSynced)
@@ -30,6 +29,44 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
             .Select(x => NormalizeUsername(x.Username))
             .Where(x => !string.IsNullOrWhiteSpace(x))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        // Temple membership is the discovery source. Persist newly discovered
+        // players and their NEW_PLAYER events before consulting WOM so a
+        // temporary WOM failure cannot lose the discovery.
+        var discoveredPlayers = new List<Player>();
+        foreach (var username in rosterSet.Where(trackedDbUsernames.Add).OrderBy(x => x))
+        {
+            var p = new Player
+            {
+                Username = username,
+                LastSeen = now,
+                Status = PlayerStatus.NEW_PENDING_REVIEW
+            };
+            db.Players.Add(p);
+            discoveredPlayers.Add(p);
+        }
+
+        if (discoveredPlayers.Count > 0)
+        {
+            await db.SaveChangesAsync(ct);
+            foreach (var p in discoveredPlayers)
+            {
+                db.LifecycleEvents.Add(new LifecycleEvent
+                {
+                    PlayerId = p.Id,
+                    EventType = "NEW_PLAYER",
+                    MetadataJson = JsonUtil.Serialize(new { p.Username, CreatedAt = now }),
+                    Status = "OPEN",
+                    CreatedAt = now
+                });
+            }
+
+            await db.SaveChangesAsync(ct);
+        }
+
+        // WOM-dependent status, rank, and review work remains unchanged and is
+        // intentionally allowed to propagate its fetch failure to the worker.
+        var womRoles = await wiseOldManClient.GetMemberRolesAsync(ct);
         var queue = new List<int>();
 
         foreach (var player in existing)
@@ -120,26 +157,9 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
             }
         }
 
-        foreach (var username in rosterSet.Where(trackedDbUsernames.Add).OrderBy(x => x))
-        {
-            var p = new Player
-            {
-                Username = username,
-                LastSeen = now,
-                Status = PlayerStatus.NEW_PENDING_REVIEW
-            };
-            db.Players.Add(p);
-            await db.SaveChangesAsync(ct);
-            db.LifecycleEvents.Add(new LifecycleEvent
-            {
-                PlayerId = p.Id,
-                EventType = "NEW_PLAYER",
-                MetadataJson = JsonUtil.Serialize(new { p.Username, CreatedAt = now }),
-                Status = "OPEN",
-                CreatedAt = now
-            });
-            queue.Add(p.Id);
-        }
+        // Preserve the existing queue contract: discovered ids are returned
+        // after pre-existing players, but only after WOM-dependent work succeeds.
+        queue.AddRange(discoveredPlayers.Select(x => x.Id));
 
         await EnsureWomOnlyActionRequiredLifecycleAsync(
             now,
