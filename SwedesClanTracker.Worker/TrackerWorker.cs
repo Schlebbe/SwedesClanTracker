@@ -141,6 +141,26 @@ public class TrackerWorker(
             }
             catch (Exception ex) when (!stoppingToken.IsCancellationRequested)
             {
+                var failureNow = DateTimeOffset.UtcNow;
+                if (ex is WiseOldManRateLimitException rateLimit)
+                {
+                    var retryDelay = rateLimit.RetryAfterUtc - failureNow;
+                    if (retryDelay < TimeSpan.FromSeconds(30)) retryDelay = TimeSpan.FromSeconds(30);
+                    var retryAt = failureNow.Add(retryDelay);
+                    if (retryAt > nextRosterSyncUtc)
+                    {
+                        nextRosterSyncUtc = retryAt;
+                    }
+
+                    logger.LogWarning(
+                        "Wise Old Man rate limit reached; tracker roster sync will not retry before {RetryAtUtc}.",
+                        nextRosterSyncUtc);
+                }
+                else if (nextRosterSyncUtc <= failureNow)
+                {
+                    nextRosterSyncUtc = failureNow.AddMinutes(1);
+                }
+
                 if (currentPlayerId.HasValue)
                 {
                     await statusReporter.ReportAsync(

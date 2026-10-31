@@ -126,6 +126,43 @@ public sealed class PromotionApprovalServiceTests
         Assert.Equal(PromotionCandidateType.unknown_wom_role, candidate.CandidateType);
     }
 
+    [Fact]
+    public async Task Unknown_candidate_rate_limit_stays_pending_without_rank_or_wom_update()
+    {
+        await using var db = CreateDbContext();
+        var (player, candidate) = AddPromotion(db, PromotionCandidateType.unknown_wom_role, null);
+        var wom = new FakeWiseOldManClient
+        {
+            GetMemberRoleException = new WiseOldManRateLimitException(
+                DateTimeOffset.UtcNow.AddMinutes(1),
+                "rate limited")
+        };
+        var service = new PromotionApprovalService(db, wom);
+
+        var result = await service.ApproveAsync(candidate, player, "tester", "test", CancellationToken.None);
+
+        Assert.False(result.Approved);
+        Assert.True(result.Retryable);
+        Assert.Equal(PromotionCandidateType.unknown_wom_role, result.CandidateType);
+        Assert.Contains("rate limited", result.Details, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(PromotionStatus.PENDING, candidate.Status);
+        Assert.Equal(PromotionCandidateType.unknown_wom_role, candidate.CandidateType);
+        Assert.Null(candidate.WomRoleAtEvaluation);
+        Assert.Equal("Recruit", player.CurrentRank);
+        Assert.Equal(1, wom.GetMemberRoleCalls);
+        Assert.Equal(0, wom.UpdateMemberRoleCalls);
+
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+        var persistedCandidate = await db.PromotionCandidates.SingleAsync(x => x.Id == candidate.Id);
+        var persistedPlayer = await db.Players.SingleAsync(x => x.Id == player.Id);
+        Assert.Equal(PromotionStatus.PENDING, persistedCandidate.Status);
+        Assert.Equal("Recruit", persistedPlayer.CurrentRank);
+        Assert.DoesNotContain(
+            await db.LifecycleEvents.ToListAsync(),
+            x => x.EventType == "WOM_ROLE_UPDATE_APPLIED");
+    }
+
     private static (Player Player, PromotionCandidate Candidate) AddPromotion(
         TrackerDbContext db,
         PromotionCandidateType candidateType,
@@ -168,6 +205,7 @@ public sealed class PromotionApprovalServiceTests
     private sealed class FakeWiseOldManClient : IWiseOldManClient
     {
         public string? Role { get; init; }
+        public Exception? GetMemberRoleException { get; init; }
         public WomRoleUpdateResult UpdateResult { get; init; } = new(true, 200, "updated", "Officer", null, null);
         public int GetMemberRoleCalls { get; private set; }
         public int UpdateMemberRoleCalls { get; private set; }
@@ -175,6 +213,11 @@ public sealed class PromotionApprovalServiceTests
         public Task<string?> GetMemberRoleAsync(string username, CancellationToken ct)
         {
             GetMemberRoleCalls++;
+            if (GetMemberRoleException is not null)
+            {
+                return Task.FromException<string?>(GetMemberRoleException);
+            }
+
             return Task.FromResult(Role);
         }
 

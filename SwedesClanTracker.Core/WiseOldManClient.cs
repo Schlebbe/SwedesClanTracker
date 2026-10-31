@@ -1,3 +1,4 @@
+using System.Net;
 using Microsoft.Extensions.Configuration;
 
 namespace SwedesClanTracker.Core;
@@ -5,6 +6,14 @@ namespace SwedesClanTracker.Core;
 public interface IWiseOldManClient
 {
     Task<string?> GetMemberRoleAsync(string username, CancellationToken ct);
+    /// <summary>
+    /// Reads a member role from a successful, current Wise Old Man roster fetch.
+    /// Implementations must not use a stale or cached snapshot to answer this call.
+    /// Implementations that do not support authoritative observations fail closed
+    /// instead of forwarding a cached role lookup.
+    /// </summary>
+    Task<string?> GetMemberRoleFreshAsync(string username, CancellationToken ct) =>
+        throw new NotSupportedException("Fresh Wise Old Man role observations are not supported by this client.");
     Task<IReadOnlyDictionary<string, string>> GetMemberRolesAsync(CancellationToken ct);
     Task<bool> IsImpAccountAsync(string username, CancellationToken ct);
     Task<WomRoleUpdateResult> UpdateMemberRoleAsync(string username, string role, CancellationToken ct, bool invalidateCache = true);
@@ -20,6 +29,17 @@ public sealed record WomRoleUpdateResult(
     int? WomPlayerId,
     string? DisplayName);
 
+public sealed class WiseOldManRateLimitException : Exception
+{
+    public WiseOldManRateLimitException(DateTimeOffset retryAfterUtc, string message)
+        : base(message)
+    {
+        RetryAfterUtc = retryAfterUtc;
+    }
+
+    public DateTimeOffset RetryAfterUtc { get; }
+}
+
 public class WiseOldManClient(HttpClient httpClient, IConfiguration configuration) : IWiseOldManClient
 {
     private sealed record RoleCacheSnapshot(
@@ -33,11 +53,24 @@ public class WiseOldManClient(HttpClient httpClient, IConfiguration configuratio
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     private static RoleCacheSnapshot _cache = new(-1, DateTimeOffset.MinValue, EmptyRoles, 0);
     private static readonly TimeSpan CacheTtl = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan MinimumFetchBackoff = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan MaximumFetchBackoff = TimeSpan.FromMinutes(10);
+    private static DateTimeOffset _retryNotBeforeUtc = DateTimeOffset.MinValue;
+    private static int _consecutiveFetchFailures;
+    private static int _retryGroupId = -1;
 
     public async Task<string?> GetMemberRoleAsync(string username, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(username)) return null;
         var roles = await GetRolesAsync(ct);
+        var normalized = NormalizeUsername(username);
+        return roles.TryGetValue(normalized, out var role) ? role : null;
+    }
+
+    public async Task<string?> GetMemberRoleFreshAsync(string username, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(username)) return null;
+        var roles = await GetRolesAsync(ct, requireFresh: true);
         var normalized = NormalizeUsername(username);
         return roles.TryGetValue(normalized, out var role) ? role : null;
     }
@@ -189,7 +222,10 @@ public class WiseOldManClient(HttpClient httpClient, IConfiguration configuratio
                 return (true, "Removed from WOM.");
             }
 
-            var roleAfter = await GetMemberRoleAsync(normalizedUsername, ct);
+            // A failed DELETE can only be treated as idempotent success after a
+            // successful fresh roster observation. A cached/stale absence is not
+            // enough because the snapshot may predate the failed mutation.
+            var roleAfter = await GetMemberRoleFreshAsync(normalizedUsername, ct);
             if (string.IsNullOrWhiteSpace(roleAfter))
             {
                 return (true, $"WOM remove returned {(int)response.StatusCode}, but member is not present.");
@@ -209,14 +245,24 @@ public class WiseOldManClient(HttpClient httpClient, IConfiguration configuratio
         return Task.CompletedTask;
     }
 
-    private async Task<IReadOnlyDictionary<string, string>> GetRolesAsync(CancellationToken ct)
+    private async Task<IReadOnlyDictionary<string, string>> GetRolesAsync(
+        CancellationToken ct,
+        bool requireFresh = false)
     {
         var groupId = configuration.GetValue<int?>("WiseOldMan:GroupId") ?? 0;
-        if (groupId <= 0) return EmptyRoles;
+        if (groupId <= 0)
+        {
+            if (requireFresh)
+            {
+                throw new InvalidOperationException("Wise Old Man group settings are missing for a fresh roster observation.");
+            }
+
+            return EmptyRoles;
+        }
 
         var now = DateTimeOffset.UtcNow;
         var cache = Volatile.Read(ref _cache);
-        if (cache.GroupId == groupId && now <= cache.ValidUntilUtc && cache.Roles.Count > 0)
+        if (!requireFresh && cache.GroupId == groupId && now <= cache.ValidUntilUtc)
         {
             return cache.Roles;
         }
@@ -226,32 +272,71 @@ public class WiseOldManClient(HttpClient httpClient, IConfiguration configuratio
         {
             now = DateTimeOffset.UtcNow;
             cache = Volatile.Read(ref _cache);
-            if (cache.GroupId == groupId && now <= cache.ValidUntilUtc && cache.Roles.Count > 0)
+            if (!requireFresh && cache.GroupId == groupId && now <= cache.ValidUntilUtc)
             {
                 return cache.Roles;
             }
 
-            var fetchGeneration = cache.Generation;
-            var csv = await httpClient.GetStringAsync($"https://api.wiseoldman.net/v2/groups/{groupId}/csv", ct);
-            var newCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            var lines = csv.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            for (var i = 1; i < lines.Length; i++)
+            if (_retryGroupId == groupId && now < _retryNotBeforeUtc)
             {
-                var fields = ParseCsvLine(lines[i]);
-                if (fields.Count < 2) continue;
-                var username = NormalizeUsername(fields[0]);
-                var role = fields[1].Trim();
-                if (string.IsNullOrWhiteSpace(username)) continue;
-                newCache[username] = role;
+                if (!requireFresh && HasUsableCache(cache, groupId))
+                {
+                    return cache.Roles;
+                }
+
+                throw new WiseOldManRateLimitException(
+                    _retryNotBeforeUtc,
+                    $"Wise Old Man fetch is cooling down until {_retryNotBeforeUtc:O}.");
             }
 
-            var fetchedCache = new RoleCacheSnapshot(
-                groupId,
-                DateTimeOffset.UtcNow.Add(CacheTtl),
-                newCache,
-                fetchGeneration);
-            Interlocked.CompareExchange(ref _cache, fetchedCache, cache);
-            return newCache;
+            var fetchGeneration = cache.Generation;
+            try
+            {
+                using var response = await httpClient.GetAsync(
+                    $"https://api.wiseoldman.net/v2/groups/{groupId}/csv",
+                    ct);
+                if (response.StatusCode == HttpStatusCode.TooManyRequests)
+                {
+                    var responseReceivedAt = DateTimeOffset.UtcNow;
+                    var retryAfter = GetRetryAfter(response, responseReceivedAt);
+                    var retryAfterUtc = RegisterFetchFailure(groupId, responseReceivedAt, retryAfter);
+                    if (!requireFresh && HasUsableCache(cache, groupId))
+                    {
+                        return cache.Roles;
+                    }
+
+                    throw new WiseOldManRateLimitException(
+                        retryAfterUtc,
+                        $"Wise Old Man rate limited the roster fetch until {retryAfterUtc:O}.");
+                }
+
+                response.EnsureSuccessStatusCode();
+                var csv = await response.Content.ReadAsStringAsync(ct);
+                var newCache = ParseRoles(csv);
+
+                var fetchedCache = new RoleCacheSnapshot(
+                    groupId,
+                    DateTimeOffset.UtcNow.Add(CacheTtl),
+                    newCache,
+                    fetchGeneration);
+                Interlocked.CompareExchange(ref _cache, fetchedCache, cache);
+                ResetFetchFailures(groupId);
+                return newCache;
+            }
+            catch (WiseOldManRateLimitException)
+            {
+                throw;
+            }
+            catch (HttpRequestException)
+            {
+                RegisterFetchFailure(groupId, DateTimeOffset.UtcNow, null);
+                if (!requireFresh && HasUsableCache(cache, groupId))
+                {
+                    return cache.Roles;
+                }
+
+                throw;
+            }
         }
         finally
         {
@@ -259,16 +344,78 @@ public class WiseOldManClient(HttpClient httpClient, IConfiguration configuratio
         }
     }
 
+    private static IReadOnlyDictionary<string, string> ParseRoles(string csv)
+    {
+        var newCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var lines = csv.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        for (var i = 1; i < lines.Length; i++)
+        {
+            var fields = ParseCsvLine(lines[i]);
+            if (fields.Count < 2) continue;
+            var username = NormalizeUsername(fields[0]);
+            var role = fields[1].Trim();
+            if (string.IsNullOrWhiteSpace(username)) continue;
+            newCache[username] = role;
+        }
+
+        return newCache;
+    }
+
+    private static bool HasUsableCache(RoleCacheSnapshot cache, int groupId) =>
+        cache.GroupId == groupId;
+
+    private static TimeSpan? GetRetryAfter(HttpResponseMessage response, DateTimeOffset responseReceivedAt)
+    {
+        var retryAfter = response.Headers.RetryAfter;
+        if (retryAfter?.Delta is { } delta && delta > TimeSpan.Zero)
+        {
+            return delta;
+        }
+
+        if (retryAfter?.Date is { } date)
+        {
+            var untilDate = date - responseReceivedAt;
+            if (untilDate > TimeSpan.Zero) return untilDate;
+        }
+
+        return null;
+    }
+
+    private static DateTimeOffset RegisterFetchFailure(int groupId, DateTimeOffset responseReceivedAt, TimeSpan? requestedDelay)
+    {
+        if (_retryGroupId != groupId)
+        {
+            _retryGroupId = groupId;
+            _consecutiveFetchFailures = 0;
+            _retryNotBeforeUtc = DateTimeOffset.MinValue;
+        }
+
+        _consecutiveFetchFailures = Math.Min(_consecutiveFetchFailures + 1, 6);
+        var exponentialSeconds = MinimumFetchBackoff.TotalSeconds * Math.Pow(2, _consecutiveFetchFailures - 1);
+        var delaySeconds = requestedDelay is { } serverDelay
+            ? Math.Max(MinimumFetchBackoff.TotalSeconds, serverDelay.TotalSeconds)
+            : Math.Min(MaximumFetchBackoff.TotalSeconds, Math.Max(MinimumFetchBackoff.TotalSeconds, exponentialSeconds));
+        _retryNotBeforeUtc = responseReceivedAt.AddSeconds(delaySeconds);
+        return _retryNotBeforeUtc;
+    }
+
+    private static void ResetFetchFailures(int groupId)
+    {
+        _retryGroupId = groupId;
+        _consecutiveFetchFailures = 0;
+        _retryNotBeforeUtc = DateTimeOffset.MinValue;
+    }
+
     private static void RequestCacheInvalidation()
     {
         while (true)
         {
             var current = Volatile.Read(ref _cache);
-            var invalidatedCache = new RoleCacheSnapshot(
-                -1,
-                DateTimeOffset.MinValue,
-                EmptyRoles,
-                current.Generation + 1);
+            var invalidatedCache = current with
+            {
+                ValidUntilUtc = DateTimeOffset.MinValue,
+                Generation = current.Generation + 1
+            };
             if (ReferenceEquals(Interlocked.CompareExchange(ref _cache, invalidatedCache, current), current))
             {
                 return;

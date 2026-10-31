@@ -1971,6 +1971,7 @@ public class DiscordPromotionBotWorker(
         if (!int.TryParse(parts[2], out var playerId)) return;
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        var wiseOldManClient = scope.ServiceProvider.GetRequiredService<IWiseOldManClient>();
         var player = await db.Players.FirstOrDefaultAsync(x => x.Id == playerId);
         if (player is null)
         {
@@ -2001,7 +2002,12 @@ public class DiscordPromotionBotWorker(
             if (!womOk)
             {
                 var womGroupId = configuration.GetValue<int?>("WiseOldMan:GroupId") ?? 0;
-                var alreadyInWom = womGroupId > 0 && await IsPlayerInWiseOldManGroupAsync(player.Username, womGroupId);
+                var alreadyInWom = await IsPlayerInWiseOldManGroupAsync(
+                    wiseOldManClient,
+                    player.Username,
+                    womGroupId,
+                    CancellationToken.None,
+                    requireFresh: true);
                 if (!alreadyInWom)
                 {
                     await RespondToComponentAsync(component, "Temple add succeeded, but WiseOldMan add failed.", ephemeral: true);
@@ -2024,7 +2030,12 @@ public class DiscordPromotionBotWorker(
             if (!womRemoved)
             {
                 var womGroupId = configuration.GetValue<int?>("WiseOldMan:GroupId") ?? 0;
-                var stillInWom = womGroupId > 0 && await IsPlayerInWiseOldManGroupAsync(player.Username, womGroupId);
+                var stillInWom = await IsPlayerInWiseOldManGroupAsync(
+                    wiseOldManClient,
+                    player.Username,
+                    womGroupId,
+                    CancellationToken.None,
+                    requireFresh: true);
                 if (stillInWom)
                 {
                     await RespondToComponentAsync(component, "Failed to remove player from WiseOldMan.", ephemeral: true);
@@ -2092,6 +2103,7 @@ public class DiscordPromotionBotWorker(
         if (!int.TryParse(parts[2], out var playerId)) return;
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        var wiseOldManClient = scope.ServiceProvider.GetRequiredService<IWiseOldManClient>();
         var player = await db.Players.FirstOrDefaultAsync(x => x.Id == playerId);
         if (player is null)
         {
@@ -2117,7 +2129,12 @@ public class DiscordPromotionBotWorker(
             if (!womOk)
             {
                 var womGroupId = configuration.GetValue<int?>("WiseOldMan:GroupId") ?? 0;
-                var alreadyInWom = womGroupId > 0 && await IsPlayerInWiseOldManGroupAsync(player.Username, womGroupId);
+                var alreadyInWom = await IsPlayerInWiseOldManGroupAsync(
+                    wiseOldManClient,
+                    player.Username,
+                    womGroupId,
+                    CancellationToken.None,
+                    requireFresh: true);
                 if (!alreadyInWom)
                 {
                     await RespondToComponentAsync(component, "Failed to reinstate player in WiseOldMan.", ephemeral: true);
@@ -5008,6 +5025,7 @@ public class DiscordPromotionBotWorker(
 
     private async Task<bool> IsStillLiveWomOnlyRequirementAsync(
         TrackerDbContext db,
+        IWiseOldManClient wiseOldManClient,
         LifecycleEvent requiredEvent,
         string normalizedUsername,
         string actualWomRole,
@@ -5033,7 +5051,11 @@ public class DiscordPromotionBotWorker(
         }
 
         var womGroupId = configuration.GetValue<int?>("WiseOldMan:GroupId") ?? 7173;
-        var isInWom = womGroupId > 0 && await IsPlayerInWiseOldManGroupAsync(normalizedUsername, womGroupId);
+        var isInWom = await IsPlayerInWiseOldManGroupAsync(
+            wiseOldManClient,
+            normalizedUsername,
+            womGroupId,
+            ct);
         if (!isInWom)
         {
             await CloseStaleWomOnlyRequirementAsync(
@@ -5335,6 +5357,7 @@ public class DiscordPromotionBotWorker(
 
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        var wiseOldManClient = scope.ServiceProvider.GetRequiredService<IWiseOldManClient>();
         var openTempleNameChanges = await db.LifecycleEvents
             .Where(x => x.EventType == TempleNameChangeReviewEventTypes.Required && x.Status == "OPEN")
             .ToListAsync(ct);
@@ -5403,7 +5426,11 @@ public class DiscordPromotionBotWorker(
             }
 
             var womGroupId = configuration.GetValue<int?>("WiseOldMan:GroupId") ?? 7173;
-            var womAdded = womGroupId > 0 && await IsPlayerInWiseOldManGroupAsync(player.Username, womGroupId);
+            var womAdded = await IsPlayerInWiseOldManGroupAsync(
+                wiseOldManClient,
+                player.Username,
+                womGroupId,
+                ct);
             var discordGuess = await GuessDiscordMemberForPlayerAsync(db, player.Id, player.Username, ct);
 
             var embedBuilder = new EmbedBuilder()
@@ -5531,6 +5558,7 @@ public class DiscordPromotionBotWorker(
 
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        var wiseOldManClient = scope.ServiceProvider.GetRequiredService<IWiseOldManClient>();
         var openTempleNameChanges = await db.LifecycleEvents
             .Where(x => x.EventType == TempleNameChangeReviewEventTypes.Required && x.Status == "OPEN")
             .ToListAsync(ct);
@@ -5545,7 +5573,11 @@ public class DiscordPromotionBotWorker(
         foreach (var mp in missingPlayers)
         {
             var inTemple = await IsPlayerInTempleGroupAsync(mp.Username, templeGroupIdForSelfHeal);
-            var inWom = womGroupIdForSelfHeal > 0 && await IsPlayerInWiseOldManGroupAsync(mp.Username, womGroupIdForSelfHeal);
+            var inWom = await IsPlayerInWiseOldManGroupAsync(
+                wiseOldManClient,
+                mp.Username,
+                womGroupIdForSelfHeal,
+                ct);
             if (!inTemple || inWom) continue;
 
             var hasPendingAction = await db.LifecycleEvents.AnyAsync(x =>
@@ -5591,7 +5623,11 @@ public class DiscordPromotionBotWorker(
             var templeGroupId = configuration.GetValue<int?>("TempleOsrs:GroupId") ?? 449;
             var templeAdded = await IsPlayerInTempleGroupAsync(player.Username, templeGroupId);
             var womGroupId = configuration.GetValue<int?>("WiseOldMan:GroupId") ?? 7173;
-            var womAdded = womGroupId > 0 && await IsPlayerInWiseOldManGroupAsync(player.Username, womGroupId);
+            var womAdded = await IsPlayerInWiseOldManGroupAsync(
+                wiseOldManClient,
+                player.Username,
+                womGroupId,
+                ct);
             if (womAdded)
             {
                 await CloseOpenLifecycleEventsAsync(db, player.Id, "WOM_MISSING_ACTION_REQUIRED");
@@ -5792,6 +5828,7 @@ public class DiscordPromotionBotWorker(
 
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        var wiseOldManClient = scope.ServiceProvider.GetRequiredService<IWiseOldManClient>();
         var openTempleNameChanges = await db.LifecycleEvents
             .Where(x => x.EventType == TempleNameChangeReviewEventTypes.Required && x.Status == "OPEN")
             .ToListAsync(ct);
@@ -5845,7 +5882,13 @@ public class DiscordPromotionBotWorker(
                 continue;
             }
 
-            if (!await IsStillLiveWomOnlyRequirementAsync(db, ev, normalizedUsername, womRole, ct))
+            if (!await IsStillLiveWomOnlyRequirementAsync(
+                db,
+                wiseOldManClient,
+                ev,
+                normalizedUsername,
+                womRole,
+                ct))
             {
                 continue;
             }
@@ -8329,6 +8372,7 @@ public class DiscordPromotionBotWorker(
 
             await using var scope = scopeFactory.CreateAsyncScope();
             var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+            var wiseOldManClient = scope.ServiceProvider.GetRequiredService<IWiseOldManClient>();
 
             var player = await db.Players
                 .Where(x => x.Username.ToLower() == username.ToLower())
@@ -8362,7 +8406,11 @@ public class DiscordPromotionBotWorker(
             var lookupTempleGroupId = configuration.GetValue<int?>("TempleOsrs:GroupId") ?? 449;
             var lookupWomGroupId = configuration.GetValue<int?>("WiseOldMan:GroupId") ?? 0;
             var templeAdded = await IsPlayerInTempleGroupAsync(player.Username, lookupTempleGroupId);
-            var womAdded = lookupWomGroupId > 0 && await IsPlayerInWiseOldManGroupAsync(player.Username, lookupWomGroupId);
+            var womAdded = await IsPlayerInWiseOldManGroupAsync(
+                wiseOldManClient,
+                player.Username,
+                lookupWomGroupId,
+                CancellationToken.None);
 
             var embed = new EmbedBuilder()
                 .WithTitle($"Lookup: {player.Username}")
@@ -11476,24 +11524,18 @@ Shows all currently ignored players in:
         return false;
     }
 
-    private async Task<bool> IsPlayerInWiseOldManGroupAsync(string username, int groupId)
+    private static async Task<bool> IsPlayerInWiseOldManGroupAsync(
+        IWiseOldManClient wiseOldManClient,
+        string username,
+        int groupId,
+        CancellationToken ct,
+        bool requireFresh = false)
     {
-        try
-        {
-            var client = httpClientFactory.CreateClient();
-            var csv = await client.GetStringAsync($"https://api.wiseoldman.net/v2/groups/{groupId}/csv");
-            var lines = csv.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            if (lines.Length <= 1) return false;
-            var normalizedUsername = NormalizeUsername(username);
-            for (var i = 1; i < lines.Length; i++)
-            {
-                var firstField = NormalizeUsername(lines[i].Split(',', 2)[0].Trim().Trim('"'));
-                if (string.Equals(firstField, normalizedUsername, StringComparison.OrdinalIgnoreCase))
-                    return true;
-            }
-        }
-        catch { }
-        return false;
+        if (groupId <= 0) return false;
+        var role = requireFresh
+            ? await wiseOldManClient.GetMemberRoleFreshAsync(username, ct)
+            : await wiseOldManClient.GetMemberRoleAsync(username, ct);
+        return !string.IsNullOrWhiteSpace(role);
     }
 
     private static Embed BuildTempleResultEmbed(string title, bool success, int groupId, List<string> players, string details)

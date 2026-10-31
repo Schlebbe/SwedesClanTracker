@@ -149,6 +149,14 @@ public sealed class PromotionApprovalService(
                 candidate.CandidateType,
                 "Wise Old Man did not respond in time. The promotion remains pending and can be retried."));
         }
+        catch (WiseOldManRateLimitException)
+        {
+            return (false, new PromotionApprovalResult(
+                Approved: false,
+                Retryable: true,
+                candidate.CandidateType,
+                "Wise Old Man is rate limited. The promotion remains pending and can be retried."));
+        }
         catch (HttpRequestException)
         {
             return (false, new PromotionApprovalResult(
