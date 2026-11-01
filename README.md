@@ -88,6 +88,9 @@ The repo includes Pi deployment assets:
 - `deploy/env/*.example`
 
 The current rank policy is documented in [`docs/RANK_POLICY.md`](docs/RANK_POLICY.md).
+The completed 2026-11-01 cutover is retained for audit and recovery in
+[`tools/migrations/2026-11-01-brassican`](tools/migrations/2026-11-01-brassican/README.md),
+outside the normal application solution.
 
 Normal Pi deployments still publish the full stack, restart the services, and
 run health verification. Optional `-BackendOnly` skips frontend work;

@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="SwedesClanTracker.RankTransition/SwedesClanTracker.RankTransition.csproj" />
+  <Project Path="SwedesClanTracker.RankTransition.Tests/SwedesClanTracker.RankTransition.Tests.csproj" />
+</Solution>

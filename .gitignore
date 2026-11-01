@@ -3,6 +3,7 @@
 /deploy/frontend/
 /deploy/pi/
 /logs/
+.rank-transition/
 **/bin/
 **/obj/
 **/node_modules/
