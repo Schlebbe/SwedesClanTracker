@@ -52,9 +52,9 @@ public class PromotionDiscordActionRulesTests
     public void Expected_previous_rank_role_is_replaced()
     {
         var result = PromotionDiscordActionRules.EvaluateRankRoleState(
-            "Captain",
-            "Astral",
-            ["Captain"]);
+            "Brassican",
+            "Commander",
+            ["Brassican"]);
 
         Assert.Equal(DiscordPromotionRankRoleAction.Replace, result.Action);
         Assert.True(result.CanApply);
@@ -65,7 +65,7 @@ public class PromotionDiscordActionRulesTests
     {
         var result = PromotionDiscordActionRules.EvaluateRankRoleState(
             "Captain",
-            "Astral",
+            "General",
             ["Lieutenant"]);
 
         Assert.Equal(DiscordPromotionRankRoleAction.Reject, result.Action);
@@ -78,18 +78,18 @@ public class PromotionDiscordActionRulesTests
     {
         var result = PromotionDiscordActionRules.EvaluateRankRoleState(
             "Captain",
-            "Astral",
+            "General",
             []);
 
         Assert.Equal(DiscordPromotionRankRoleAction.Reject, result.Action);
     }
 
     [Fact]
-    public void Recruit_without_a_rank_role_can_receive_the_new_role()
+    public void Legacy_recruit_without_a_rank_role_can_receive_the_new_role()
     {
         var result = PromotionDiscordActionRules.EvaluateRankRoleState(
             "Recruit",
-            "Officer",
+            "Brassican",
             []);
 
         Assert.Equal(DiscordPromotionRankRoleAction.Add, result.Action);
@@ -100,8 +100,8 @@ public class PromotionDiscordActionRulesTests
     {
         var result = PromotionDiscordActionRules.EvaluateRankRoleState(
             "Captain",
-            "Astral",
-            ["Astral"]);
+            "General",
+            ["General"]);
 
         Assert.Equal(DiscordPromotionRankRoleAction.AlreadyCorrect, result.Action);
     }
@@ -111,10 +111,34 @@ public class PromotionDiscordActionRulesTests
     {
         var result = PromotionDiscordActionRules.EvaluateRankRoleState(
             "Captain",
-            "Astral",
+            "General",
             ["Captain", "Lieutenant"]);
 
         Assert.Equal(DiscordPromotionRankRoleAction.Reject, result.Action);
+    }
+
+    [Fact]
+    public void Brassican_promotion_does_not_strip_a_conflicting_higher_rank()
+    {
+        var result = PromotionDiscordActionRules.EvaluateRankRoleState(
+            "Brassican",
+            "Commander",
+            ["General"]);
+
+        Assert.Equal(DiscordPromotionRankRoleAction.Reject, result.Action);
+        Assert.Contains("General", result.Details, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Brassican_promotion_does_not_apply_when_only_a_legacy_external_recruit_role_exists()
+    {
+        var result = PromotionDiscordActionRules.EvaluateRankRoleState(
+            "Brassican",
+            "Commander",
+            ["Recruit"]);
+
+        Assert.Equal(DiscordPromotionRankRoleAction.Reject, result.Action);
+        Assert.Empty(result.ExistingRanks);
     }
 
     private static DiscordMemberGuessMatch CreateMatch(ulong userId, DiscordMemberMatchStrength strength) =>

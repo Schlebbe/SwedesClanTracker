@@ -10,8 +10,8 @@ public class Player
 {
     public int Id { get; set; }
     public string Username { get; set; } = "";
-    public string CurrentRank { get; set; } = "Recruit";
-    public string EligibleRank { get; set; } = "Recruit";
+    public string CurrentRank { get; set; } = "Brassican";
+    public string EligibleRank { get; set; } = "Brassican";
     public PlayerStatus Status { get; set; } = PlayerStatus.NEW_PENDING_REVIEW;
     public DateTimeOffset LastSeen { get; set; }
     public DateTimeOffset? LastSynced { get; set; }
@@ -68,7 +68,7 @@ public class LifecycleEvent
 
 public class RankResult
 {
-    public string Rank { get; init; } = "Recruit";
+    public string Rank { get; init; } = "Brassican";
     public string Explanation { get; init; } = "No rank requirement met.";
 }
 
@@ -80,16 +80,16 @@ public static class RankEvaluator
 
     private static readonly IReadOnlyList<RankEvaluationRule> Rules =
     [
-        new("Officer", s => s.TotalLevel >= 2100, "Total level >= 2100"),
-        new("Commander", s => s.TotalLevel >= 2300, "Total level >= 2300"),
+        new("Brassican", _ => true, "No rank requirement met."),
+        new("Commander", s => s.TotalLevel >= 2200, "Total level >= 2200"),
         new("Lieutenant", s => s.Ehb >= 750 || s.Ehp >= 1000, "EHB >= 750 OR EHP >= 1000"),
-        new("Captain", s => s.Ehb >= 1000 || s.PetCount >= 10 || s.Ehp >= 1500, "EHB >= 1000 OR pets >= 10 OR EHP >= 1500"),
-        new("Astral", s => s.Ehb >= 1250 || s.PetCount >= 15 || s.Ehp >= 1750 || s.Collections >= 800, "EHB >= 1250 OR pets >= 15 OR EHP >= 1750 OR collections >= 800"),
-        new("General", s => s.Ehb >= 1500 || s.PetCount >= 20 || s.Ehp >= 2000 || s.Collections >= 950, "EHB >= 1500 OR pets >= 20 OR EHP >= 2000 OR collections >= 950"),
-        new("Brigadier", s => s.Ehb >= 2000 || s.PetCount >= 30 || s.Ehp >= 2500 || s.Collections >= 1050, "EHB >= 2000 OR pets >= 30 OR EHP >= 2500 OR collections >= 1050"),
-        new("Admiral", s => s.Ehb >= 3000 || s.PetCount >= 40 || s.Ehp >= 4000 || s.Collections >= 1300, "EHB >= 3000 OR pets >= 40 OR EHP >= 4000 OR collections >= 1300"),
-        new("Marshal", s => s.Ehb >= 4000 || s.PetCount >= 50 || s.Ehp >= 5000 || s.Collections >= 1450, "EHB >= 4000 OR pets >= 50 OR EHP >= 5000 OR collections >= 1450"),
-        new("Beast", s => s.Ehb >= 5000 || s.PetCount >= 60 || s.Ehp >= 7000 || s.Collections >= 1550, "EHB >= 5000 OR pets >= 60 OR EHP >= 7000 OR collections >= 1550")
+        new("Captain", s => s.Ehb >= 1000 || s.Ehp >= 1500 || s.PetCount >= 10 || s.Collections >= 800, "EHB >= 1000 OR EHP >= 1500 OR pets >= 10 OR collections >= 800"),
+        new("General", s => s.Ehb >= 1250 || s.Ehp >= 1750 || s.PetCount >= 15 || s.Collections >= 900, "EHB >= 1250 OR EHP >= 1750 OR pets >= 15 OR collections >= 900"),
+        new("Colonel", s => s.Ehb >= 1500 || s.Ehp >= 2000 || s.PetCount >= 25 || s.Collections >= 1050, "EHB >= 1500 OR EHP >= 2000 OR pets >= 25 OR collections >= 1050"),
+        new("Brigadier", s => s.Ehb >= 2000 || s.Ehp >= 2500 || s.PetCount >= 35 || s.Collections >= 1200, "EHB >= 2000 OR EHP >= 2500 OR pets >= 35 OR collections >= 1200"),
+        new("Admiral", s => s.Ehb >= 3000 || s.Ehp >= 4000 || s.PetCount >= 45 || s.Collections >= 1350, "EHB >= 3000 OR EHP >= 4000 OR pets >= 45 OR collections >= 1350"),
+        new("Marshal", s => s.Ehb >= 4000 || s.Ehp >= 5000 || s.PetCount >= 55 || s.Collections >= 1450, "EHB >= 4000 OR EHP >= 5000 OR pets >= 55 OR collections >= 1450"),
+        new("Beast", s => s.Ehb >= 5000 || s.Ehp >= 7000 || s.PetCount >= 65 || s.Collections >= 1550, "EHB >= 5000 OR EHP >= 7000 OR pets >= 65 OR collections >= 1550")
     ];
 
     public static IReadOnlyList<RankRequirement> Requirements =>
@@ -97,7 +97,7 @@ public static class RankEvaluator
 
     public static RankResult Evaluate(PlayerSnapshot snapshot)
     {
-        string best = "Recruit";
+        string best = "Brassican";
         string why = "No rank requirement met.";
         foreach (var rule in Rules)
         {
@@ -113,12 +113,10 @@ public static class RankRules
 {
     private static readonly string[] OrderedRankNames =
     [
-        "Recruit", "Officer", "Commander", "Lieutenant", "Captain", "Astral", "General", "Brigadier", "Admiral", "Marshal", "Beast"
+        "Brassican", "Commander", "Lieutenant", "Captain", "General", "Colonel", "Brigadier", "Admiral", "Marshal", "Beast"
     ];
 
-    private static readonly string[] AssignableClanRankNames = OrderedRankNames
-        .Where(x => !string.Equals(x, "Recruit", StringComparison.OrdinalIgnoreCase))
-        .ToArray();
+    private static readonly string[] AssignableClanRankNames = OrderedRankNames.ToArray();
 
     private static readonly string[] SpecialWomRoles =
     [
@@ -174,9 +172,9 @@ public static class RankRules
         if (string.IsNullOrWhiteSpace(womRole)) return PromotionCandidateType.unknown_wom_role;
         if (string.Equals(NormalizeRankName(womRole), "member", StringComparison.OrdinalIgnoreCase))
         {
-            return string.Equals(NormalizeRankName(newRank), "Recruit", StringComparison.OrdinalIgnoreCase)
-                ? PromotionCandidateType.wom_already_at_new_rank
-                : PromotionCandidateType.needs_wom_rank_update;
+            // Member is a Wise Old Man non-clan role, not an alias for the
+            // assignable Brassican rank (or any other clan rank).
+            return PromotionCandidateType.needs_wom_rank_update;
         }
         if (IsSpecialWomRole(womRole)) return PromotionCandidateType.unknown_wom_role;
         if (!IsKnownClanRank(womRole)) return PromotionCandidateType.unknown_wom_role;

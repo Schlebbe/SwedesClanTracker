@@ -16,8 +16,8 @@ public sealed class PromotionsControllerTests
         var player = new Player
         {
             Username = "Gynofobi",
-            CurrentRank = "Recruit",
-            EligibleRank = "Officer",
+            CurrentRank = "Brassican",
+            EligibleRank = "Commander",
             Status = PlayerStatus.ACTIVE,
             LastSeen = DateTimeOffset.UtcNow
         };
@@ -26,11 +26,11 @@ public sealed class PromotionsControllerTests
         db.PromotionCandidates.Add(new PromotionCandidate
         {
             PlayerId = player.Id,
-            OldRank = "Recruit",
-            NewRank = "Officer",
-            Reason = "Officer via: Total level >= 2100",
+            OldRank = "Brassican",
+            NewRank = "Commander",
+            Reason = "Commander via: Total level >= 2200",
             CandidateType = PromotionCandidateType.wom_already_at_new_rank,
-            WomRoleAtEvaluation = "Officer",
+            WomRoleAtEvaluation = "Commander",
             Status = PromotionStatus.PENDING,
             CreatedAt = DateTimeOffset.UtcNow
         });
@@ -47,7 +47,7 @@ public sealed class PromotionsControllerTests
         var row = Assert.Single(json.RootElement.EnumerateArray());
 
         Assert.Equal("wom_already_at_new_rank", row.GetProperty("CandidateType").GetString());
-        Assert.Equal("Officer", row.GetProperty("WomRoleAtEvaluation").GetString());
+        Assert.Equal("Commander", row.GetProperty("WomRoleAtEvaluation").GetString());
     }
 
     private static TrackerDbContext CreateDbContext()

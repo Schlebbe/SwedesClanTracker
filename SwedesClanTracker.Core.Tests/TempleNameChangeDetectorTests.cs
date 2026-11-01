@@ -95,7 +95,7 @@ public class TempleNameChangeDetectorTests
             ],
             womOnlyCandidates:
             [
-                New("vrll", womRole: "astral", requiredEventId: 20)
+                New("vrll", womRole: "General", requiredEventId: 20)
             ]));
 
         Assert.Null(result);
@@ -158,7 +158,7 @@ public class TempleNameChangeDetectorTests
 
     private static TempleNameChangeOldCandidate Old(
         string username,
-        string currentRank = "Astral",
+        string currentRank = "General",
         int? womMissingEventId = null,
         DateTimeOffset? womMissingCreatedAt = null,
         int? templeMissingEventId = null,
@@ -176,7 +176,7 @@ public class TempleNameChangeDetectorTests
 
     private static TempleNameChangeWomOnlyCandidate New(
         string username,
-        string womRole = "astral",
+        string womRole = "General",
         int requiredEventId = 20,
         DateTimeOffset? createdAt = null)
     {

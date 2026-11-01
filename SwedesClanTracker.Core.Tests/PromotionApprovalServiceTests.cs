@@ -9,7 +9,7 @@ public sealed class PromotionApprovalServiceTests
     public async Task Database_only_approval_does_not_call_wom()
     {
         await using var db = CreateDbContext();
-        var (player, candidate) = AddPromotion(db, PromotionCandidateType.wom_already_at_new_rank, "Officer");
+        var (player, candidate) = AddPromotion(db, PromotionCandidateType.wom_already_at_new_rank, "Commander");
         var wom = new FakeWiseOldManClient();
         var service = new PromotionApprovalService(db, wom);
 
@@ -19,7 +19,7 @@ public sealed class PromotionApprovalServiceTests
         Assert.Equal(0, wom.GetMemberRoleCalls);
         Assert.Equal(0, wom.UpdateMemberRoleCalls);
         Assert.Equal(PromotionStatus.APPROVED, candidate.Status);
-        Assert.Equal("Officer", player.CurrentRank);
+        Assert.Equal("Commander", player.CurrentRank);
         await db.SaveChangesAsync();
         Assert.Contains(db.LifecycleEvents, x =>
             x.EventType == "WOM_ROLE_UPDATE_APPLIED" &&
@@ -33,7 +33,7 @@ public sealed class PromotionApprovalServiceTests
         var (player, candidate) = AddPromotion(db, PromotionCandidateType.needs_wom_rank_update, "Member");
         var wom = new FakeWiseOldManClient
         {
-            UpdateResult = new WomRoleUpdateResult(true, 200, "updated", "Officer", 123, "Gynofobi")
+            UpdateResult = new WomRoleUpdateResult(true, 200, "updated", "Commander", 123, "Gynofobi")
         };
         var service = new PromotionApprovalService(db, wom);
 
@@ -43,7 +43,7 @@ public sealed class PromotionApprovalServiceTests
         Assert.Equal(0, wom.GetMemberRoleCalls);
         Assert.Equal(1, wom.UpdateMemberRoleCalls);
         Assert.Equal(PromotionStatus.APPROVED, candidate.Status);
-        Assert.Equal("Officer", player.CurrentRank);
+        Assert.Equal("Commander", player.CurrentRank);
     }
 
     [Fact]
@@ -51,7 +51,7 @@ public sealed class PromotionApprovalServiceTests
     {
         await using var db = CreateDbContext();
         var (player, candidate) = AddPromotion(db, PromotionCandidateType.unknown_wom_role, null);
-        var wom = new FakeWiseOldManClient { Role = "Officer" };
+        var wom = new FakeWiseOldManClient { Role = "Commander" };
         var service = new PromotionApprovalService(db, wom);
 
         var result = await service.ApproveAsync(candidate, player, "tester", "test", CancellationToken.None);
@@ -60,7 +60,7 @@ public sealed class PromotionApprovalServiceTests
         Assert.Equal(1, wom.GetMemberRoleCalls);
         Assert.Equal(0, wom.UpdateMemberRoleCalls);
         Assert.Equal(PromotionCandidateType.wom_already_at_new_rank, candidate.CandidateType);
-        Assert.Equal("Officer", candidate.WomRoleAtEvaluation);
+        Assert.Equal("Commander", candidate.WomRoleAtEvaluation);
     }
 
     [Fact]
@@ -81,19 +81,19 @@ public sealed class PromotionApprovalServiceTests
         Assert.Equal(0, wom.GetMemberRoleCalls);
         Assert.Equal(1, wom.UpdateMemberRoleCalls);
         Assert.Equal(PromotionStatus.PENDING, candidate.Status);
-        Assert.Equal("Recruit", player.CurrentRank);
+        Assert.Equal("Brassican", player.CurrentRank);
     }
 
     [Fact]
     public async Task Successful_approval_closes_obsolete_open_rank_mismatch_events()
     {
         await using var db = CreateDbContext();
-        var (player, candidate) = AddPromotion(db, PromotionCandidateType.wom_already_at_new_rank, "Officer");
+        var (player, candidate) = AddPromotion(db, PromotionCandidateType.wom_already_at_new_rank, "Commander");
         var mismatch = new LifecycleEvent
         {
             PlayerId = player.Id,
             EventType = "WOM_RANK_MISMATCH_REQUIRED",
-            MetadataJson = "{\"ExpectedRank\":\"Recruit\",\"ActualWomRole\":\"Officer\"}",
+            MetadataJson = "{\"ExpectedRank\":\"Brassican\",\"ActualWomRole\":\"Commander\"}",
             Status = "OPEN",
             CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-1)
         };
@@ -148,7 +148,7 @@ public sealed class PromotionApprovalServiceTests
         Assert.Equal(PromotionStatus.PENDING, candidate.Status);
         Assert.Equal(PromotionCandidateType.unknown_wom_role, candidate.CandidateType);
         Assert.Null(candidate.WomRoleAtEvaluation);
-        Assert.Equal("Recruit", player.CurrentRank);
+        Assert.Equal("Brassican", player.CurrentRank);
         Assert.Equal(1, wom.GetMemberRoleCalls);
         Assert.Equal(0, wom.UpdateMemberRoleCalls);
 
@@ -157,7 +157,7 @@ public sealed class PromotionApprovalServiceTests
         var persistedCandidate = await db.PromotionCandidates.SingleAsync(x => x.Id == candidate.Id);
         var persistedPlayer = await db.Players.SingleAsync(x => x.Id == player.Id);
         Assert.Equal(PromotionStatus.PENDING, persistedCandidate.Status);
-        Assert.Equal("Recruit", persistedPlayer.CurrentRank);
+        Assert.Equal("Brassican", persistedPlayer.CurrentRank);
         Assert.DoesNotContain(
             await db.LifecycleEvents.ToListAsync(),
             x => x.EventType == "WOM_ROLE_UPDATE_APPLIED");
@@ -171,8 +171,8 @@ public sealed class PromotionApprovalServiceTests
         var player = new Player
         {
             Username = "Gynofobi",
-            CurrentRank = "Recruit",
-            EligibleRank = "Officer",
+            CurrentRank = "Brassican",
+            EligibleRank = "Commander",
             Status = PlayerStatus.ACTIVE,
             LastSeen = DateTimeOffset.UtcNow
         };
@@ -180,9 +180,9 @@ public sealed class PromotionApprovalServiceTests
         {
             Player = player,
             PlayerId = player.Id,
-            OldRank = "Recruit",
-            NewRank = "Officer",
-            Reason = "Officer via: Total level >= 2100",
+            OldRank = "Brassican",
+            NewRank = "Commander",
+            Reason = "Commander via: Total level >= 2200",
             CandidateType = candidateType,
             WomRoleAtEvaluation = womRole,
             Status = PromotionStatus.PENDING,
@@ -206,7 +206,7 @@ public sealed class PromotionApprovalServiceTests
     {
         public string? Role { get; init; }
         public Exception? GetMemberRoleException { get; init; }
-        public WomRoleUpdateResult UpdateResult { get; init; } = new(true, 200, "updated", "Officer", null, null);
+        public WomRoleUpdateResult UpdateResult { get; init; } = new(true, 200, "updated", "Commander", null, null);
         public int GetMemberRoleCalls { get; private set; }
         public int UpdateMemberRoleCalls { get; private set; }
 

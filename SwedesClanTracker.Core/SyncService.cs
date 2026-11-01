@@ -394,8 +394,11 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
             return;
         }
 
-        if (string.Equals(player.CurrentRank, "Recruit", StringComparison.OrdinalIgnoreCase) ||
-            IsSpecialWomRole(womRole))
+        // Recruit is retained only for legacy or restored records.
+        // Brassican is not special: a WOM Member role is a real mismatch
+        // for a Brassican player and must remain visible for review.
+        var isLegacyRecruit = string.Equals(player.CurrentRank, "Recruit", StringComparison.OrdinalIgnoreCase);
+        if (isLegacyRecruit || IsSpecialWomRole(womRole))
         {
             await CloseOpenLifecycleEventsAsync(player.Id, ct, "WOM_RANK_MISMATCH_REQUIRED");
             return;

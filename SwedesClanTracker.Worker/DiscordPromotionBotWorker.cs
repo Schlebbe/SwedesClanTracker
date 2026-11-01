@@ -9025,7 +9025,7 @@ public class DiscordPromotionBotWorker(
         var normalizedRank = RankRules.NormalizeRankName(player.CurrentRank);
         if (string.Equals(normalizedRank, "Recruit", StringComparison.OrdinalIgnoreCase))
         {
-            return DiscordRankAuditResult.Skipped(player, "SkippedRecruit", "Recruit is treated as a transition rank and is not mapped to a Discord role.");
+            return DiscordRankAuditResult.Skipped(player, "SkippedRecruit", "Recruit is a retained legacy rank and is not mapped to a Discord role.");
         }
 
         if (!RankRules.IsKnownClanRank(normalizedRank))
@@ -10127,8 +10127,9 @@ Shows all currently ignored players in:
     private async Task HandleRankConditionsSlashCommandAsync(SocketSlashCommand command)
     {
         var sb = new StringBuilder();
-        sb.AppendLine("**Recruit**: Default when no listed requirement is met.");
-        foreach (var requirement in RankEvaluator.Requirements)
+        sb.AppendLine("**Brassican**: Default when no listed requirement is met.");
+        foreach (var requirement in RankEvaluator.Requirements.Where(x =>
+                     !string.Equals(x.Rank, "Brassican", StringComparison.OrdinalIgnoreCase)))
         {
             sb.AppendLine($"**{requirement.Rank}**: {FormatRankRequirement(requirement.Description)}");
         }

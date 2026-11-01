@@ -19,8 +19,8 @@ public class TrackerSyncServiceTests
         {
             Id = 217,
             Username = "Muzmatch",
-            CurrentRank = "Officer",
-            EligibleRank = "Officer",
+            CurrentRank = "Brassican",
+            EligibleRank = "Brassican",
             Status = PlayerStatus.ACTIVE,
             LastSeen = originalLastSeen
         };
@@ -29,7 +29,7 @@ public class TrackerSyncServiceTests
         {
             PlayerId = existingPlayer.Id,
             EventType = "WOM_RANK_MISMATCH_REQUIRED",
-            MetadataJson = "{\"Username\":\"Muzmatch\",\"ExpectedRank\":\"Officer\"}",
+            MetadataJson = "{\"Username\":\"Muzmatch\",\"ExpectedRank\":\"Brassican\"}",
             Status = "OPEN",
             CreatedAt = originalLastSeen
         });
@@ -64,8 +64,8 @@ public class TrackerSyncServiceTests
 
         var unchangedExisting = await db.Players.SingleAsync(x => x.Id == existingPlayer.Id);
         Assert.Equal(PlayerStatus.ACTIVE, unchangedExisting.Status);
-        Assert.Equal("Officer", unchangedExisting.CurrentRank);
-        Assert.Equal("Officer", unchangedExisting.EligibleRank);
+        Assert.Equal("Brassican", unchangedExisting.CurrentRank);
+        Assert.Equal("Brassican", unchangedExisting.EligibleRank);
         Assert.Equal(originalLastSeen, unchangedExisting.LastSeen);
         var unchangedReview = await db.LifecycleEvents.SingleAsync(x =>
             x.PlayerId == existingPlayer.Id && x.EventType == "WOM_RANK_MISMATCH_REQUIRED");
@@ -82,8 +82,8 @@ public class TrackerSyncServiceTests
         db.Players.Add(new Player
         {
             Username = "Zed",
-            CurrentRank = "Officer",
-            EligibleRank = "Officer",
+            CurrentRank = "Brassican",
+            EligibleRank = "Brassican",
             Status = PlayerStatus.ACTIVE,
             LastSeen = DateTimeOffset.UtcNow.AddHours(-1),
             LastSynced = DateTimeOffset.UtcNow.AddHours(-1)
@@ -95,7 +95,7 @@ public class TrackerSyncServiceTests
             new FakeTempleClient(["Zed", "Jay_Hood", " Aaron "]),
             new FakeWiseOldManClient(new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
-                ["Zed"] = "officer",
+                ["Zed"] = "brassican",
                 ["Jay Hood"] = "member",
                 ["Aaron"] = "member"
             }));
@@ -134,7 +134,7 @@ public class TrackerSyncServiceTests
         wom.Roles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
             ["Jay Hood"] = "member",
-            ["Muzmatch"] = "officer"
+            ["Muzmatch"] = "brassican"
         };
 
         var queue = await service.SyncRosterAndQueueAsync(CancellationToken.None);
@@ -182,8 +182,8 @@ public class TrackerSyncServiceTests
         var player = new Player
         {
             Username = "Wwarden",
-            CurrentRank = "Officer",
-            EligibleRank = "Officer",
+            CurrentRank = "Brassican",
+            EligibleRank = "Brassican",
             Status = PlayerStatus.MERGE_SUGGESTED,
             LastSeen = DateTimeOffset.UtcNow.AddMinutes(-10)
         };
@@ -235,8 +235,8 @@ public class TrackerSyncServiceTests
         var player = new Player
         {
             Username = "Wwarden",
-            CurrentRank = "Officer",
-            EligibleRank = "Officer",
+            CurrentRank = "Brassican",
+            EligibleRank = "Brassican",
             Status = PlayerStatus.ACTIVE,
             LastSeen = DateTimeOffset.UtcNow.AddMinutes(-10)
         };
@@ -278,8 +278,8 @@ public class TrackerSyncServiceTests
         var player = new Player
         {
             Username = "Wwarden",
-            CurrentRank = "Recruit",
-            EligibleRank = "Recruit",
+            CurrentRank = "Brassican",
+            EligibleRank = "Brassican",
             Status = PlayerStatus.ACTIVE,
             LastSeen = DateTimeOffset.UtcNow
         };
@@ -306,8 +306,8 @@ public class TrackerSyncServiceTests
         var player = new Player
         {
             Username = "Gynofobi",
-            CurrentRank = "Recruit",
-            EligibleRank = "Recruit",
+            CurrentRank = "Brassican",
+            EligibleRank = "Brassican",
             Status = PlayerStatus.ACTIVE,
             LastSeen = DateTimeOffset.UtcNow
         };
@@ -316,17 +316,17 @@ public class TrackerSyncServiceTests
 
         var service = new TrackerSyncService(
             db,
-            new FakeTempleClient([], new PlayerStatsDto(2100, 0, 0, 0)),
+            new FakeTempleClient([], new PlayerStatsDto(2200, 0, 0, 0)),
             new FakeWiseOldManClient(new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
-                ["Gynofobi"] = "Officer"
+                ["Gynofobi"] = "Commander"
             }));
 
         await service.ProcessPlayerAsync(player.Id, CancellationToken.None);
 
         var candidate = await db.PromotionCandidates.SingleAsync();
         Assert.Equal(PromotionCandidateType.wom_already_at_new_rank, candidate.CandidateType);
-        Assert.Equal("Officer", candidate.WomRoleAtEvaluation);
+        Assert.Equal("Commander", candidate.WomRoleAtEvaluation);
     }
 
     [Fact]
@@ -336,8 +336,8 @@ public class TrackerSyncServiceTests
         var player = new Player
         {
             Username = "Gynofobi",
-            CurrentRank = "Officer",
-            EligibleRank = "Officer",
+            CurrentRank = "Brassican",
+            EligibleRank = "Brassican",
             Status = PlayerStatus.ACTIVE,
             LastSeen = DateTimeOffset.UtcNow.AddMinutes(-10)
         };
@@ -360,22 +360,83 @@ public class TrackerSyncServiceTests
     }
 
     [Fact]
+    public async Task SyncRosterAndQueueAsync_keeps_legacy_recruit_protected_from_member_mismatch()
+    {
+        await using var db = CreateDbContext();
+        var player = new Player
+        {
+            Username = "LegacyRecruit",
+            CurrentRank = "Recruit",
+            EligibleRank = "Brassican",
+            Status = PlayerStatus.ACTIVE,
+            LastSeen = DateTimeOffset.UtcNow.AddMinutes(-10)
+        };
+        db.Players.Add(player);
+        await db.SaveChangesAsync();
+
+        var service = new TrackerSyncService(
+            db,
+            new FakeTempleClient(["LegacyRecruit"]),
+            new FakeWiseOldManClient(new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["LegacyRecruit"] = "Member"
+            }));
+
+        await service.SyncRosterAndQueueAsync(CancellationToken.None);
+
+        Assert.DoesNotContain(
+            await db.LifecycleEvents.ToListAsync(),
+            x => x.EventType == "WOM_RANK_MISMATCH_REQUIRED" && x.Status == "OPEN");
+    }
+
+    [Fact]
+    public async Task ProcessPlayerAsync_keeps_current_colonel_when_sync_eligibility_is_general()
+    {
+        await using var db = CreateDbContext();
+        var player = new Player
+        {
+            Username = "ColonelMember",
+            CurrentRank = "Colonel",
+            EligibleRank = "General",
+            Status = PlayerStatus.ACTIVE,
+            LastSeen = DateTimeOffset.UtcNow
+        };
+        db.Players.Add(player);
+        await db.SaveChangesAsync();
+
+        var service = new TrackerSyncService(
+            db,
+            new FakeTempleClient([], new PlayerStatsDto(0, 1250, 0, 0), 0),
+            new FakeWiseOldManClient(new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["ColonelMember"] = "Colonel"
+            }));
+
+        await service.ProcessPlayerAsync(player.Id, CancellationToken.None);
+
+        var persisted = await db.Players.SingleAsync();
+        Assert.Equal("Colonel", persisted.CurrentRank);
+        Assert.Equal("General", persisted.EligibleRank);
+        Assert.Empty(await db.PromotionCandidates.ToListAsync());
+    }
+
+    [Fact]
     public async Task ProcessPlayerAsync_rechecks_active_player_rename_and_creates_merge_suggestion()
     {
         await using var db = CreateDbContext();
         var previousPlayer = new Player
         {
             Username = "Iron A3x",
-            CurrentRank = "Officer",
-            EligibleRank = "Officer",
+            CurrentRank = "Brassican",
+            EligibleRank = "Brassican",
             Status = PlayerStatus.MISSING_PENDING_REVIEW,
             LastSeen = DateTimeOffset.UtcNow.AddHours(-1)
         };
         var currentPlayer = new Player
         {
             Username = "Gynofobi",
-            CurrentRank = "Officer",
-            EligibleRank = "Officer",
+            CurrentRank = "Brassican",
+            EligibleRank = "Brassican",
             Status = PlayerStatus.ACTIVE,
             LastSeen = DateTimeOffset.UtcNow
         };

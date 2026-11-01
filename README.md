@@ -87,6 +87,8 @@ The repo includes Pi deployment assets:
 - `deploy/nginx/swedesclantracker.conf`
 - `deploy/env/*.example`
 
+The current rank policy is documented in [`docs/RANK_POLICY.md`](docs/RANK_POLICY.md).
+
 ### Runbook By Intent (Windows-Only, No Linux Commands Needed)
 You can run these scripts directly by right-clicking the `.ps1` file and choosing **Run with PowerShell**.
 Approve UAC prompts for scripts that stop/start Windows services.

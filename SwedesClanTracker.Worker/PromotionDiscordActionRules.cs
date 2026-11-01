@@ -21,6 +21,7 @@ public static class PromotionDiscordActionRules
     {
         var normalizedOldRank = RankRules.NormalizeRankName(oldRank);
         var normalizedNewRank = RankRules.NormalizeRankName(newRank);
+        var isLegacyRecruit = string.Equals(normalizedOldRank, "Recruit", StringComparison.OrdinalIgnoreCase);
         var existingRanks = existingRankNames
             .Where(RankRules.IsKnownClanRank)
             .Select(RankRules.NormalizeRankName)
@@ -33,7 +34,11 @@ public static class PromotionDiscordActionRules
                 $"`{normalizedNewRank}` is not a configured assignable clan rank.");
         }
 
-        if (!RankRules.IsKnownClanRank(normalizedOldRank))
+        // Recruit is no longer an assignable clan rank. Keep this narrow
+        // compatibility path for stale pre-transition promotion candidates;
+        // external WOM Recruit roles remain special and are never treated as
+        // an ordinary rank role by this method.
+        if (!RankRules.IsKnownClanRank(normalizedOldRank) && !isLegacyRecruit)
         {
             return DiscordPromotionRankRoleDecision.Reject(
                 $"The promotion's previous rank `{normalizedOldRank}` is not a recognized clan rank.");
@@ -48,15 +53,15 @@ public static class PromotionDiscordActionRules
                 "The Discord member already has the requested rank role.");
         }
 
-        if (string.Equals(normalizedOldRank, "Recruit", StringComparison.OrdinalIgnoreCase))
+        if (isLegacyRecruit)
         {
             return existingRanks.Count == 0
                 ? new DiscordPromotionRankRoleDecision(
                     DiscordPromotionRankRoleAction.Add,
                     existingRanks,
-                    "No configured rank role was present, so the new rank role can be added.")
+                    "Legacy Recruit had no configured rank role, so the new rank role can be added.")
                 : DiscordPromotionRankRoleDecision.Reject(
-                    $"Expected no configured rank role for Recruit, but found {FormatRanks(existingRanks)}.");
+                    $"Expected no configured rank role for legacy Recruit, but found {FormatRanks(existingRanks)}.");
         }
 
         if (existingRanks.Count == 1 &&
