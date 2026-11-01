@@ -1,4 +1,4 @@
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
 param(
     [ValidateSet("temporary", "real")]
     [string]$ProfileName = "temporary",
@@ -8,7 +8,8 @@ param(
     [string]$KeyPath = $(if ($env:PI_SSH_KEY_PATH) { $env:PI_SSH_KEY_PATH } else { $codexKey = Join-Path $HOME ".codex\keys\swedesclantracker-pi\.codex_pi_ed25519"; if (Test-Path -LiteralPath $codexKey) { $codexKey } else { Join-Path $HOME ".ssh\id_ed25519" } }),
     [string]$KnownHostsPath = $(if ($env:PI_SSH_KNOWN_HOSTS_PATH) { $env:PI_SSH_KNOWN_HOSTS_PATH } else { $codexKnownHosts = Join-Path $HOME ".codex\keys\swedesclantracker-pi\.codex_known_hosts"; if (Test-Path -LiteralPath $codexKnownHosts) { $codexKnownHosts } else { Join-Path $HOME ".ssh\known_hosts" } }),
     [string]$DiscordToken = $env:DISCORD_BOT_TOKEN,
-    [switch]$NoPause
+    [switch]$NoPause,
+    [switch]$NoRestart
 )
 
 $ErrorActionPreference = "Stop"
@@ -40,16 +41,29 @@ try {
         throw "Missing script: $setScript"
     }
 
-    $args = @(
-        "-HostOrIp", $HostOrIp,
-        "-User", $User,
-        "-KeyPath", $KeyPath,
-        "-KnownHostsPath", $KnownHostsPath,
-        "-DiscordAdminRoleId", [string]$profile.AdminRoleId,
-        "-DiscordGuildId", [string]$profile.GuildId,
-        "-DiscordChannelId", [string]$profile.ChannelId,
-        "-DiscordPetHiscoresChannelId", [string]$profile.PetHiscoresChannelId
-    )
+    $target = "/etc/swedesclantracker/worker.env on $User@$HostOrIp"
+    $changeDescription = if ($NoRestart) { "Apply Discord profile '$ProfileName' without restarting worker" } else { "Apply Discord profile '$ProfileName' and restart worker" }
+    if (-not $PSCmdlet.ShouldProcess($target, $changeDescription)) {
+        Write-Host "OK: Discord profile switch canceled"
+        Write-Host "Details: No changes made."
+        Write-Host "Next: Run again and confirm to apply the selected profile."
+        if (-not $NoPause) {
+            Read-Host "Done. Press Enter to close"
+        }
+        exit 0
+    }
+
+    $setParameters = @{
+        Confirm = $false
+        HostOrIp = $HostOrIp
+        User = $User
+        KeyPath = $KeyPath
+        KnownHostsPath = $KnownHostsPath
+        DiscordAdminRoleId = [string]$profile.AdminRoleId
+        DiscordGuildId = [string]$profile.GuildId
+        DiscordChannelId = [string]$profile.ChannelId
+        DiscordPetHiscoresChannelId = [string]$profile.PetHiscoresChannelId
+    }
     if ($profile.PSObject.Properties.Name -contains "RankRoleIds") {
         $rankRoleEntries = @()
         if ($null -ne $profile.RankRoleIds) {
@@ -60,18 +74,19 @@ try {
             }
         }
         if ($rankRoleEntries.Count -gt 0) {
-            $args += @("-DiscordRankRoleIds", $rankRoleEntries)
+            $setParameters.DiscordRankRoleIds = [string[]]$rankRoleEntries
         }
         else {
-            $args += "-ClearDiscordRankRoleIds"
+            $setParameters.ClearDiscordRankRoleIds = $true
         }
     }
     if (-not [string]::IsNullOrWhiteSpace($DiscordToken)) {
-        $args += @("-DiscordToken", $DiscordToken)
+        $setParameters.DiscordToken = $DiscordToken
     }
-    if ($NoPause) { $args += "-NoPause" }
+    if ($NoPause) { $setParameters.NoPause = $true }
+    if ($NoRestart) { $setParameters.NoRestart = $true }
 
-    & $setScript @args
+    & $setScript @setParameters
     exit $LASTEXITCODE
 }
 catch {

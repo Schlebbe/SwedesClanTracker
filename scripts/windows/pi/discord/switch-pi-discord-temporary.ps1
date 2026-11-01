@@ -1,6 +1,7 @@
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
 param(
-    [switch]$NoPause
+    [switch]$NoPause,
+    [switch]$NoRestart
 )
 
 $ErrorActionPreference = "Stop"
@@ -11,10 +12,22 @@ try {
         throw "Missing required script: $scriptPath"
     }
 
-    $scriptArgs = @("-ProfileName", "temporary")
-    if ($NoPause) { $scriptArgs += "-NoPause" }
+    $target = "Discord profile 'temporary'"
+    $changeDescription = if ($NoRestart) { "Apply temporary Discord profile without restarting worker" } else { "Apply temporary Discord profile and restart worker" }
+    if (-not $PSCmdlet.ShouldProcess($target, $changeDescription)) {
+        Write-Host "OK: Switch to temporary Discord profile canceled"
+        Write-Host "Details: No changes made."
+        if (-not $NoPause) {
+            Read-Host "Done. Press Enter to close"
+        }
+        exit 0
+    }
 
-    & $scriptPath @scriptArgs
+    $scriptParameters = @{ ProfileName = "temporary"; Confirm = $false }
+    if ($NoPause) { $scriptParameters.NoPause = $true }
+    if ($NoRestart) { $scriptParameters.NoRestart = $true }
+
+    & $scriptPath @scriptParameters
     exit $LASTEXITCODE
 }
 catch {

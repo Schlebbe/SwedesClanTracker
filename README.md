@@ -89,6 +89,19 @@ The repo includes Pi deployment assets:
 
 The current rank policy is documented in [`docs/RANK_POLICY.md`](docs/RANK_POLICY.md).
 
+Normal Pi deployments still publish the full stack, restart the services, and
+run health verification. Optional `-BackendOnly` skips frontend work;
+`-NoRestart` requires API and Worker to be stopped and leaves them stopped.
+Discord profile/configuration helpers still restart Worker by default;
+their optional `-NoRestart` stages configuration without changing its running
+state. Use `-WhatIf` to preview either workflow without remote side effects.
+
+Run the isolated deployment/profile regressions without accessing a Pi:
+
+```powershell
+pwsh -NoProfile -File scripts/windows/pi/tests/deployment-and-discord-regression.ps1
+```
+
 ### Runbook By Intent (Windows-Only, No Linux Commands Needed)
 You can run these scripts directly by right-clicking the `.ps1` file and choosing **Run with PowerShell**.
 Approve UAC prompts for scripts that stop/start Windows services.

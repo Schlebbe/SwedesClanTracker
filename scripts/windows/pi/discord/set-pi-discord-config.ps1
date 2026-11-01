@@ -11,7 +11,8 @@ param(
     [string]$DiscordPetHiscoresChannelId,
     [string[]]$DiscordRankRoleIds = @(),
     [switch]$ClearDiscordRankRoleIds,
-    [switch]$NoPause
+    [switch]$NoPause,
+    [switch]$NoRestart
 )
 
 $ErrorActionPreference = "Stop"
@@ -56,7 +57,8 @@ try {
     $KnownHostsPath = Resolve-PathWithPrompt -PathValue $KnownHostsPath -PromptLabel "SSH known_hosts path"
 
     $target = "/etc/swedesclantracker/worker.env on $User@$HostOrIp"
-    if (-not $PSCmdlet.ShouldProcess($target, "Update DiscordBot configuration and restart worker")) {
+    $changeDescription = if ($NoRestart) { "Update DiscordBot configuration without restarting worker" } else { "Update DiscordBot configuration and restart worker" }
+    if (-not $PSCmdlet.ShouldProcess($target, $changeDescription)) {
         Write-OpResult -Success $true -Step "Discord config update canceled" -Details "No changes made." -NextStep "Run again and confirm to apply new Discord values."
         Pause-IfRequested -NoPause:$NoPause
         exit 0
@@ -176,18 +178,31 @@ try {
             throw "Failed to upload updated worker.env to Pi staging path."
         }
 
-        $applyCommand = @"
+        $applyCommand = if ($NoRestart) {
+            @"
+set -e
+sudo -n install -m 0600 '$remoteTemp' /etc/swedesclantracker/worker.env
+sudo -n rm -f '$remoteTemp'
+"@
+        }
+        else {
+            @"
+set -e
 sudo -n systemctl stop swedesclantracker-worker
 sudo -n install -m 0600 '$remoteTemp' /etc/swedesclantracker/worker.env
 sudo -n rm -f '$remoteTemp'
 sudo -n systemctl start swedesclantracker-worker
 sudo -n systemctl is-active swedesclantracker-worker
 "@
+        }
         $applyResult = Invoke-Ssh -HostOrIp $HostOrIp -User $User -KeyPath $KeyPath -KnownHostsPath $KnownHostsPath -RemoteCommand $applyCommand
         if ($applyResult.Output) {
             $applyResult.Output | Out-Host
         }
         if ($applyResult.ExitCode -ne 0) {
+            if ($NoRestart) {
+                throw "Failed to apply new worker.env without restarting worker service."
+            }
             throw "Failed to apply new worker.env and restart worker service."
         }
     }
@@ -197,7 +212,8 @@ sudo -n systemctl is-active swedesclantracker-worker
 
     $rankRoleDetails = if ($hasRequestedRankRoleIds) { ", RankRoleIds=$($requestedRankRoleIds.Count)" } else { "" }
     $sanitized = "GuildId=$DiscordGuildId, ChannelId=$DiscordChannelId, PetHiscoresChannelId=$DiscordPetHiscoresChannelId, AdminRoleId=$DiscordAdminRoleId$rankRoleDetails"
-    Write-OpResult -Success $true -Step "Discord configuration updated" -Details $sanitized -NextStep "Run verify-pi-stack.ps1 to confirm the Pi stack is healthy."
+    $nextStep = if ($NoRestart) { "Worker was not restarted. Verify the staged configuration, then restart it deliberately when ready." } else { "Run verify-pi-stack.ps1 to confirm the Pi stack is healthy." }
+    Write-OpResult -Success $true -Step "Discord configuration updated" -Details $sanitized -NextStep $nextStep
     Pause-IfRequested -NoPause:$NoPause
 }
 catch {

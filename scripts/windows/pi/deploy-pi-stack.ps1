@@ -9,7 +9,9 @@ param(
     [string]$RepoRoot = "",
     [switch]$SkipPublish,
     [switch]$SkipVerify,
-    [switch]$NoPause
+    [switch]$NoPause,
+    [switch]$NoRestart,
+    [switch]$BackendOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -38,6 +40,31 @@ function Invoke-CheckedCommand {
     }
 }
 
+function Assert-DeploymentOutputPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$OutputRoot,
+        [Parameter(Mandatory = $true)][string]$CandidatePath
+    )
+
+    $resolvedRoot = [IO.Path]::GetFullPath($OutputRoot).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $resolvedCandidate = [IO.Path]::GetFullPath($CandidatePath)
+    $rootPrefix = $resolvedRoot + [IO.Path]::DirectorySeparatorChar
+    if ([string]::Equals($resolvedCandidate, $resolvedRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        -not $resolvedCandidate.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to remove deployment output outside outputRoot: $resolvedCandidate"
+    }
+}
+
+function New-Base64RemoteCommand {
+    param(
+        [Parameter(Mandatory = $true)][string]$Script
+    )
+
+    $normalizedScript = $Script.Replace("`r`n", "`n").Replace("`r", "`n")
+    $payload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($normalizedScript))
+    return "printf '%s' '$payload' | base64 -d | bash"
+}
+
 try {
     if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
         $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
@@ -64,25 +91,35 @@ try {
         $workerOut = Join-Path $outputRoot "worker"
         $frontendOut = Join-Path $outputRoot "frontend"
 
-        if (Test-Path -LiteralPath $apiOut) { Remove-Item -LiteralPath $apiOut -Recurse -Force }
-        if (Test-Path -LiteralPath $workerOut) { Remove-Item -LiteralPath $workerOut -Recurse -Force }
-        if (Test-Path -LiteralPath $frontendOut) { Remove-Item -LiteralPath $frontendOut -Recurse -Force }
+        $publishOutputs = @($apiOut, $workerOut)
+        if (-not $BackendOnly) {
+            $publishOutputs += $frontendOut
+        }
+        foreach ($publishOutput in $publishOutputs) {
+            Assert-DeploymentOutputPath -OutputRoot $outputRoot -CandidatePath $publishOutput
+            if (Test-Path -LiteralPath $publishOutput) {
+                Remove-Item -LiteralPath $publishOutput -Recurse -Force
+            }
+        }
 
-        New-Item -ItemType Directory -Force -Path $apiOut, $workerOut, $frontendOut | Out-Null
+        New-Item -ItemType Directory -Force -Path $publishOutputs | Out-Null
 
         Invoke-CheckedCommand -FilePath "dotnet" -Arguments @("publish", $apiProject, "--configuration", $Configuration, "--runtime", $Runtime, "--self-contained", "false", "--output", $apiOut)
         Invoke-CheckedCommand -FilePath "dotnet" -Arguments @("publish", $workerProject, "--configuration", $Configuration, "--runtime", $Runtime, "--self-contained", "false", "--output", $workerOut)
 
-        if (Test-Path -LiteralPath (Join-Path $frontendDir "package-lock.json")) {
-            Invoke-CheckedCommand -FilePath "npm" -Arguments @("ci") -WorkingDirectory $frontendDir
-        }
-        else {
-            Invoke-CheckedCommand -FilePath "npm" -Arguments @("install") -WorkingDirectory $frontendDir
-        }
-        Invoke-CheckedCommand -FilePath "npm" -Arguments @("run", "build") -WorkingDirectory $frontendDir
+        if (-not $BackendOnly) {
+            if (Test-Path -LiteralPath (Join-Path $frontendDir "package-lock.json")) {
+                Invoke-CheckedCommand -FilePath "npm" -Arguments @("ci") -WorkingDirectory $frontendDir
+            }
+            else {
+                Invoke-CheckedCommand -FilePath "npm" -Arguments @("install") -WorkingDirectory $frontendDir
+            }
+            Invoke-CheckedCommand -FilePath "npm" -Arguments @("run", "build") -WorkingDirectory $frontendDir
 
-        Copy-Item -Path (Join-Path $frontendDir "dist\*") -Destination $frontendOut -Recurse -Force
-        Write-OpResult -Success $true -Step "Local publish complete" -Details "Artifacts prepared in $outputRoot"
+            Copy-Item -Path (Join-Path $frontendDir "dist\*") -Destination $frontendOut -Recurse -Force
+        }
+        $publishDetails = if ($BackendOnly) { "API and Worker artifacts prepared in $outputRoot; frontend was left untouched." } else { "API, Worker, and frontend artifacts prepared in $outputRoot." }
+        Write-OpResult -Success $true -Step "Local publish complete" -Details $publishDetails
     }
     else {
         Write-OpResult -Success $true -Step "Local publish skipped" -Details "Using existing artifacts in $outputRoot"
@@ -91,9 +128,39 @@ try {
     $apiDir = Join-Path $outputRoot "api"
     $workerDir = Join-Path $outputRoot "worker"
     $frontendDirOut = Join-Path $outputRoot "frontend"
-    foreach ($path in @($apiDir, $workerDir, $frontendDirOut)) {
+    $artifactDirectories = @($apiDir, $workerDir)
+    if (-not $BackendOnly) {
+        $artifactDirectories += $frontendDirOut
+    }
+    foreach ($path in $artifactDirectories) {
         if (-not (Test-Path -LiteralPath $path)) {
             throw "Missing deployment artifact directory: $path"
+        }
+    }
+
+    $stoppedCheckFunction = @'
+check_services_stopped() {
+    for service in swedesclantracker-api swedesclantracker-worker; do
+        state="$(sudo -n systemctl show "$service" --property=ActiveState --value)" || {
+            echo "Unable to inspect $service" >&2
+            return 1
+        }
+        echo "$service: $state"
+        if [ "$state" != "inactive" ]; then
+            echo "$service must be inactive during a no-restart deployment (observed: $state)" >&2
+            return 1
+        fi
+    done
+}
+'@
+    if ($NoRestart) {
+        $stoppedCheckScript = "set -eu`n" + $stoppedCheckFunction.TrimEnd() + "`ncheck_services_stopped`n"
+        $stoppedBefore = Invoke-Ssh -HostOrIp $HostOrIp -User $User -KeyPath $KeyPath -KnownHostsPath $KnownHostsPath -RemoteCommand (New-Base64RemoteCommand -Script $stoppedCheckScript)
+        if ($stoppedBefore.Output) {
+            $stoppedBefore.Output | Out-Host
+        }
+        if ($stoppedBefore.ExitCode -ne 0) {
+            throw "NoRestart requires both API and Worker services to be inactive before installation."
         }
     }
 
@@ -106,22 +173,55 @@ try {
     if ($copyApi.ExitCode -ne 0) { throw "Failed to upload API artifacts." }
     $copyWorker = Invoke-ScpUpload -LocalPath $workerDir -RemotePath "/tmp/swedesclantracker-upload/" -HostOrIp $HostOrIp -User $User -KeyPath $KeyPath -KnownHostsPath $KnownHostsPath -Recurse
     if ($copyWorker.ExitCode -ne 0) { throw "Failed to upload worker artifacts." }
-    $copyFrontend = Invoke-ScpUpload -LocalPath $frontendDirOut -RemotePath "/tmp/swedesclantracker-upload/" -HostOrIp $HostOrIp -User $User -KeyPath $KeyPath -KnownHostsPath $KnownHostsPath -Recurse
-    if ($copyFrontend.ExitCode -ne 0) { throw "Failed to upload frontend artifacts." }
+    if (-not $BackendOnly) {
+        $copyFrontend = Invoke-ScpUpload -LocalPath $frontendDirOut -RemotePath "/tmp/swedesclantracker-upload/" -HostOrIp $HostOrIp -User $User -KeyPath $KeyPath -KnownHostsPath $KnownHostsPath -Recurse
+        if ($copyFrontend.ExitCode -ne 0) { throw "Failed to upload frontend artifacts." }
+    }
 
-    $deployCommand = @"
-sudo -n systemctl stop swedesclantracker-api swedesclantracker-worker || true
-sudo -n mkdir -p /opt/swedesclantracker/api /opt/swedesclantracker/worker /opt/swedesclantracker/frontend
-sudo -n rsync -a --delete /tmp/swedesclantracker-upload/api/ /opt/swedesclantracker/api/
-sudo -n rsync -a --delete /tmp/swedesclantracker-upload/worker/ /opt/swedesclantracker/worker/
-sudo -n rsync -a --delete /tmp/swedesclantracker-upload/frontend/ /opt/swedesclantracker/frontend/
-sudo -n chown -R swedestracker:swedestracker /opt/swedesclantracker
-sudo -n find /opt/swedesclantracker/frontend -type d -exec chmod 755 {} +
-sudo -n find /opt/swedesclantracker/frontend -type f -exec chmod 644 {} +
+    $installLines = @(
+        "sudo -n mkdir -p /opt/swedesclantracker/api /opt/swedesclantracker/worker",
+        "sudo -n rsync -a --delete /tmp/swedesclantracker-upload/api/ /opt/swedesclantracker/api/",
+        "sudo -n rsync -a --delete /tmp/swedesclantracker-upload/worker/ /opt/swedesclantracker/worker/"
+    )
+    if (-not $BackendOnly) {
+        $installLines += @(
+            "sudo -n mkdir -p /opt/swedesclantracker/frontend",
+            "sudo -n rsync -a --delete /tmp/swedesclantracker-upload/frontend/ /opt/swedesclantracker/frontend/"
+        )
+    }
+    $ownershipPath = if ($BackendOnly) {
+        "/opt/swedesclantracker/api /opt/swedesclantracker/worker"
+    }
+    else {
+        "/opt/swedesclantracker"
+    }
+    $installLines += "sudo -n chown -R swedestracker:swedestracker $ownershipPath"
+    if (-not $BackendOnly) {
+        $installLines += @(
+            "sudo -n find /opt/swedesclantracker/frontend -type d -exec chmod 755 {} +",
+            "sudo -n find /opt/swedesclantracker/frontend -type f -exec chmod 644 {} +"
+        )
+    }
+    $installCommand = $installLines -join "`n"
+
+    if ($NoRestart) {
+        $deployScript = "set -eu`n" +
+            $stoppedCheckFunction.TrimEnd() + "`n" +
+            "check_services_stopped`n" +
+            $installCommand + "`n" +
+            "check_services_stopped`n"
+        $deployCommand = New-Base64RemoteCommand -Script $deployScript
+    }
+    else {
+        $deployCommand = @"
+set -e
+sudo -n systemctl stop swedesclantracker-api swedesclantracker-worker
+$installCommand
 sudo -n systemctl start swedesclantracker-api swedesclantracker-worker
 sudo -n systemctl reload nginx
 sudo -n systemctl is-active swedesclantracker-api swedesclantracker-worker nginx
 "@
+    }
     $deployResult = Invoke-Ssh -HostOrIp $HostOrIp -User $User -KeyPath $KeyPath -KnownHostsPath $KnownHostsPath -RemoteCommand $deployCommand
     if ($deployResult.Output) {
         $deployResult.Output | Out-Host
@@ -130,9 +230,14 @@ sudo -n systemctl is-active swedesclantracker-api swedesclantracker-worker nginx
         throw "Pi deployment command failed."
     }
 
-    Write-OpResult -Success $true -Step "Pi deployment completed" -Details "Artifacts were deployed and services restarted." -NextStep "Run verification to confirm stack health."
+    if ($NoRestart) {
+        Write-OpResult -Success $true -Step "Pi deployment completed" -Details "Artifacts were installed while API and Worker remained stopped; no services were started or reloaded." -NextStep "Perform the manual cutover checks, then start services deliberately and run verification."
+    }
+    else {
+        Write-OpResult -Success $true -Step "Pi deployment completed" -Details "Artifacts were deployed and services restarted." -NextStep "Run verification to confirm stack health."
+    }
 
-    if (-not $SkipVerify) {
+    if (-not $NoRestart -and -not $SkipVerify) {
         $verifyScript = Join-Path $PSScriptRoot "verify-pi-stack.ps1"
         & $verifyScript -HostOrIp $HostOrIp -User $User -KeyPath $KeyPath -KnownHostsPath $KnownHostsPath -NoPause
         if ($LASTEXITCODE -ne 0) {
@@ -142,7 +247,12 @@ sudo -n systemctl is-active swedesclantracker-api swedesclantracker-worker nginx
         }
     }
 
-    Write-OpResult -Success $true -Step "Deploy workflow finished" -Details "Pi stack is deployed." -NextStep "Proceed with burn-in checks and Discord validation."
+    if ($NoRestart) {
+        Write-OpResult -Success $true -Step "Deploy workflow finished" -Details "Deployment finished with API and Worker paused; automatic health verification was skipped." -NextStep "Complete the reviewed cutover, then start services and run verify-pi-stack.ps1."
+    }
+    else {
+        Write-OpResult -Success $true -Step "Deploy workflow finished" -Details "Pi stack is deployed." -NextStep "Proceed with burn-in checks and Discord validation."
+    }
     Pause-IfRequested -NoPause:$NoPause
 }
 catch {
