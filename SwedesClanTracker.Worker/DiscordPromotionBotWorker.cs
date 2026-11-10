@@ -32,6 +32,7 @@ public class DiscordPromotionBotWorker(
         .Append(new WomRoleChoice("Imp", "imp"))
         .ToArray();
     private static readonly IReadOnlyList<string> DiscordRankNames = RankRules.AssignableClanRanks;
+    private const string RenameSearchOptionValue = "__rename_search__";
     private enum TrackedMessageState
     {
         Found,
@@ -46,6 +47,12 @@ public class DiscordPromotionBotWorker(
         Unknown
     }
     private sealed record TempleRosterLookupResult(bool Succeeded, HashSet<string> Usernames);
+    private sealed record RenameCandidateOption(
+        int Id,
+        string Username,
+        string CurrentRank,
+        PlayerStatus Status,
+        DateTimeOffset LastSeen);
 
     private static bool IsDiscordMessageMissingOrInaccessible(Discord.Net.HttpException ex)
     {
@@ -357,6 +364,12 @@ public class DiscordPromotionBotWorker(
             var womRole = c.WomRoleAtEvaluation;
             var discordGuess = await GuessDiscordMemberForPlayerAsync(db, c.PlayerId, c.PlayerName, ct);
             var exactDiscordMatch = PromotionDiscordActionRules.FindUniqueExactMatch(discordGuess);
+            var renameCandidates = await GetRenameCandidateOptionsAsync(
+                db,
+                c.PlayerId,
+                searchTerm: null,
+                maxOptions: 24,
+                ct);
 
             var embed = BuildPromotionEmbed(
                 c.PlayerName,
@@ -380,15 +393,13 @@ public class DiscordPromotionBotWorker(
                 CandidateType = candidateType.ToString(),
                 DiscordGuess = FormatDiscordGuessForFingerprint(discordGuess),
                 DiscordRankActionTargetUserId = exactDiscordMatch?.UserId,
+                RenameCandidates = renameCandidates.Select(x => new { x.Id, x.Username, x.CurrentRank, x.Status }).ToArray(),
                 Stats = BuildStatsSummary(c.Latest?.Ehb, c.Latest?.Ehp, c.Latest?.Collections, c.ManualPetOverride ?? c.StoredPetCount),
                 c.Reason,
                 LastSynced = FormatSwedishTime(c.LastSynced)
             });
 
-            var builder = new ComponentBuilder()
-                .WithButton("Approve", $"promo:approve:{c.Id}", ButtonStyle.Success)
-                .WithButton("Dismiss", $"promo:dismiss:{c.Id}", ButtonStyle.Danger)
-                .WithButton("Mark Rename Suspect", $"promo:rename:{c.Id}", ButtonStyle.Secondary);
+            var builder = BuildPromotionCandidateComponents(c.Id, renameCandidates);
 
             if (postedEvent is not null)
             {
@@ -463,7 +474,7 @@ public class DiscordPromotionBotWorker(
                     await liveDiscordMessage.ModifyAsync(props =>
                     {
                         props.Embed = embed;
-                        props.Components = builder.Build();
+                        props.Components = builder;
                     });
                     RecordMessagePatched(liveDiscordMessage.Id, renderFingerprint);
                     postedEvent.MetadataJson = BuildPromotionPostedMetadata(
@@ -484,7 +495,7 @@ public class DiscordPromotionBotWorker(
                 var stillPending = await db.PromotionCandidates.AnyAsync(x => x.Id == c.Id && x.Status == PromotionStatus.PENDING, ct);
                 if (!stillPending) continue;
 
-                var msg = await channel.SendMessageAsync(embed: embed, components: builder.Build());
+                var msg = await channel.SendMessageAsync(embed: embed, components: builder);
                 db.LifecycleEvents.Add(new LifecycleEvent
                 {
                     PlayerId = c.PlayerId,
@@ -862,6 +873,12 @@ public class DiscordPromotionBotWorker(
             return;
         }
 
+        if (string.Equals(action, "rename", StringComparison.OrdinalIgnoreCase))
+        {
+            await HandlePromotionRenameButtonAsync(component, candidateId);
+            return;
+        }
+
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
         var promotionApprovalService = scope.ServiceProvider.GetRequiredService<IPromotionApprovalService>();
@@ -968,20 +985,6 @@ public class DiscordPromotionBotWorker(
         else if (action == "dismiss")
         {
             candidate.Status = PromotionStatus.DISMISSED;
-        }
-        else if (action == "rename")
-        {
-            player.Status = PlayerStatus.MERGE_SUGGESTED;
-            await CloseOpenLifecycleEventsAsync(db, player.Id, "NEW_PLAYER", "DISCORD_MARK_RENAME_SUSPECT");
-            await EnsureOpenMergeSuggestedEventAsync(db, player.Id, player.Username, component.User.Username);
-            db.LifecycleEvents.Add(new LifecycleEvent
-            {
-                PlayerId = player.Id,
-                EventType = "DISCORD_MARK_RENAME_SUSPECT",
-                MetadataJson = JsonUtil.Serialize(new { CandidateId = candidate.Id, User = component.User.Username, HandledBy = component.User.Username, HandledByDiscordUserId = component.User.Id }),
-                Status = "DONE",
-                CreatedAt = DateTimeOffset.UtcNow
-            });
         }
         else
         {
@@ -1561,6 +1564,101 @@ public class DiscordPromotionBotWorker(
         }
 
         return new PromotionDiscordRankRoleUpdateResult(true, false, decision.Details, removedRoles);
+    }
+
+    private static MessageComponent BuildPromotionCandidateComponents(
+        int candidateId,
+        IReadOnlyList<RenameCandidateOption> renameCandidates)
+    {
+        var builder = new ComponentBuilder()
+            .WithButton("Approve", $"promo:approve:{candidateId}", ButtonStyle.Success)
+            .WithButton("Dismiss", $"promo:dismiss:{candidateId}", ButtonStyle.Danger);
+
+        if (renameCandidates.Count == 0)
+        {
+            return builder.Build();
+        }
+
+        var menu = BuildRenameCandidateSelectMenu(
+            candidateId,
+            renameCandidates,
+            "Mark rename suspect: select previous player");
+        return builder.WithSelectMenu(menu).Build();
+    }
+
+    private static MessageComponent BuildInlineMergeReviewComponents(int playerId) =>
+        new ComponentBuilder()
+            .WithButton("Confirm rename", $"merge:confirm:{playerId}", ButtonStyle.Success)
+            .WithButton("Choose other candidate", $"merge:choose:{playerId}", ButtonStyle.Primary)
+            .WithButton("Manual previous name", $"merge:manual:{playerId}", ButtonStyle.Secondary)
+            .WithButton("Abort rename", $"merge:abort:{playerId}", ButtonStyle.Danger)
+            .Build();
+
+    private static MessageComponent BuildInlineMergeReviewComponents(
+        int playerId,
+        int candidateId,
+        IReadOnlyList<RenameCandidateOption> renameCandidates)
+    {
+        var builder = new ComponentBuilder()
+            .WithButton("Confirm rename", $"merge:confirm:{playerId}", ButtonStyle.Success)
+            .WithButton("Abort rename", $"merge:abort:{playerId}", ButtonStyle.Danger);
+        if (renameCandidates.Count == 0)
+        {
+            return builder.Build();
+        }
+
+        return builder
+            .WithSelectMenu(BuildRenameCandidateSelectMenu(candidateId, renameCandidates, "Change previous player"))
+            .Build();
+    }
+
+    private static SelectMenuBuilder BuildRenameCandidateSelectMenu(
+        int candidateId,
+        IReadOnlyList<RenameCandidateOption> renameCandidates,
+        string placeholder)
+    {
+        var menu = new SelectMenuBuilder()
+            .WithCustomId($"promo:rename-select:{candidateId}")
+            .WithPlaceholder(placeholder)
+            .WithMinValues(1)
+            .WithMaxValues(1);
+        foreach (var candidate in renameCandidates.Take(24))
+        {
+            var label = ShortenHistoryText($"{candidate.Username} ({candidate.CurrentRank})", 100);
+            var description = candidate.Status == PlayerStatus.REMOVED_CONFIRMED
+                ? "Removed tracker record"
+                : "Missing from current roster";
+            menu.AddOption(
+                label,
+                candidate.Id.ToString(CultureInfo.InvariantCulture),
+                description);
+        }
+
+        menu.AddOption(
+            "Search previous players...",
+            RenameSearchOptionValue,
+            "Search by part of the previous username; results stay on this card.");
+        return menu;
+    }
+
+    private static Embed BuildPromotionRenameReviewEmbed(
+        string newPlayer,
+        string previousPlayer,
+        string currentRank,
+        string eligibleRank,
+        string handledBy)
+    {
+        return new EmbedBuilder()
+            .WithTitle("Possible Rename Review")
+            .WithColor(new Color(234, 179, 8))
+            .WithDescription("A previous player was selected from the promotion card. Confirm the rename to transfer the historical timeline safely.")
+            .AddField("New Player", newPlayer, true)
+            .AddField("Suggested Previous", previousPlayer, true)
+            .AddField("Current Rank", currentRank, true)
+            .AddField("Eligible Rank", eligibleRank, true)
+            .WithFooter($"Previous player selected by {handledBy}")
+            .WithTimestamp(DateTimeOffset.Now)
+            .Build();
     }
 
     private static MessageComponent BuildPromotionDiscordRankActionComponents(int candidateId, string newRank) =>
@@ -2229,8 +2327,28 @@ public class DiscordPromotionBotWorker(
     {
         try
         {
-            if (!component.HasResponded) await component.DeferAsync(ephemeral: true);
             var customId = component.Data.CustomId ?? "";
+            if (customId.StartsWith("promo:rename-select:", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!HasDiscordAdminRole(component.User))
+                {
+                    await DenyComponentAsync(component);
+                    return;
+                }
+
+                var renameSelection = component.Data.Values.FirstOrDefault();
+                if (string.Equals(renameSelection, RenameSearchOptionValue, StringComparison.Ordinal))
+                {
+                    await HandlePromotionRenameSearchSelectAsync(component, customId);
+                    return;
+                }
+
+                if (!component.HasResponded) await component.DeferAsync(ephemeral: true);
+                await HandlePromotionRenameSelectAsync(component, customId);
+                return;
+            }
+
+            if (!component.HasResponded) await component.DeferAsync(ephemeral: true);
             if (customId.StartsWith("promo:discord-user:", StringComparison.OrdinalIgnoreCase))
             {
                 if (!HasDiscordAdminRole(component.User))
@@ -2308,6 +2426,18 @@ public class DiscordPromotionBotWorker(
         try
         {
             if (!modal.HasResponded) await modal.DeferAsync(ephemeral: true);
+            if (modal.Data.CustomId.StartsWith("promo:rename-search:", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!HasDiscordAdminRole(modal.User))
+                {
+                    await RespondModalAsync(modal, "You need the admin role for this action.", true);
+                    return;
+                }
+
+                await HandlePromotionRenameSearchModalAsync(modal, modal.Data.CustomId);
+                return;
+            }
+
             if (!modal.Data.CustomId.StartsWith("mergemanual:", StringComparison.OrdinalIgnoreCase)) return;
             if (!HasDiscordAdminRole(modal.User))
             {
@@ -2327,6 +2457,309 @@ public class DiscordPromotionBotWorker(
         {
             logger.LogError(ex, "Failed handling merge modal.");
         }
+    }
+
+    private async Task HandlePromotionRenameButtonAsync(SocketMessageComponent component, int candidateId)
+    {
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        var candidate = await db.PromotionCandidates
+            .Where(x => x.Id == candidateId)
+            .Select(x => new { x.Id, x.PlayerId, x.Status, PlayerStatus = x.Player.Status })
+            .FirstOrDefaultAsync();
+        if (candidate is null)
+        {
+            await RespondToComponentAsync(component, "Promotion candidate not found.", ephemeral: true);
+            return;
+        }
+
+        if (candidate.Status != PromotionStatus.PENDING)
+        {
+            await RespondToComponentAsync(component, $"This promotion was already handled ({candidate.Status}).", ephemeral: true);
+            return;
+        }
+
+        var options = await GetRenameCandidateOptionsAsync(
+            db,
+            candidate.PlayerId,
+            searchTerm: null,
+            maxOptions: 24,
+            CancellationToken.None);
+        if (options.Count == 0)
+        {
+            await RespondToComponentAsync(component, "No missing previous players are available for rename review.", ephemeral: true);
+            return;
+        }
+
+        await component.Message.ModifyAsync(props =>
+        {
+            props.Components = BuildPromotionCandidateComponents(candidateId, options);
+        });
+        await RespondToComponentAsync(component, "Select the previous player directly on this promotion card.", ephemeral: true);
+    }
+
+    private async Task HandlePromotionRenameSearchSelectAsync(SocketMessageComponent component, string customId)
+    {
+        var parts = customId.Split(':');
+        if (parts.Length != 3 || !int.TryParse(parts[2], out var candidateId))
+        {
+            await component.RespondAsync("Malformed rename search request.", ephemeral: true);
+            return;
+        }
+
+        var modal = new ModalBuilder()
+            .WithTitle("Search Previous Players")
+            .WithCustomId($"promo:rename-search:{candidateId}:{component.Message.Id}")
+            .AddTextInput(
+                "Player name contains",
+                "query",
+                TextInputStyle.Short,
+                placeholder: "e.g. G I R L Y",
+                maxLength: 64,
+                required: false);
+        await component.RespondWithModalAsync(modal.Build());
+    }
+
+    private async Task HandlePromotionRenameSearchModalAsync(SocketModal modal, string customId)
+    {
+        var parts = customId.Split(':');
+        if (parts.Length != 4 ||
+            !int.TryParse(parts[2], out var candidateId) ||
+            !ulong.TryParse(parts[3], out var messageId))
+        {
+            await RespondModalAsync(modal, "Malformed rename search request.", true);
+            return;
+        }
+
+        var searchTerm = modal.Data.Components
+            .FirstOrDefault(x => string.Equals(x.CustomId, "query", StringComparison.OrdinalIgnoreCase))
+            ?.Value?
+            .Trim();
+
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        var candidate = await db.PromotionCandidates
+            .Where(x => x.Id == candidateId)
+            .Select(x => new { x.Id, x.PlayerId, x.Status, PlayerStatus = x.Player.Status })
+            .FirstOrDefaultAsync();
+        if (candidate is null)
+        {
+            await RespondModalAsync(modal, "Promotion candidate not found.", true);
+            return;
+        }
+
+        if (candidate.Status != PromotionStatus.PENDING)
+        {
+            await RespondModalAsync(modal, $"This promotion was already handled ({candidate.Status}).", true);
+            return;
+        }
+
+        var options = await GetRenameCandidateOptionsAsync(
+            db,
+            candidate.PlayerId,
+            searchTerm,
+            maxOptions: 24,
+            CancellationToken.None);
+        if (options.Count == 0)
+        {
+            await RespondModalAsync(modal, "No previous players matched that search.", true);
+            return;
+        }
+
+        var postedEvents = await db.LifecycleEvents
+            .Where(x => x.EventType == "PROMOTION_DISCORD_POSTED")
+            .OrderByDescending(x => x.CreatedAt)
+            .ToListAsync();
+        var postedEvent = postedEvents.FirstOrDefault(x =>
+            MetadataIntEquals(x.MetadataJson, "CandidateId", candidateId) &&
+            ExtractUlong(x.MetadataJson, "DiscordMessageId") == messageId);
+        var channelId = postedEvent is null ? null : ExtractUlong(postedEvent.MetadataJson, "ChannelId");
+        if (!channelId.HasValue)
+        {
+            await RespondModalAsync(modal, "The promotion card could not be located.", true);
+            return;
+        }
+
+        var channel = await ResolveMessageChannelAsync(channelId.Value);
+        var message = channel is null ? null : await channel.GetMessageAsync(messageId);
+        if (message is not IUserMessage userMessage)
+        {
+            await RespondModalAsync(modal, "The promotion card is no longer available.", true);
+            return;
+        }
+
+        await userMessage.ModifyAsync(props =>
+        {
+            props.Components = candidate.PlayerStatus == PlayerStatus.MERGE_SUGGESTED
+                ? BuildInlineMergeReviewComponents(candidate.PlayerId, candidate.Id, options)
+                : BuildPromotionCandidateComponents(candidateId, options);
+        });
+        await RespondModalAsync(modal, $"Showing {options.Count} matching previous player(s) on the promotion card.", true);
+    }
+
+    private async Task HandlePromotionRenameSelectAsync(SocketMessageComponent component, string customId)
+    {
+        var parts = customId.Split(':');
+        if (parts.Length != 3 || !int.TryParse(parts[2], out var candidateId))
+        {
+            await RespondToComponentAsync(component, "Malformed rename selection.", ephemeral: true);
+            return;
+        }
+
+        var selectedValue = component.Data.Values.FirstOrDefault();
+        if (!int.TryParse(selectedValue, out var previousPlayerId))
+        {
+            await RespondToComponentAsync(component, "No valid previous player was selected.", ephemeral: true);
+            return;
+        }
+
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TrackerDbContext>();
+        var candidate = await db.PromotionCandidates.FirstOrDefaultAsync(x => x.Id == candidateId);
+        if (candidate is null)
+        {
+            await RespondToComponentAsync(component, "Promotion candidate not found.", ephemeral: true);
+            return;
+        }
+
+        if (candidate.Status != PromotionStatus.PENDING)
+        {
+            await RespondToComponentAsync(component, $"This promotion was already handled ({candidate.Status}).", ephemeral: true);
+            return;
+        }
+
+        var newPlayer = await db.Players.FirstOrDefaultAsync(x => x.Id == candidate.PlayerId);
+        var previousPlayer = await db.Players.FirstOrDefaultAsync(x =>
+            x.Id == previousPlayerId &&
+            x.Id != candidate.PlayerId &&
+            (x.Status == PlayerStatus.MISSING_PENDING_REVIEW || x.Status == PlayerStatus.REMOVED_CONFIRMED));
+        if (newPlayer is null || previousPlayer is null)
+        {
+            await RespondToComponentAsync(component, "That previous player is no longer available for rename review.", ephemeral: true);
+            return;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var metadata = JsonUtil.Serialize(new
+        {
+            NewPlayer = newPlayer.Username,
+            SuggestedPrevious = previousPlayer.Username,
+            PreviousPlayerId = previousPlayer.Id,
+            NewPlayerId = newPlayer.Id,
+            CandidateId = candidate.Id,
+            Source = "discord-promotion-rename-selector",
+            HandledBy = component.User.Username,
+            HandledByDiscordUserId = component.User.Id,
+            DetectedAt = now
+        });
+
+        newPlayer.Status = PlayerStatus.MERGE_SUGGESTED;
+        await CloseOpenLifecycleEventsAsync(db, newPlayer.Id, "NEW_PLAYER");
+        await UpsertOpenMergeEventAsync(db, newPlayer.Id, "MERGE_SUGGESTED", metadata, now);
+        var requiredEvent = await UpsertOpenMergeEventAsync(db, newPlayer.Id, "MERGE_ACTION_REQUIRED", metadata, now);
+
+        db.LifecycleEvents.Add(new LifecycleEvent
+        {
+            PlayerId = newPlayer.Id,
+            EventType = "DISCORD_MARK_RENAME_SUSPECT",
+            MetadataJson = metadata,
+            Status = "DONE",
+            CreatedAt = now
+        });
+        db.LifecycleEvents.Add(new LifecycleEvent
+        {
+            PlayerId = newPlayer.Id,
+            EventType = "PROMOTION_DISCORD_ACTION_APPLIED",
+            MetadataJson = JsonUtil.Serialize(new
+            {
+                CandidateId = candidate.Id,
+                Action = "rename",
+                PreviousPlayerId = previousPlayer.Id,
+                PreviousPlayer = previousPlayer.Username,
+                HandledBy = component.User.Username,
+                HandledByDiscordUserId = component.User.Id,
+                Source = "discord",
+                ChannelId = component.Channel.Id,
+                DiscordMessageId = component.Message.Id
+            }),
+            Status = "DONE",
+            CreatedAt = now
+        });
+
+        await db.SaveChangesAsync();
+
+        var postedEvents = await db.LifecycleEvents
+            .Where(x => x.EventType == "PROMOTION_DISCORD_POSTED")
+            .OrderByDescending(x => x.CreatedAt)
+            .ToListAsync();
+        var promotionPosted = postedEvents.FirstOrDefault(x =>
+            MetadataIntEquals(x.MetadataJson, "CandidateId", candidate.Id) &&
+            ExtractUlong(x.MetadataJson, "DiscordMessageId") == component.Message.Id);
+        if (promotionPosted is not null)
+        {
+            var promotionMetadata = ReadLifecycleMetadata(promotionPosted.MetadataJson);
+            promotionMetadata["SupersededByMerge"] = "true";
+            promotionMetadata["InlineMergeCard"] = "true";
+            promotionMetadata["SuggestedPrevious"] = previousPlayer.Username;
+            promotionMetadata["PreviousPlayerId"] = previousPlayer.Id.ToString(CultureInfo.InvariantCulture);
+            promotionMetadata["MergeActionRequiredEventId"] = requiredEvent.Id.ToString(CultureInfo.InvariantCulture);
+            promotionMetadata["SupersededAt"] = now.ToString("O", CultureInfo.InvariantCulture);
+            promotionPosted.MetadataJson = JsonUtil.Serialize(promotionMetadata);
+        }
+
+        var mergePosted = await db.LifecycleEvents
+            .Where(x => x.PlayerId == newPlayer.Id && x.EventType == "MERGE_DISCORD_POSTED")
+            .OrderByDescending(x => x.CreatedAt)
+            .FirstOrDefaultAsync();
+        var mergePostedMetadata = JsonUtil.Serialize(new
+        {
+            RequiredEventId = requiredEvent.Id,
+            NewPlayer = newPlayer.Username,
+            SuggestedPrevious = previousPlayer.Username,
+            PreviousPlayerId = previousPlayer.Id,
+            ChannelId = component.Channel.Id,
+            DiscordMessageId = component.Message.Id,
+            InlinePromotionCard = true
+        });
+        if (mergePosted is null)
+        {
+            db.LifecycleEvents.Add(new LifecycleEvent
+            {
+                PlayerId = newPlayer.Id,
+                EventType = "MERGE_DISCORD_POSTED",
+                MetadataJson = mergePostedMetadata,
+                Status = "DONE",
+                CreatedAt = now
+            });
+        }
+        else
+        {
+            mergePosted.MetadataJson = mergePostedMetadata;
+        }
+
+        await db.SaveChangesAsync();
+
+        var inlineRenameCandidates = await GetRenameCandidateOptionsAsync(
+            db,
+            newPlayer.Id,
+            searchTerm: null,
+            maxOptions: 24,
+            CancellationToken.None);
+
+        await component.Message.ModifyAsync(props =>
+        {
+            props.Embed = BuildPromotionRenameReviewEmbed(
+                newPlayer.Username,
+                previousPlayer.Username,
+                newPlayer.CurrentRank,
+                newPlayer.EligibleRank,
+                component.User.Username);
+            props.Components = BuildInlineMergeReviewComponents(newPlayer.Id, candidate.Id, inlineRenameCandidates);
+        });
+        await RespondToComponentAsync(
+            component,
+            $"Rename review set: {newPlayer.Username} → {previousPlayer.Username}. Confirm the rename to merge the histories.",
+            ephemeral: true);
     }
 
     private async Task HandleWomOnlyButtonAsync(SocketMessageComponent component, string[] parts)
@@ -7254,12 +7687,7 @@ public class DiscordPromotionBotWorker(
             AddDiscordGuessField(embedBuilder, "New Player", newPlayerDiscordGuess);
             AddDiscordGuessField(embedBuilder, "Suggested Previous", previousPlayerDiscordGuess);
             var embed = embedBuilder.Build();
-            var components = new ComponentBuilder()
-                .WithButton("Confirm rename", $"merge:confirm:{ev.PlayerId}", ButtonStyle.Success)
-                .WithButton("Choose other candidate", $"merge:choose:{ev.PlayerId}", ButtonStyle.Primary)
-                .WithButton("Manual previous name", $"merge:manual:{ev.PlayerId}", ButtonStyle.Secondary)
-                .WithButton("Abort rename", $"merge:abort:{ev.PlayerId}", ButtonStyle.Danger)
-                .Build();
+            var components = BuildInlineMergeReviewComponents(ev.PlayerId);
             var msg = await channel.SendMessageAsync(embed: embed, components: components);
             db.LifecycleEvents.Add(new LifecycleEvent
             {
@@ -7909,6 +8337,66 @@ public class DiscordPromotionBotWorker(
         {
             await PostPendingPromotionCandidates(ct);
         }
+    }
+
+    private static async Task<List<RenameCandidateOption>> GetRenameCandidateOptionsAsync(
+        TrackerDbContext db,
+        int newPlayerId,
+        string? searchTerm,
+        int maxOptions,
+        CancellationToken ct)
+    {
+        var candidates = await db.Players
+            .AsNoTracking()
+            .Where(x =>
+                x.Id != newPlayerId &&
+                (x.Status == PlayerStatus.MISSING_PENDING_REVIEW || x.Status == PlayerStatus.REMOVED_CONFIRMED))
+            .Select(x => new RenameCandidateOption(x.Id, x.Username, x.CurrentRank, x.Status, x.LastSeen))
+            .ToListAsync(ct);
+
+        var normalizedSearch = searchTerm?.Trim() ?? "";
+        return candidates
+            .Where(x => string.IsNullOrWhiteSpace(normalizedSearch) ||
+                        x.Username.Contains(normalizedSearch, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(x => x.Status == PlayerStatus.MISSING_PENDING_REVIEW)
+            .ThenByDescending(x => x.LastSeen)
+            .ThenBy(x => x.Username)
+            .Take(Math.Clamp(maxOptions, 1, 24))
+            .ToList();
+    }
+
+    private static async Task<LifecycleEvent> UpsertOpenMergeEventAsync(
+        TrackerDbContext db,
+        int playerId,
+        string eventType,
+        string metadataJson,
+        DateTimeOffset now)
+    {
+        var openEvents = await db.LifecycleEvents
+            .Where(x => x.PlayerId == playerId && x.EventType == eventType && x.Status == "OPEN")
+            .OrderByDescending(x => x.CreatedAt)
+            .ThenByDescending(x => x.Id)
+            .ToListAsync();
+        if (openEvents.Count > 0)
+        {
+            openEvents[0].MetadataJson = metadataJson;
+            foreach (var duplicate in openEvents.Skip(1))
+            {
+                duplicate.Status = "DONE";
+            }
+            return openEvents[0];
+        }
+
+        var lifecycle = new LifecycleEvent
+        {
+            PlayerId = playerId,
+            EventType = eventType,
+            MetadataJson = metadataJson,
+            Status = "OPEN",
+            CreatedAt = now
+        };
+        db.LifecycleEvents.Add(lifecycle);
+        return lifecycle;
     }
 
     private async Task<List<string>> GetMergeCandidateOptionsAsync(int playerId)
