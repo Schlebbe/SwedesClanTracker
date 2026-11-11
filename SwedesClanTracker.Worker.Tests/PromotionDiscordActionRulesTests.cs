@@ -85,6 +85,40 @@ public class PromotionDiscordActionRulesTests
     }
 
     [Fact]
+    public void Brassican_promotion_without_a_previous_rank_role_can_receive_the_new_role()
+    {
+        var result = PromotionDiscordActionRules.EvaluateRankRoleState(
+            "Brassican",
+            "Commander",
+            []);
+
+        Assert.Equal(DiscordPromotionRankRoleAction.Add, result.Action);
+        Assert.True(result.CanApply);
+    }
+
+    [Fact]
+    public void Brassican_promotion_with_only_a_guest_role_can_receive_the_new_role()
+    {
+        var result = PromotionDiscordActionRules.EvaluateRankRoleState(
+            "Brassican",
+            "Commander",
+            [PromotionDiscordActionRules.GuestRoleName]);
+
+        Assert.Equal(DiscordPromotionRankRoleAction.Add, result.Action);
+    }
+
+    [Fact]
+    public void Brassican_promotion_with_an_unrecognized_role_is_still_rejected()
+    {
+        var result = PromotionDiscordActionRules.EvaluateRankRoleState(
+            "Brassican",
+            "Commander",
+            ["Wily"]);
+
+        Assert.Equal(DiscordPromotionRankRoleAction.Reject, result.Action);
+    }
+
+    [Fact]
     public void Legacy_recruit_without_a_rank_role_can_receive_the_new_role()
     {
         var result = PromotionDiscordActionRules.EvaluateRankRoleState(

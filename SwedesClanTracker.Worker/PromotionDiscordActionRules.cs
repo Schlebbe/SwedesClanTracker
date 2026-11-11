@@ -4,6 +4,8 @@ namespace SwedesClanTracker.Worker;
 
 public static class PromotionDiscordActionRules
 {
+    public const string GuestRoleName = "Guest";
+
     public static DiscordMemberGuessMatch? FindUniqueExactMatch(DiscordMemberGuessResult guess)
     {
         var exactMatches = guess.Matches
@@ -22,9 +24,11 @@ public static class PromotionDiscordActionRules
         var normalizedOldRank = RankRules.NormalizeRankName(oldRank);
         var normalizedNewRank = RankRules.NormalizeRankName(newRank);
         var isLegacyRecruit = string.Equals(normalizedOldRank, "Recruit", StringComparison.OrdinalIgnoreCase);
-        var existingRanks = existingRankNames
-            .Where(RankRules.IsKnownClanRank)
+        var existingRoleNames = existingRankNames
             .Select(RankRules.NormalizeRankName)
+            .ToList();
+        var existingRanks = existingRoleNames
+            .Where(RankRules.IsKnownClanRank)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
@@ -51,6 +55,20 @@ public static class PromotionDiscordActionRules
                 DiscordPromotionRankRoleAction.AlreadyCorrect,
                 existingRanks,
                 "The Discord member already has the requested rank role.");
+        }
+
+        if (string.Equals(normalizedOldRank, "Brassican", StringComparison.OrdinalIgnoreCase) &&
+            existingRanks.Count == 0 &&
+            (existingRoleNames.Count == 0 || existingRoleNames.All(x => string.Equals(
+                x,
+                GuestRoleName,
+                StringComparison.OrdinalIgnoreCase))) &&
+            !existingRoleNames.Any(x => string.Equals(x, "Recruit", StringComparison.OrdinalIgnoreCase)))
+        {
+            return new DiscordPromotionRankRoleDecision(
+                DiscordPromotionRankRoleAction.Add,
+                existingRanks,
+                "The member has no configured previous rank role, so the new rank role can be added.");
         }
 
         if (isLegacyRecruit)

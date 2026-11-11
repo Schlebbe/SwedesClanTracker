@@ -1451,7 +1451,8 @@ public class DiscordPromotionBotWorker(
                 candidate.OldRank,
                 candidate.NewRank,
                 selectedRole,
-                rankRoles);
+                rankRoles,
+                guild);
             var roleName = string.IsNullOrWhiteSpace(selectedRole.RoleName)
                 ? normalizedNewRank
                 : selectedRole.RoleName;
@@ -1530,32 +1531,37 @@ public class DiscordPromotionBotWorker(
         string oldRank,
         string newRank,
         DiscordRankRole selectedRole,
-        DiscordRankRoleConfiguration rankRoles)
+        DiscordRankRoleConfiguration rankRoles,
+        SocketGuild guild)
     {
         var existingRankRoles = GetDiscordRankRolesForUser(guildUser, rankRoles);
+        var existingRoleNames = existingRankRoles
+            .Select(x => x.Rank)
+            .Concat(GetDiscordRoleNamesForUser(guildUser, guild).Where(x =>
+                string.Equals(x, PromotionDiscordActionRules.GuestRoleName, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(x, "Recruit", StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+        var guestRoles = GetDiscordGuestRolesForUser(guildUser, guild, rankRoles);
         var decision = PromotionDiscordActionRules.EvaluateRankRoleState(
             oldRank,
             newRank,
-            existingRankRoles.Select(x => x.Rank));
+            existingRoleNames);
         if (!decision.CanApply)
         {
             return new PromotionDiscordRankRoleUpdateResult(false, false, decision.Details, []);
         }
 
-        if (decision.Action == DiscordPromotionRankRoleAction.AlreadyCorrect)
-        {
-            return new PromotionDiscordRankRoleUpdateResult(true, true, decision.Details, []);
-        }
-
         var userRoleIds = guildUser is SocketGuildUser socketUser
             ? socketUser.Roles.Select(x => x.Id).ToHashSet()
             : guildUser.RoleIds.ToHashSet();
-        if (!userRoleIds.Contains(selectedRole.RoleId))
+        var removedRoles = new List<DiscordRankRole>();
+
+        if (decision.Action != DiscordPromotionRankRoleAction.AlreadyCorrect &&
+            !userRoleIds.Contains(selectedRole.RoleId))
         {
             await guildUser.AddRoleAsync(selectedRole.RoleId);
         }
 
-        var removedRoles = new List<DiscordRankRole>();
         if (decision.Action == DiscordPromotionRankRoleAction.Replace)
         {
             var previousRole = existingRankRoles.Single();
@@ -1563,7 +1569,18 @@ public class DiscordPromotionBotWorker(
             removedRoles.Add(previousRole);
         }
 
-        return new PromotionDiscordRankRoleUpdateResult(true, false, decision.Details, removedRoles);
+        foreach (var guestRole in guestRoles)
+        {
+            await guildUser.RemoveRoleAsync(guestRole.RoleId);
+            removedRoles.Add(guestRole);
+        }
+
+        var alreadyCorrect = decision.Action == DiscordPromotionRankRoleAction.AlreadyCorrect &&
+            guestRoles.Count == 0;
+        var details = guestRoles.Count == 0
+            ? decision.Details
+            : $"{decision.Details} The Guest role was removed.";
+        return new PromotionDiscordRankRoleUpdateResult(true, alreadyCorrect, details, removedRoles);
     }
 
     private static MessageComponent BuildPromotionCandidateComponents(
@@ -9643,6 +9660,42 @@ public class DiscordPromotionBotWorker(
                 return rankRoles.RolesByRank[rank];
             })
             .OrderBy(x => RankRules.RankOrder(x.Rank))
+            .ToList();
+    }
+
+    private static IReadOnlyList<string> GetDiscordRoleNamesForUser(
+        IGuildUser guildUser,
+        SocketGuild guild)
+    {
+        var roleIds = guildUser is SocketGuildUser socketUser
+            ? socketUser.Roles.Select(x => x.Id)
+            : guildUser.RoleIds;
+
+        return roleIds
+            .Distinct()
+            .Select(guild.GetRole)
+            .OfType<SocketRole>()
+            .Select(x => x.Name)
+            .ToList();
+    }
+
+    private static IReadOnlyList<DiscordRankRole> GetDiscordGuestRolesForUser(
+        IGuildUser guildUser,
+        SocketGuild guild,
+        DiscordRankRoleConfiguration rankRoles)
+    {
+        var rankRoleIds = rankRoles.RankByRoleId.Keys.ToHashSet();
+        var roleIds = guildUser is SocketGuildUser socketUser
+            ? socketUser.Roles.Select(x => x.Id)
+            : guildUser.RoleIds;
+
+        return roleIds
+            .Where(x => !rankRoleIds.Contains(x))
+            .Distinct()
+            .Select(guild.GetRole)
+            .OfType<SocketRole>()
+            .Where(x => string.Equals(x.Name, PromotionDiscordActionRules.GuestRoleName, StringComparison.OrdinalIgnoreCase))
+            .Select(x => new DiscordRankRole(PromotionDiscordActionRules.GuestRoleName, x.Id, x.Name))
             .ToList();
     }
 
