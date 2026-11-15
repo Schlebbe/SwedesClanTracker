@@ -21,6 +21,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\\SwedesClanTracker.Core\\SwedesClanTracker.Core.csproj" />
+    <ProjectReference Include="..\\SwedesClanTracker.Worker\\SwedesClanTracker.Worker.csproj" />
   </ItemGroup>
 
 </Project>

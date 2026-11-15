@@ -35,6 +35,7 @@ public class TrackerWorker(
                         .Where(x => x.EventType == "PRIORITY_UPDATE_REQUEST" && x.Status == "OPEN")
                         .OrderBy(x => x.CreatedAt)
                         .ToListAsync(stoppingToken);
+                    var openMergeReviews = await MergeReviewPolicy.GetOpenReferencesAsync(db, stoppingToken);
                     HashSet<string>? rosterSet = null;
                     foreach (var req in priorityRequests)
                     {
@@ -49,36 +50,21 @@ public class TrackerWorker(
                             if (!rosterSet.Contains(player.Username) && player.Status != PlayerStatus.REMOVED_CONFIRMED)
                             {
                                 player.Status = PlayerStatus.MISSING_PENDING_REVIEW;
-                                var hasOpenMissingEvent = await db.LifecycleEvents.AnyAsync(x =>
-                                    x.PlayerId == player.Id &&
-                                    x.EventType == "MISSING_IN_ROSTER" &&
-                                    x.Status == "OPEN", stoppingToken);
-                                if (!hasOpenMissingEvent)
+                                var previousIdentityIsControlledByMerge = MergeReviewPolicy.ControlsPreviousIdentity(
+                                    openMergeReviews,
+                                    player.Id,
+                                    player.Username);
+                                if (previousIdentityIsControlledByMerge)
                                 {
-                                    db.LifecycleEvents.Add(new LifecycleEvent
-                                    {
-                                        PlayerId = player.Id,
-                                        EventType = "MISSING_IN_ROSTER",
-                                        MetadataJson = JsonUtil.Serialize(new { player.Username, MissingAt = DateTimeOffset.UtcNow, Source = "PRIORITY_UPDATE_REQUEST" }),
-                                        Status = "OPEN",
-                                        CreatedAt = DateTimeOffset.UtcNow
-                                    });
+                                    req.Status = "DONE";
+                                    continue;
                                 }
-                                var hasPendingAction = await db.LifecycleEvents.AnyAsync(x =>
-                                    x.PlayerId == player.Id &&
-                                    x.EventType == "TEMPLE_MISSING_ACTION_REQUIRED" &&
-                                    x.Status == "OPEN", stoppingToken);
-                                if (!hasPendingAction)
-                                {
-                                    db.LifecycleEvents.Add(new LifecycleEvent
-                                    {
-                                        PlayerId = player.Id,
-                                        EventType = "TEMPLE_MISSING_ACTION_REQUIRED",
-                                        MetadataJson = JsonUtil.Serialize(new { player.Username, MissingAt = DateTimeOffset.UtcNow, Source = "PRIORITY_UPDATE_REQUEST" }),
-                                        Status = "OPEN",
-                                        CreatedAt = DateTimeOffset.UtcNow
-                                    });
-                                }
+
+                                await MissingReviewLifecycle.EnsureOpenPairAsync(
+                                    db,
+                                    player,
+                                    "PRIORITY_UPDATE_REQUEST",
+                                    stoppingToken);
                             }
                             else if (player.Status is PlayerStatus.MISSING_PENDING_REVIEW or PlayerStatus.NEW_PENDING_REVIEW)
                             {

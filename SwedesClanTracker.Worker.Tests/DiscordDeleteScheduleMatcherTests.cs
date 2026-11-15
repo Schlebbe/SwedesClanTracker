@@ -16,6 +16,20 @@ public class DiscordDeleteScheduleMatcherTests
     }
 
     [Fact]
+    public void Cancelled_done_schedule_does_not_block_later_cleanup()
+    {
+        var lifecycleEvent = CreateEvent("TEMPLE_MISSING_DISCORD_DELETE_SCHEDULED", "DONE", MessageId);
+
+        DiscordDeleteScheduleMatcher.MarkCancelled(
+            lifecycleEvent,
+            "missing-card-restored",
+            DateTimeOffset.UtcNow);
+
+        Assert.True(DiscordDeleteScheduleMatcher.IsCancelled(lifecycleEvent));
+        Assert.False(DiscordDeleteScheduleMatcher.MatchesOpenOrCompletedSchedule(lifecycleEvent, MessageId));
+    }
+
+    [Fact]
     public void Open_schedule_for_same_message_matches()
     {
         var lifecycleEvent = CreateEvent("TEMPLE_MISSING_DISCORD_DELETE_SCHEDULED", "OPEN", MessageId);

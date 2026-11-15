@@ -67,6 +67,7 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
         // WOM-dependent status, rank, and review work remains unchanged and is
         // intentionally allowed to propagate its fetch failure to the worker.
         var womRoles = await wiseOldManClient.GetMemberRolesAsync(ct);
+        var openMergeReviews = await MergeReviewPolicy.GetOpenReferencesAsync(db, ct);
         var queue = new List<int>();
 
         foreach (var player in existing)
@@ -75,6 +76,10 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
 
             womRoles.TryGetValue(NormalizeUsername(player.Username), out var womRole);
             var missingInWom = string.IsNullOrWhiteSpace(womRole);
+            var previousIdentityIsControlledByMerge = MergeReviewPolicy.ControlsPreviousIdentity(
+                openMergeReviews,
+                player.Id,
+                player.Username);
 
             if (rosterSet.Contains(NormalizeUsername(player.Username)))
             {
@@ -124,6 +129,16 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
             {
                 player.Status = PlayerStatus.MISSING_PENDING_REVIEW;
                 await CloseOpenLifecycleEventsAsync(player.Id, ct, "NEW_PLAYER", "MERGE_SUGGESTED", "MERGE_ACTION_REQUIRED");
+
+                // A previous username that is already controlled by an open
+                // rename review is expected to be absent while the decision is
+                // pending. Preserve any existing evidence, but do not create a
+                // new independent missing decision on every roster sync.
+                if (previousIdentityIsControlledByMerge)
+                {
+                    continue;
+                }
+
                 var hasOpenMissingEvent = await db.LifecycleEvents.AnyAsync(x =>
                     x.PlayerId == player.Id &&
                     x.EventType == "MISSING_IN_ROSTER" &&
@@ -342,47 +357,29 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
 
     private async Task<HashSet<string>> GetMergePendingPreviousUsernamesAsync(CancellationToken ct)
     {
-        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var openMergeEvents = await db.LifecycleEvents
-            .Where(x => x.EventType == "MERGE_ACTION_REQUIRED" && x.Status == "OPEN")
+        var references = await MergeReviewPolicy.GetOpenReferencesAsync(db, ct);
+        var usernames = references
+            .Select(x => x.SuggestedPreviousUsername)
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Select(x => MergeReviewPolicy.Normalize(x))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var playerIds = references
+            .Where(x => x.SuggestedPreviousPlayerId.HasValue)
+            .Select(x => x.SuggestedPreviousPlayerId!.Value)
+            .ToArray();
+        if (playerIds.Length == 0) return usernames;
+
+        var idUsernames = await db.Players
+            .Where(x => playerIds.Contains(x.Id))
+            .Select(x => x.Username)
             .ToListAsync(ct);
-        foreach (var ev in openMergeEvents)
+        foreach (var username in idUsernames)
         {
-            var previous = ReadSuggestedPrevious(ev.MetadataJson);
-            if (!string.IsNullOrWhiteSpace(previous))
-            {
-                result.Add(NormalizeUsername(previous));
-                continue;
-            }
+            var normalized = MergeReviewPolicy.Normalize(username);
+            if (!string.IsNullOrWhiteSpace(normalized)) usernames.Add(normalized);
+        }
 
-            var fallback = await db.LifecycleEvents
-                .Where(x => x.PlayerId == ev.PlayerId && x.EventType == "MERGE_DISCORD_POSTED")
-                .OrderByDescending(x => x.CreatedAt)
-                .Select(x => x.MetadataJson)
-                .FirstOrDefaultAsync(ct);
-            var fallbackPrevious = ReadSuggestedPrevious(fallback ?? "");
-            if (!string.IsNullOrWhiteSpace(fallbackPrevious))
-            {
-                result.Add(NormalizeUsername(fallbackPrevious));
-            }
-        }
-        return result;
-    }
-
-    private static string? ReadSuggestedPrevious(string metadataJson)
-    {
-        try
-        {
-            using var doc = JsonDocument.Parse(metadataJson);
-            if (doc.RootElement.ValueKind != JsonValueKind.Object) return null;
-            if (!doc.RootElement.TryGetProperty("SuggestedPrevious", out var property)) return null;
-            if (property.ValueKind != JsonValueKind.String) return null;
-            return property.GetString();
-        }
-        catch
-        {
-            return null;
-        }
+        return usernames;
     }
 
     private async Task EnsureWomRankMismatchLifecycleAsync(Player player, string womRole, DateTimeOffset now, CancellationToken ct)
@@ -555,6 +552,7 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
                 .Where(x => x.Last is not null)
                 .Select(x => new
                 {
+                    x.Id,
                     x.Username,
                     Match = RenameMatchRules.Evaluate(x.Last!, snapshot)
                 })
@@ -571,6 +569,7 @@ public class TrackerSyncService(TrackerDbContext db, ITempleClient templeClient,
                 {
                     NewPlayer = player.Username,
                     SuggestedPrevious = match.Username,
+                    SuggestedPreviousPlayerId = match.Id,
                     match.Match.EhbIgnoredReason,
                     CandidatePreviousPlayers = rankedCandidates.Take(5).Select(x => new
                     {

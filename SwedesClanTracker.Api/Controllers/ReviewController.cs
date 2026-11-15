@@ -29,6 +29,7 @@ public class ReviewController(TrackerDbContext db, IConfiguration config, IHttpC
                 .OrderByDescending(x => x.CreatedAt)
                 .ThenByDescending(x => x.Id)
                 .ToListAsync(ct);
+        var openMergeReviews = await MergeReviewPolicy.GetOpenReferencesAsync(db, ct);
 
         var rows = players.Select(player =>
         {
@@ -36,8 +37,12 @@ public class ReviewController(TrackerDbContext db, IConfiguration config, IHttpC
             if (player.Status is PlayerStatus.NEW_PENDING_REVIEW or PlayerStatus.MISSING_PENDING_REVIEW or PlayerStatus.MERGE_SUGGESTED)
             {
                 var eventsForPlayer = lifecycle.Where(x => x.PlayerId == player.Id).ToList();
+                var suppressedByMerge = MergeReviewPolicy.ControlsPreviousIdentity(
+                    openMergeReviews,
+                    player.Id,
+                    player.Username);
                 var hasOpenRequirement =
-                    eventsForPlayer.Any(x => x.Status == "OPEN" &&
+                    !suppressedByMerge && eventsForPlayer.Any(x => x.Status == "OPEN" &&
                         (x.EventType == "TEMPLE_MISSING_ACTION_REQUIRED" ||
                          x.EventType == "WOM_MISSING_ACTION_REQUIRED" ||
                          x.EventType == "WOM_ONLY_ACTION_REQUIRED" ||
@@ -49,7 +54,9 @@ public class ReviewController(TrackerDbContext db, IConfiguration config, IHttpC
                     x.EventType == "MERGE_DISCORD_POSTED");
                 var latestMissingSignal = eventsForPlayer.FirstOrDefault(x => x.EventType == "DISCORD_POSTED_MESSAGE_MISSING");
 
-                cardState = hasOpenRequirement
+                cardState = suppressedByMerge
+                    ? "Suppressed by rename review"
+                    : hasOpenRequirement
                     ? latestPosted is null
                         ? "Card missing (reposting)"
                         : latestMissingSignal is not null && latestMissingSignal.CreatedAt > latestPosted.CreatedAt
@@ -82,6 +89,10 @@ public class ReviewController(TrackerDbContext db, IConfiguration config, IHttpC
     {
         var p = await db.Players.FirstOrDefaultAsync(x => x.Id == id, ct);
         if (p is null) return NotFound();
+        if (await IsPreviousIdentityControlledByOpenMergeAsync(p, ct))
+        {
+            return Conflict("This identity is controlled by an open rename review.");
+        }
         var handledBy = User.FindFirstValue(ClaimTypes.Name) ?? "web-admin";
         p.Status = req.Status;
         await CloseReviewLifecycleEventsResolvedByStatusAsync(p, handledBy, ct);
@@ -113,6 +124,10 @@ public class ReviewController(TrackerDbContext db, IConfiguration config, IHttpC
     {
         var p = await db.Players.FirstOrDefaultAsync(x => x.Id == id, ct);
         if (p is null) return NotFound();
+        if (await IsPreviousIdentityControlledByOpenMergeAsync(p, ct))
+        {
+            return Conflict("This identity is controlled by an open rename review.");
+        }
         var templeGroupId = config.GetValue<int?>("TempleOsrs:GroupId") ?? 449;
         var templeApiKey = config["TempleOsrs:ApiKey"] ?? "";
         var womGroupId = config.GetValue<int?>("WiseOldMan:GroupId") ?? 0;
@@ -144,7 +159,12 @@ public class ReviewController(TrackerDbContext db, IConfiguration config, IHttpC
             if (!womResp.IsSuccessStatusCode)
             {
                 var alreadyInWom = await IsPlayerInWiseOldManGroupAsync(client, p.Username, womGroupId, ct);
-                if (!alreadyInWom) return BadRequest($"WiseOldMan add failed ({(int)womResp.StatusCode}).");
+                if (alreadyInWom is not true)
+                {
+                    return BadRequest(alreadyInWom is null
+                        ? "WiseOldMan add failed and membership could not be verified."
+                        : $"WiseOldMan add failed ({(int)womResp.StatusCode}).");
+                }
             }
         }
 
@@ -160,6 +180,10 @@ public class ReviewController(TrackerDbContext db, IConfiguration config, IHttpC
     {
         var p = await db.Players.FirstOrDefaultAsync(x => x.Id == id, ct);
         if (p is null) return NotFound();
+        if (await IsPreviousIdentityControlledByOpenMergeAsync(p, ct))
+        {
+            return Conflict("This identity is controlled by an open rename review.");
+        }
         var womGroupId = config.GetValue<int?>("WiseOldMan:GroupId") ?? 0;
         var womVerificationCode = config["WiseOldMan:VerificationCode"] ?? "";
         if (womGroupId > 0 && !string.IsNullOrWhiteSpace(womVerificationCode))
@@ -178,7 +202,12 @@ public class ReviewController(TrackerDbContext db, IConfiguration config, IHttpC
             if (!womResp.IsSuccessStatusCode)
             {
                 var stillInWom = await IsPlayerInWiseOldManGroupAsync(client, p.Username, womGroupId, ct);
-                if (stillInWom) return BadRequest($"WiseOldMan remove failed ({(int)womResp.StatusCode}).");
+                if (stillInWom is not false)
+                {
+                    return BadRequest(stillInWom is null
+                        ? "WiseOldMan remove failed and membership could not be verified."
+                        : $"WiseOldMan remove failed ({(int)womResp.StatusCode}).");
+                }
             }
         }
 
@@ -201,6 +230,10 @@ public class ReviewController(TrackerDbContext db, IConfiguration config, IHttpC
     {
         var p = await db.Players.FirstOrDefaultAsync(x => x.Id == id, ct);
         if (p is null) return NotFound();
+        if (await IsPreviousIdentityControlledByOpenMergeAsync(p, ct))
+        {
+            return Conflict("This identity is controlled by an open rename review.");
+        }
 
         var handledBy = User.FindFirstValue(ClaimTypes.Name) ?? "web-admin";
         db.LifecycleEvents.Add(new LifecycleEvent
@@ -256,7 +289,13 @@ public class ReviewController(TrackerDbContext db, IConfiguration config, IHttpC
         return Ok(new { message = result.Message });
     }
 
-    private static async Task<bool> IsPlayerInWiseOldManGroupAsync(HttpClient client, string username, int groupId, CancellationToken ct)
+    private async Task<bool> IsPreviousIdentityControlledByOpenMergeAsync(Player player, CancellationToken ct)
+    {
+        var openMergeReviews = await MergeReviewPolicy.GetOpenReferencesAsync(db, ct);
+        return MergeReviewPolicy.ControlsPreviousIdentity(openMergeReviews, player.Id, player.Username);
+    }
+
+    private static async Task<bool?> IsPlayerInWiseOldManGroupAsync(HttpClient client, string username, int groupId, CancellationToken ct)
     {
         try
         {
@@ -269,9 +308,13 @@ public class ReviewController(TrackerDbContext db, IConfiguration config, IHttpC
             }
             return false;
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
         catch
         {
-            return false;
+            return null;
         }
     }
 

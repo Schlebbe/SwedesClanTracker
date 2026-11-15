@@ -96,13 +96,17 @@ public sealed class ReadOnlyConsoleQueryService(TrackerDbContext db, IConfigurat
             .Distinct()
             .ToListAsync(ct);
 
-        var reviewIds = await db.Players
+        var reviewPlayers = await db.Players
             .AsNoTracking()
             .Where(x => x.Status == PlayerStatus.NEW_PENDING_REVIEW ||
                 x.Status == PlayerStatus.MISSING_PENDING_REVIEW ||
                 x.Status == PlayerStatus.MERGE_SUGGESTED)
-            .Select(x => x.Id)
             .ToListAsync(ct);
+        var openMergeReviews = await MergeReviewPolicy.GetOpenReferencesAsync(db, ct);
+        var reviewIds = reviewPlayers
+            .Where(x => !MergeReviewPolicy.ControlsPreviousIdentity(openMergeReviews, x.Id, x.Username))
+            .Select(x => x.Id)
+            .ToArray();
 
         var staleIds = await db.Players
             .AsNoTracking()
@@ -113,7 +117,7 @@ public sealed class ReadOnlyConsoleQueryService(TrackerDbContext db, IConfigurat
         var attentionKey = attention?.Trim().ToLowerInvariant();
         if (attentionKey is "stale" or "review" or "promotion" or "rank-mismatch")
         {
-            var ids = attentionKey switch
+            IEnumerable<int> ids = attentionKey switch
             {
                 "stale" => staleIds,
                 "review" => reviewIds,
@@ -587,6 +591,7 @@ public sealed class ReadOnlyConsoleQueryService(TrackerDbContext db, IConfigurat
             .OrderByDescending(x => x.CreatedAt)
             .ThenByDescending(x => x.Id)
             .ToListAsync(ct);
+        var openMergeReferences = await MergeReviewPolicy.GetOpenReferencesAsync(db, ct);
         var candidates = await db.PromotionCandidates
             .AsNoTracking()
             .Where(x => x.Status == PromotionStatus.PENDING)
@@ -606,7 +611,7 @@ public sealed class ReadOnlyConsoleQueryService(TrackerDbContext db, IConfigurat
             foreach (var lifecycle in group.GroupBy(x => ResolveSubjectKey(x, byId)))
             {
                 var eventRow = lifecycle.OrderByDescending(x => x.CreatedAt).ThenByDescending(x => x.Id).First();
-                result.Add(CreateLifecycleCase(eventRow, byId, byUsername, now));
+                result.Add(CreateLifecycleCase(eventRow, byId, byUsername, openMergeReferences, now));
             }
         }
 
@@ -627,11 +632,16 @@ public sealed class ReadOnlyConsoleQueryService(TrackerDbContext db, IConfigurat
     {
         foreach (var merge in cases.Where(x => x.Family == "rename-merge" && x.State != "superseded"))
         {
-            var related = cases.Where(x => x != merge && x.PlayerId.HasValue && x.PlayerId == merge.PlayerId).ToArray();
+            var related = cases.Where(x =>
+                x != merge &&
+                ((x.PlayerId.HasValue && x.PlayerId == merge.PlayerId) ||
+                 IsMissingCaseControlledByMerge(x, merge))).ToArray();
             foreach (var item in related)
             {
                 item.State = "superseded";
                 item.Precedence = "Rename/merge is the controlling identity signal for this player.";
+                item.Actions = [];
+                item.Warnings.Add("Independent missing-roster actions are suppressed while the rename review is open; the underlying evidence is retained.");
                 merge.SupersededCases.Add(new ConsoleRelatedCaseResponse(item.CaseId, item.Family, "superseded", item.Subject));
                 item.RelatedCases.Add(new ConsoleRelatedCaseResponse(merge.CaseId, merge.Family, "superseded", merge.Subject));
             }
@@ -659,6 +669,21 @@ public sealed class ReadOnlyConsoleQueryService(TrackerDbContext db, IConfigurat
             temple.RelatedCases.Add(new ConsoleRelatedCaseResponse(wom.CaseId, wom.Family, "related", wom.Subject));
             wom.RelatedCases.Add(new ConsoleRelatedCaseResponse(temple.CaseId, temple.Family, "related", temple.Subject));
         }
+    }
+
+    private static bool IsMissingCaseControlledByMerge(ReviewCaseData item, ReviewCaseData merge)
+    {
+        if (item.Family is not ("temple-missing" or "wom-missing") ||
+            string.IsNullOrWhiteSpace(merge.SuggestedPreviousUsername) && !merge.SuggestedPreviousPlayerId.HasValue)
+        {
+            return false;
+        }
+
+        return merge.SuggestedPreviousPlayerId == item.PlayerId ||
+            string.Equals(
+                MergeReviewPolicy.Normalize(merge.SuggestedPreviousUsername),
+                MergeReviewPolicy.Normalize(item.Subject),
+                StringComparison.OrdinalIgnoreCase);
     }
 
     private static ReviewCaseData CreatePromotionCase(PromotionCandidate candidate, DateTimeOffset now)
@@ -718,6 +743,7 @@ public sealed class ReadOnlyConsoleQueryService(TrackerDbContext db, IConfigurat
         LifecycleEvent lifecycle,
         IReadOnlyDictionary<int, Player> byId,
         IReadOnlyDictionary<string, Player> byUsername,
+        IReadOnlyList<OpenMergeReviewReference> openMergeReferences,
         DateTimeOffset now)
     {
         var metadata = ReadMetadata(lifecycle.MetadataJson);
@@ -829,7 +855,15 @@ public sealed class ReadOnlyConsoleQueryService(TrackerDbContext db, IConfigurat
             observations,
             warnings,
             actions,
-            precedence);
+            precedence,
+            family == "rename-merge"
+                ? openMergeReferences.FirstOrDefault(x => x.MergePlayerId == lifecycle.PlayerId)?.SuggestedPreviousPlayerId
+                    ?? TryParseInt(Pick(metadata, "SuggestedPreviousPlayerId", "PreviousPlayerId"))
+                : null,
+            family == "rename-merge"
+                ? openMergeReferences.FirstOrDefault(x => x.MergePlayerId == lifecycle.PlayerId)?.SuggestedPreviousUsername
+                    ?? Pick(metadata, "SuggestedPrevious", "PreviousPlayer")
+                : null);
     }
 
     private static ConsoleReviewCaseResponse ToReviewResponse(ReviewCaseData item)
@@ -1082,6 +1116,9 @@ public sealed class ReadOnlyConsoleQueryService(TrackerDbContext db, IConfigurat
     private static DateTimeOffset? TryParseDate(string? value) =>
         DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var result) ? result : null;
 
+    private static int? TryParseInt(string? value) =>
+        int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var result) ? result : null;
+
     private static string FormatTimestamp(DateTimeOffset timestamp) => timestamp.ToUniversalTime().ToString("yyyy-MM-dd HH:mm:ss 'UTC'", CultureInfo.InvariantCulture);
 
     private static string TrimValue(string value) => value.Length <= 512 ? value : value[..512] + "…";
@@ -1101,7 +1138,9 @@ public sealed class ReadOnlyConsoleQueryService(TrackerDbContext db, IConfigurat
         IReadOnlyList<string> observations,
         IReadOnlyList<string> warnings,
         IReadOnlyList<ConsoleActionDescriptorResponse> actions,
-        string precedence)
+        string precedence,
+        int? suggestedPreviousPlayerId = null,
+        string? suggestedPreviousUsername = null)
     {
         public string CaseId { get; } = caseId;
         public string Family { get; } = family;
@@ -1116,10 +1155,12 @@ public sealed class ReadOnlyConsoleQueryService(TrackerDbContext db, IConfigurat
         public IReadOnlyList<ConsoleEvidenceResponse> Evidence { get; } = evidence;
         public IReadOnlyList<string> Observations { get; } = observations;
         public List<string> Warnings { get; } = warnings.ToList();
-        public IReadOnlyList<ConsoleActionDescriptorResponse> Actions { get; } = actions;
+        public IReadOnlyList<ConsoleActionDescriptorResponse> Actions { get; set; } = actions;
         public List<ConsoleRelatedCaseResponse> RelatedCases { get; } = [];
         public List<ConsoleRelatedCaseResponse> SupersededCases { get; } = [];
         public string Precedence { get; set; } = precedence;
+        public int? SuggestedPreviousPlayerId { get; } = suggestedPreviousPlayerId;
+        public string? SuggestedPreviousUsername { get; } = suggestedPreviousUsername;
     }
 }
 

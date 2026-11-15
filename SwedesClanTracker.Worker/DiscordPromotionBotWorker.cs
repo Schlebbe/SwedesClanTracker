@@ -18,9 +18,11 @@ public class DiscordPromotionBotWorker(
     IServiceScopeFactory scopeFactory,
     IConfiguration configuration,
     IHttpClientFactory httpClientFactory,
+    TempleRosterCache templeRosterCache,
     IPlayerUpdateQueue queue,
     AppStatusReporter statusReporter,
-    ILogger<DiscordPromotionBotWorker> logger) : BackgroundService
+    ILogger<DiscordPromotionBotWorker> logger,
+    DiscordPromotionBotWorkerTestHooks? testHooks = null) : BackgroundService
 {
     private DiscordSocketClient? _client;
     private DiscordBotOptions _options = new();
@@ -46,7 +48,6 @@ public class DiscordPromotionBotWorker(
         Malformed,
         Unknown
     }
-    private sealed record TempleRosterLookupResult(bool Succeeded, HashSet<string> Usernames);
     private sealed record RenameCandidateOption(
         int Id,
         string Username,
@@ -2016,6 +2017,12 @@ public class DiscordPromotionBotWorker(
 
     private async Task UpdateComponentMessageAsync(SocketMessageComponent component, Embed embed)
     {
+        if (testHooks?.UpdateComponentMessageAsync is not null)
+        {
+            await testHooks.UpdateComponentMessageAsync(component, embed);
+            return;
+        }
+
         if (component.Message is IUserMessage userMessage)
         {
             await userMessage.ModifyAsync(props =>
@@ -2099,6 +2106,15 @@ public class DiscordPromotionBotWorker(
             await RespondToComponentAsync(component, "Player not found.", ephemeral: true);
             return;
         }
+        var openMergeReviews = await MergeReviewPolicy.GetOpenReferencesAsync(db, CancellationToken.None);
+        if (MergeReviewPolicy.ControlsPreviousIdentity(openMergeReviews, player.Id, player.Username))
+        {
+            await RespondToComponentAsync(
+                component,
+                "This identity is controlled by an open rename review. No missing-player action was applied.",
+                ephemeral: true);
+            return;
+        }
         var renameDetection = await TryPrepareRenameReviewBeforeSensitiveActionAsync(
             db,
             expectedPreviousPlayerId: player.Id,
@@ -2112,7 +2128,9 @@ public class DiscordPromotionBotWorker(
         }
         if (action == "add")
         {
+            var templeGroupId = configuration.GetValue<int?>("TempleOsrs:GroupId") ?? 449;
             var templeOk = await AddPlayerToTempleAsync(player.Username);
+            await templeRosterCache.InvalidateAsync(templeGroupId, CancellationToken.None);
             var womOk = await AddPlayerToWomAsync(player.Username);
             if (!templeOk)
             {
@@ -2134,6 +2152,22 @@ public class DiscordPromotionBotWorker(
                     await RespondToComponentAsync(component, "Temple add succeeded, but WiseOldMan add failed.", ephemeral: true);
                     return;
                 }
+            }
+
+            var templeMembership = await IsPlayerInTempleGroupAsync(
+                player.Username,
+                templeGroupId,
+                CancellationToken.None,
+                forceRefresh: true);
+            if (templeMembership is not true)
+            {
+                await RespondToComponentAsync(
+                    component,
+                    templeMembership is null
+                        ? "Temple add completed ambiguously; membership could not be verified. No review was resolved."
+                        : "Temple add did not appear in the fresh roster yet. No review was resolved.",
+                    ephemeral: true);
+                return;
             }
 
             player.Status = PlayerStatus.ACTIVE;
@@ -2231,6 +2265,15 @@ public class DiscordPromotionBotWorker(
             await RespondToComponentAsync(component, "Player not found.", ephemeral: true);
             return;
         }
+        var openMergeReviews = await MergeReviewPolicy.GetOpenReferencesAsync(db, CancellationToken.None);
+        if (MergeReviewPolicy.ControlsPreviousIdentity(openMergeReviews, player.Id, player.Username))
+        {
+            await RespondToComponentAsync(
+                component,
+                "This identity is controlled by an open rename review. No missing-player action was applied.",
+                ephemeral: true);
+            return;
+        }
 
         var renameDetection = await TryPrepareRenameReviewBeforeSensitiveActionAsync(
             db,
@@ -2273,16 +2316,25 @@ public class DiscordPromotionBotWorker(
         }
         else if (action == "remove")
         {
+            var templeGroupId = configuration.GetValue<int?>("TempleOsrs:GroupId") ?? 449;
             var templeOk = await RemovePlayerFromTempleAsync(player.Username);
-            if (!templeOk)
+            await templeRosterCache.InvalidateAsync(templeGroupId, CancellationToken.None);
+            var stillInTemple = await IsPlayerInTempleGroupAsync(
+                player.Username,
+                templeGroupId,
+                CancellationToken.None,
+                forceRefresh: true);
+            if (stillInTemple is not false)
             {
-                var templeGroupId = configuration.GetValue<int?>("TempleOsrs:GroupId") ?? 449;
-                var stillInTemple = await IsPlayerInTempleGroupAsync(player.Username, templeGroupId);
-                if (stillInTemple)
-                {
-                    await RespondToComponentAsync(component, "Failed to remove player from TempleOSRS.", ephemeral: true);
-                    return;
-                }
+                await RespondToComponentAsync(
+                    component,
+                    stillInTemple is null
+                        ? "TempleOSRS membership could not be verified; no removal was recorded."
+                        : templeOk
+                            ? "TempleOSRS accepted the removal, but the fresh roster still shows the player. No removal was recorded."
+                            : "Failed to remove player from TempleOSRS.",
+                    ephemeral: true);
+                return;
             }
 
             player.Status = PlayerStatus.REMOVED_CONFIRMED;
@@ -2837,15 +2889,24 @@ public class DiscordPromotionBotWorker(
 
         if (action == "add")
         {
-            var templeRequestAccepted = await AddPlayerToTempleAsync(normalizedUsername);
             var templeGroupId = configuration.GetValue<int?>("TempleOsrs:GroupId") ?? 449;
-            var templeAdded = await IsPlayerInTempleGroupAsync(normalizedUsername, templeGroupId);
+            var templeRequestAccepted = await AddPlayerToTempleAsync(normalizedUsername);
+            await templeRosterCache.InvalidateAsync(templeGroupId, CancellationToken.None);
+            var templeAdded = await IsPlayerInTempleGroupAsync(
+                normalizedUsername,
+                templeGroupId,
+                CancellationToken.None,
+                forceRefresh: true);
 
-            if (!templeAdded)
+            if (templeAdded is not true)
             {
                 var failureText = templeRequestAccepted
-                    ? "Temple add request was accepted, but membership could not be confirmed yet. Try again shortly."
-                    : "Failed to add player to Temple and membership could not be confirmed.";
+                    ? templeAdded is null
+                        ? "Temple add request was accepted, but membership could not be verified yet. Try again shortly."
+                        : "Temple add request was accepted, but membership could not be confirmed yet. Try again shortly."
+                    : templeAdded is null
+                        ? "Temple add failed or membership could not be verified. No review was resolved."
+                        : "Failed to add player to Temple and membership could not be confirmed.";
                 await RespondToComponentAsync(component, failureText, ephemeral: true);
                 return;
             }
@@ -3463,6 +3524,7 @@ public class DiscordPromotionBotWorker(
                     (dedupeCompletedSchedules || x.Status == "OPEN"))
                 .ToList();
             var existingSchedule = scheduledDeleteEvents.FirstOrDefault(x =>
+                !DiscordDeleteScheduleMatcher.IsCancelled(x) &&
                 MetadataUlongEquals(x.MetadataJson, "DiscordMessageId", messageId.Value));
             if (existingSchedule is not null)
             {
@@ -4293,6 +4355,23 @@ public class DiscordPromotionBotWorker(
                 continue;
             }
 
+            if (DiscordMergeCardRules.IsMissingCardDeleteSchedule(s.EventType) &&
+                await ShouldCancelMissingCardDeleteAsync(db, s, ct))
+            {
+                // An abort or reassignment can release the original missing
+                // identity after the card was marked handled. Keep the same
+                // Discord message and let the normal posting pass restore its
+                // current buttons instead of deleting it.
+                DiscordDeleteScheduleMatcher.MarkCancelled(
+                    s,
+                    "missing-card-restored",
+                    DateTimeOffset.UtcNow);
+                s.Status = "DONE";
+                var scheduledMessageId = ExtractUlong(s.MetadataJson, "DiscordMessageId");
+                if (scheduledMessageId.HasValue) InvalidateMessagePatchFingerprint(scheduledMessageId.Value);
+                continue;
+            }
+
             if (s.EventType == "DISCORD_CHANNEL_RESPONSE_DELETE_SCHEDULED" &&
                 RequiresWomOnlyActionForCleanup(sd.RootElement) &&
                 !await HasWomOnlyActionForScheduledDeleteAsync(db, s, ct))
@@ -4339,6 +4418,71 @@ public class DiscordPromotionBotWorker(
             }
         }
         await db.SaveChangesAsync(ct);
+    }
+
+    private async Task<bool> ShouldCancelMissingCardDeleteAsync(
+        TrackerDbContext db,
+        LifecycleEvent scheduledDelete,
+        CancellationToken ct)
+    {
+        var messageId = ExtractUlong(scheduledDelete.MetadataJson, "DiscordMessageId");
+        if (!messageId.HasValue) return false;
+
+        var postedType = scheduledDelete.EventType == "TEMPLE_MISSING_DISCORD_DELETE_SCHEDULED"
+            ? "TEMPLE_MISSING_DISCORD_POSTED"
+            : "WOM_MISSING_DISCORD_POSTED";
+        var postedEvents = await db.LifecycleEvents
+            .Where(x => x.EventType == postedType)
+            .ToListAsync(ct);
+        var posted = postedEvents
+            .Where(x => MetadataUlongEquals(x.MetadataJson, "DiscordMessageId", messageId.Value))
+            .OrderByDescending(x => x.CreatedAt)
+            .FirstOrDefault();
+        if (posted is null) return false;
+
+        var player = await db.Players.FirstOrDefaultAsync(x => x.Id == posted.PlayerId, ct);
+        if (player is null) return false;
+
+        var requiredType = scheduledDelete.EventType == "TEMPLE_MISSING_DISCORD_DELETE_SCHEDULED"
+            ? "TEMPLE_MISSING_ACTION_REQUIRED"
+            : "WOM_MISSING_ACTION_REQUIRED";
+        var requirementOpen = await db.LifecycleEvents.AnyAsync(x =>
+            x.PlayerId == player.Id &&
+            x.EventType == requiredType &&
+            x.Status == "OPEN", ct);
+        if (!requirementOpen) return false;
+
+        var mergeSuppressed = await HasOpenMergePendingForPreviousUsernameAsync(db, player.Username, ct);
+        return DiscordMergeCardRules.ShouldRestoreMissingCard(player.Status, requirementOpen, mergeSuppressed);
+    }
+
+    private async Task<bool> CancelOpenMissingCardDeleteScheduleAsync(
+        TrackerDbContext db,
+        LifecycleEvent postedEvent,
+        CancellationToken ct)
+    {
+        var messageId = ExtractUlong(postedEvent.MetadataJson, "DiscordMessageId");
+        if (!messageId.HasValue) return false;
+
+        var deleteType = postedEvent.EventType == "TEMPLE_MISSING_DISCORD_POSTED"
+            ? "TEMPLE_MISSING_DISCORD_DELETE_SCHEDULED"
+            : "WOM_MISSING_DISCORD_DELETE_SCHEDULED";
+        var schedules = await db.LifecycleEvents
+            .Where(x => x.EventType == deleteType && x.Status == "OPEN")
+            .ToListAsync(ct);
+        var cancelled = false;
+        foreach (var schedule in schedules.Where(x => MetadataUlongEquals(x.MetadataJson, "DiscordMessageId", messageId.Value)))
+        {
+            DiscordDeleteScheduleMatcher.MarkCancelled(
+                schedule,
+                "missing-card-restored",
+                DateTimeOffset.UtcNow);
+            schedule.Status = "DONE";
+            cancelled = true;
+        }
+
+        if (cancelled) InvalidateMessagePatchFingerprint(messageId.Value);
+        return cancelled;
     }
 
     private async Task ReconcileCompletedMessageDeletes(CancellationToken ct)
@@ -5527,8 +5671,8 @@ public class DiscordPromotionBotWorker(
         }
 
         var templeGroupId = configuration.GetValue<int?>("TempleOsrs:GroupId") ?? 449;
-        var isInTemple = await IsPlayerInTempleGroupAsync(normalizedUsername, templeGroupId);
-        if (isInTemple)
+        var isInTemple = await IsPlayerInTempleGroupAsync(normalizedUsername, templeGroupId, ct);
+        if (isInTemple is true)
         {
             await CloseStaleWomOnlyRequirementAsync(
                 db,
@@ -5828,11 +5972,13 @@ public class DiscordPromotionBotWorker(
         {
             if (await HasOpenMergePendingForPreviousUsernameAsync(db, mp.Username, ct))
             {
-                await CloseOpenLifecycleEventsAsync(db, mp.Id, "MISSING_IN_ROSTER", "TEMPLE_MISSING_ACTION_REQUIRED");
+                // The old identity remains missing evidence, but the pending
+                // merge controls the decision. Do not close and recreate the
+                // requirements on the next tracker sync.
                 continue;
             }
-            var isMissingInTemple = !await IsPlayerInTempleGroupAsync(mp.Username, templeGroupIdForSelfHeal);
-            if (!isMissingInTemple) continue;
+            var templeMembership = await IsPlayerInTempleGroupAsync(mp.Username, templeGroupIdForSelfHeal, ct);
+            if (templeMembership is not false) continue;
 
             var hasPendingAction = await db.LifecycleEvents.AnyAsync(x =>
                 x.PlayerId == mp.Id &&
@@ -5876,8 +6022,15 @@ public class DiscordPromotionBotWorker(
             }
             if (await HasOpenMergePendingForPreviousUsernameAsync(db, player.Username, ct))
             {
-                await CloseOpenLifecycleEventsAsync(db, player.Id, "MISSING_IN_ROSTER", "TEMPLE_MISSING_ACTION_REQUIRED");
-                ev.Status = "DONE";
+                // Leave the requirement OPEN as suppressed evidence. The
+                // merge transition will resolve it; closing it here would
+                // make the tracker recreate it on the next roster sync.
+                continue;
+            }
+            if (player.Status != PlayerStatus.MISSING_PENDING_REVIEW)
+            {
+                // Missing evidence can remain for audit purposes, but cards
+                // must not be restored for an active or removed identity.
                 continue;
             }
 
@@ -5927,6 +6080,7 @@ public class DiscordPromotionBotWorker(
                 .FirstOrDefaultAsync(ct);
             if (postedEvent is not null)
             {
+                await CancelOpenMissingCardDeleteScheduleAsync(db, postedEvent, ct);
                 var lookupKey = $"temple-missing:{ev.Id}";
                 if (IsLookupBackoffActive(lookupKey)) continue;
                 var (lookupState, liveDiscordMessage, channelId, messageId) = await TryGetPostedUserMessageAsync(postedEvent, lookupKey);
@@ -6028,13 +6182,19 @@ public class DiscordPromotionBotWorker(
             .ToListAsync(ct);
         foreach (var mp in missingPlayers)
         {
-            var inTemple = await IsPlayerInTempleGroupAsync(mp.Username, templeGroupIdForSelfHeal);
+            if (await HasOpenMergePendingForPreviousUsernameAsync(db, mp.Username, ct))
+            {
+                continue;
+            }
+
+            var inTemple = await IsPlayerInTempleGroupAsync(mp.Username, templeGroupIdForSelfHeal, ct);
+            if (inTemple is not true) continue;
             var inWom = await IsPlayerInWiseOldManGroupAsync(
                 wiseOldManClient,
                 mp.Username,
                 womGroupIdForSelfHeal,
                 ct);
-            if (!inTemple || inWom) continue;
+            if (inWom) continue;
 
             var hasPendingAction = await db.LifecycleEvents.AnyAsync(x =>
                 x.PlayerId == mp.Id &&
@@ -6071,13 +6231,27 @@ public class DiscordPromotionBotWorker(
                 ev.Status = "DONE";
                 continue;
             }
+            if (await HasOpenMergePendingForPreviousUsernameAsync(db, player.Username, ct))
+            {
+                continue;
+            }
             if (IsOpenTempleNameChangeForPreviousUsername(openTempleNameChanges, player.Username))
+            {
+                continue;
+            }
+            if (player.Status != PlayerStatus.MISSING_PENDING_REVIEW)
             {
                 continue;
             }
 
             var templeGroupId = configuration.GetValue<int?>("TempleOsrs:GroupId") ?? 449;
-            var templeAdded = await IsPlayerInTempleGroupAsync(player.Username, templeGroupId);
+            var templeAdded = await IsPlayerInTempleGroupAsync(player.Username, templeGroupId, ct);
+            if (templeAdded is null)
+            {
+                // An unavailable Temple roster cannot prove that the WOM
+                // requirement is resolved or that the player is active again.
+                continue;
+            }
             var womGroupId = configuration.GetValue<int?>("WiseOldMan:GroupId") ?? 7173;
             var womAdded = await IsPlayerInWiseOldManGroupAsync(
                 wiseOldManClient,
@@ -6087,7 +6261,7 @@ public class DiscordPromotionBotWorker(
             if (womAdded)
             {
                 await CloseOpenLifecycleEventsAsync(db, player.Id, "WOM_MISSING_ACTION_REQUIRED");
-                if (templeAdded && player.Status == PlayerStatus.MISSING_PENDING_REVIEW)
+                if (templeAdded is true && player.Status == PlayerStatus.MISSING_PENDING_REVIEW)
                 {
                     player.Status = PlayerStatus.ACTIVE;
                     await CloseOpenLifecycleEventsAsync(db, player.Id,
@@ -6103,7 +6277,7 @@ public class DiscordPromotionBotWorker(
                     {
                         player.Username,
                         Source = "discord-post-guard",
-                        Temple = templeAdded ? "Added" : "Missing",
+                        Temple = templeAdded is true ? "Added" : "Missing",
                         Wom = "Added"
                     }),
                     Status = "DONE",
@@ -6119,7 +6293,7 @@ public class DiscordPromotionBotWorker(
                 .AddField("Player", player.Username, true)
                 .AddField("Current Rank", player.CurrentRank, true)
                 .AddField("Status", player.Status.ToString(), true)
-                .AddField("Temple", templeAdded ? "Added" : "Missing", true)
+                .AddField("Temple", templeAdded is true ? "Added" : "Missing", true)
                 .AddField("WiseOldMan", "Missing", true)
                 .AddField("Pets", (player.ManualPetOverride ?? player.StoredPetCount) > 0 ? (player.ManualPetOverride ?? player.StoredPetCount).ToString() : "N/A", true);
             AddDiscordGuessField(embedBuilder, "Player", discordGuess);
@@ -6134,7 +6308,7 @@ public class DiscordPromotionBotWorker(
                 player.Username,
                 player.CurrentRank,
                 PlayerStatus = player.Status.ToString(),
-                Temple = templeAdded ? "Added" : "Missing",
+                Temple = templeAdded is true ? "Added" : "Missing",
                 Wom = "Missing",
                 DiscordGuess = FormatDiscordGuessForFingerprint(discordGuess),
                 Pets = player.ManualPetOverride ?? player.StoredPetCount,
@@ -6151,6 +6325,7 @@ public class DiscordPromotionBotWorker(
                 .FirstOrDefaultAsync(ct);
             if (postedEvent is not null)
             {
+                await CancelOpenMissingCardDeleteScheduleAsync(db, postedEvent, ct);
                 var lookupKey = $"wom-missing:{ev.Id}";
                 if (IsLookupBackoffActive(lookupKey)) continue;
                 var (lookupState, liveDiscordMessage, channelId, messageId) = await TryGetPostedUserMessageAsync(postedEvent, lookupKey);
@@ -6817,7 +6992,7 @@ public class DiscordPromotionBotWorker(
         if (confirmedRequirements.Count == 0) return;
 
         var templeGroupId = configuration.GetValue<int?>("TempleOsrs:GroupId") ?? 449;
-        var templeRoster = await TryGetTempleGroupUsernamesAsync(templeGroupId, ct);
+        var templeRoster = await TryGetTempleGroupUsernamesAsync(templeGroupId, ct, forceRefresh: true);
         if (!templeRoster.Succeeded) return;
 
         foreach (var requiredEvent in confirmedRequirements)
@@ -7731,34 +7906,16 @@ public class DiscordPromotionBotWorker(
     {
         var normalizedUsername = NormalizeUsername(username);
         if (string.IsNullOrWhiteSpace(normalizedUsername)) return false;
-
-        var openMergeEvents = await db.LifecycleEvents
-            .Where(x => x.EventType == "MERGE_ACTION_REQUIRED" && x.Status == "OPEN")
-            .ToListAsync(ct);
-
-        foreach (var mergeEvent in openMergeEvents)
-        {
-            var metadata = ReadLifecycleMetadata(mergeEvent.MetadataJson);
-            var suggested = NormalizeUsername(PickLifecycleValue(metadata, "SuggestedPrevious") ?? "");
-            if (string.IsNullOrWhiteSpace(suggested))
-            {
-                var fallbackPosted = await db.LifecycleEvents
-                    .Where(x => x.PlayerId == mergeEvent.PlayerId && x.EventType == "MERGE_DISCORD_POSTED")
-                    .OrderByDescending(x => x.CreatedAt)
-                    .FirstOrDefaultAsync(ct);
-                if (fallbackPosted is not null)
-                {
-                    var fallbackMetadata = ReadLifecycleMetadata(fallbackPosted.MetadataJson);
-                    suggested = NormalizeUsername(PickLifecycleValue(fallbackMetadata, "SuggestedPrevious") ?? "");
-                }
-            }
-            if (string.Equals(suggested, normalizedUsername, StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-        }
-
-        return false;
+        var openMergeReviews = await MergeReviewPolicy.GetOpenReferencesAsync(db, ct);
+        var player = await db.Players
+            .AsNoTracking()
+            .FirstOrDefaultAsync(x => x.Username.ToLower() == normalizedUsername.ToLower(), ct);
+        return player is not null
+            ? MergeReviewPolicy.ControlsPreviousIdentity(openMergeReviews, player.Id, player.Username)
+            : openMergeReviews.Any(x => string.Equals(
+                x.SuggestedPreviousUsername,
+                normalizedUsername,
+                StringComparison.OrdinalIgnoreCase));
     }
 
     private static async Task<LifecycleEvent?> FindOpenMergeForPromotionAsync(
@@ -7845,11 +8002,6 @@ public class DiscordPromotionBotWorker(
             .Where(x => x.Id == mergePlayerId)
             .Select(x => x.Username)
             .FirstOrDefaultAsync(ct) ?? "";
-
-        await CloseOpenLifecycleEventsAsync(db, oldPlayer.Id,
-            "MISSING_IN_ROSTER",
-            "TEMPLE_MISSING_ACTION_REQUIRED",
-            "WOM_MISSING_ACTION_REQUIRED");
 
         var recentSupersedeRows = await db.LifecycleEvents
             .Where(x =>
@@ -7974,6 +8126,10 @@ public class DiscordPromotionBotWorker(
         var canRecordHandled = lookupState == PostedMessageLookupState.Missing;
         if (lookupState == PostedMessageLookupState.Found && liveDiscordMessage is not null)
         {
+            // The card is about to move to a handled state. If the review is
+            // later aborted or reassigned, the next open missing requirement
+            // must be allowed to render the buttons again.
+            InvalidateMessagePatchFingerprint(liveDiscordMessage.Id);
             if (liveDiscordMessage.Components is null || liveDiscordMessage.Components.Count == 0)
             {
                 canRecordHandled = true;
@@ -8447,6 +8603,12 @@ public class DiscordPromotionBotWorker(
 
     private async Task<IMessageChannel?> ResolveMessageChannelAsync(ulong channelId)
     {
+        if (testHooks?.ResolveMessageChannelAsync is not null)
+        {
+            var resolved = await testHooks.ResolveMessageChannelAsync(channelId);
+            return resolved as IMessageChannel;
+        }
+
         if (_client is null) return null;
         var channel = _client.GetChannel(channelId) as IMessageChannel;
         if (channel is not null) return channel;
@@ -8504,54 +8666,33 @@ public class DiscordPromotionBotWorker(
 
                 var wasActive = foundPlayer.Status == PlayerStatus.ACTIVE;
                 var templeGroupId = configuration.GetValue<int?>("TempleOsrs:GroupId") ?? 449;
-                var inTemple = await IsPlayerInTempleGroupAsync(foundPlayer.Username, templeGroupId);
+                var inTemple = await IsPlayerInTempleGroupAsync(foundPlayer.Username, templeGroupId, CancellationToken.None);
+                if (inTemple is null)
+                {
+                    await RespondAndAutoDeleteAsync(command, "Temple membership could not be verified; no missing decision was created.");
+                    return;
+                }
                 var suppressedByPendingMerge = await HasOpenMergePendingForPreviousUsernameAsync(updateDb, foundPlayer.Username, CancellationToken.None);
-                if (!inTemple && foundPlayer.Status != PlayerStatus.REMOVED_CONFIRMED)
+                if (inTemple is false && foundPlayer.Status != PlayerStatus.REMOVED_CONFIRMED)
                 {
                     if (suppressedByPendingMerge)
                     {
-                        await CloseOpenLifecycleEventsAsync(updateDb, foundPlayer.Id, "MISSING_IN_ROSTER", "TEMPLE_MISSING_ACTION_REQUIRED");
+                        // Keep the observed missing evidence open. The rename
+                        // review suppresses the independent action; it does
+                        // not erase or resolve the evidence.
                     }
                     else
                     {
                         foundPlayer.Status = PlayerStatus.MISSING_PENDING_REVIEW;
-                        var hasPendingAction = await updateDb.LifecycleEvents.AnyAsync(x =>
-                            x.PlayerId == foundPlayer.Id &&
-                            x.EventType == "TEMPLE_MISSING_ACTION_REQUIRED" &&
-                            x.Status == "OPEN");
-                        if (!hasPendingAction)
-                        {
-                            updateDb.LifecycleEvents.Add(new LifecycleEvent
-                            {
-                                PlayerId = foundPlayer.Id,
-                                EventType = "TEMPLE_MISSING_ACTION_REQUIRED",
-                                MetadataJson = JsonUtil.Serialize(new
-                                {
-                                    foundPlayer.Username,
-                                    MissingAt = DateTimeOffset.UtcNow,
-                                    Source = "discord-slash-update"
-                                }),
-                                Status = "OPEN",
-                                CreatedAt = DateTimeOffset.UtcNow
-                            });
-                        }
-                        updateDb.LifecycleEvents.Add(new LifecycleEvent
-                        {
-                            PlayerId = foundPlayer.Id,
-                            EventType = "MISSING_IN_ROSTER",
-                            MetadataJson = JsonUtil.Serialize(new
-                            {
-                                foundPlayer.Username,
-                                MissingAt = DateTimeOffset.UtcNow,
-                                Source = "discord-slash-update"
-                            }),
-                            Status = "OPEN",
-                            CreatedAt = DateTimeOffset.UtcNow
-                        });
+                        await MissingReviewLifecycle.EnsureOpenPairAsync(
+                            updateDb,
+                            foundPlayer,
+                            "discord-slash-update",
+                            CancellationToken.None);
                     }
                 }
 
-                if (wasActive && inTemple)
+                if (wasActive && inTemple is true)
                 {
                     var hasOpenRenameRecheck = await updateDb.LifecycleEvents.AnyAsync(x =>
                         x.PlayerId == foundPlayer.Id &&
@@ -8916,7 +9057,7 @@ public class DiscordPromotionBotWorker(
 
             var lookupTempleGroupId = configuration.GetValue<int?>("TempleOsrs:GroupId") ?? 449;
             var lookupWomGroupId = configuration.GetValue<int?>("WiseOldMan:GroupId") ?? 0;
-            var templeAdded = await IsPlayerInTempleGroupAsync(player.Username, lookupTempleGroupId);
+            var templeMembership = await IsPlayerInTempleGroupAsync(player.Username, lookupTempleGroupId, CancellationToken.None);
             var womAdded = await IsPlayerInWiseOldManGroupAsync(
                 wiseOldManClient,
                 player.Username,
@@ -8933,7 +9074,7 @@ public class DiscordPromotionBotWorker(
                 .AddField("EHP", player.Latest is null ? "N/A" : player.Latest.Ehp.ToString("0.0", CultureInfo.InvariantCulture), true)
                 .AddField("Collections", player.Latest?.Collections.ToString() ?? "N/A", true)
                 .AddField("Pets", player.Pets > 0 ? player.Pets.ToString() : "N/A", true)
-                .AddField("Temple", templeAdded ? "Added" : "Missing", true)
+                .AddField("Temple", templeMembership is null ? "Unknown" : templeMembership.Value ? "Added" : "Missing", true)
                 .AddField("WiseOldMan", womAdded ? "Added" : "Missing", true)
                 .AddField("Last Synced (Swedish Time)", FormatSwedishTime(player.LastSynced), false)
                 .WithTimestamp(DateTimeOffset.Now)
@@ -10365,6 +10506,13 @@ public class DiscordPromotionBotWorker(
 
     private static string? GetHistoryPlayerName(HistoryEventRow row)
     {
+        if (string.Equals(row.EventType, "MISSING_IN_ROSTER", StringComparison.OrdinalIgnoreCase))
+        {
+            // A merge may later transfer this event to the canonical player
+            // row. Keep the identity that was actually observed missing.
+            return PickLifecycleValue(row.Metadata, "Username", "Player", "NewPlayer") ?? row.Player;
+        }
+
         if (row.EventType.EndsWith("_ACTION_APPLIED", StringComparison.OrdinalIgnoreCase) ||
             row.EventType.EndsWith("_ACTION_REQUIRED", StringComparison.OrdinalIgnoreCase) ||
             row.EventType.EndsWith("_DISCORD_POSTED", StringComparison.OrdinalIgnoreCase) ||
@@ -10878,8 +11026,19 @@ Shows all currently ignored players in:
         _messagePatchStateByMessageId[messageId] = new MessagePatchState(fingerprint, DateTimeOffset.UtcNow);
     }
 
+    private void InvalidateMessagePatchFingerprint(ulong messageId)
+    {
+        _messagePatchStateByMessageId.TryRemove(messageId, out _);
+    }
+
     private async Task<Discord.Rest.RestFollowupMessage?> RespondToComponentAsync(SocketMessageComponent component, string text, bool ephemeral = true)
     {
+        if (testHooks?.RespondToComponentAsync is not null)
+        {
+            await testHooks.RespondToComponentAsync(component, text, ephemeral);
+            return null;
+        }
+
         try
         {
             var response = await component.FollowupAsync(text: text, ephemeral: ephemeral);
@@ -12009,13 +12168,20 @@ Shows all currently ignored players in:
         }
     }
 
-    private async Task<TempleRosterLookupResult> TryGetTempleGroupUsernamesAsync(int groupId, CancellationToken ct)
-    {
-        if (groupId <= 0)
-        {
-            return new TempleRosterLookupResult(false, new HashSet<string>(StringComparer.OrdinalIgnoreCase));
-        }
+    private Task<TempleRosterLookupResult> TryGetTempleGroupUsernamesAsync(
+        int groupId,
+        CancellationToken ct,
+        bool forceRefresh = false) =>
+        templeRosterCache.GetAsync(
+            groupId,
+            token => FetchTempleGroupUsernamesAsync(groupId, token),
+            ct,
+            forceRefresh);
 
+    private async Task<TempleRosterLookupResult> FetchTempleGroupUsernamesAsync(
+        int groupId,
+        CancellationToken ct)
+    {
         try
         {
             var client = httpClientFactory.CreateClient();
@@ -12059,22 +12225,16 @@ Shows all currently ignored players in:
         }
     }
 
-    private async Task<bool> IsPlayerInTempleGroupAsync(string username, int groupId)
+    private async Task<bool?> IsPlayerInTempleGroupAsync(
+        string username,
+        int groupId,
+        CancellationToken ct = default,
+        bool forceRefresh = false)
     {
-        try
-        {
-            var client = httpClientFactory.CreateClient();
-            var json = await client.GetStringAsync($"https://templeosrs.com/api/groupmembers.php?id={groupId}");
-            using var doc = JsonDocument.Parse(json);
-            if (doc.RootElement.ValueKind != JsonValueKind.Array) return false;
-            foreach (var el in doc.RootElement.EnumerateArray())
-            {
-                if (string.Equals(el.GetString(), username, StringComparison.OrdinalIgnoreCase))
-                    return true;
-            }
-        }
-        catch { }
-        return false;
+        var roster = await TryGetTempleGroupUsernamesAsync(groupId, ct, forceRefresh);
+        if (!roster.Succeeded) return null;
+
+        return roster.Usernames.Contains(NormalizeUsername(username));
     }
 
     private static async Task<bool> IsPlayerInWiseOldManGroupAsync(

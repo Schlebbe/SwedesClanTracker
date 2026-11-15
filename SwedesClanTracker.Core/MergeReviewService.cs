@@ -45,18 +45,11 @@ public class MergeReviewService(TrackerDbContext db, IWiseOldManClient wiseOldMa
 
         var metadata = await GetLatestMergeMetadataAsync(newPlayer.Id, ct);
         var suggestedPrevious = Pick(metadata, "SuggestedPrevious");
-        Player? oldPlayer = null;
-        if (!string.IsNullOrWhiteSpace(suggestedPrevious))
-        {
-            oldPlayer = await db.Players.FirstOrDefaultAsync(x =>
-                x.Id != newPlayer.Id &&
-                x.Username.ToLower() == suggestedPrevious.ToLower(), ct);
-        }
+        var suggestedPreviousId = ParseInt(Pick(metadata, "SuggestedPreviousPlayerId", "PreviousPlayerId"));
+        var oldPlayer = await FindPreviousPlayerAsync(newPlayer.Id, suggestedPreviousId, suggestedPrevious, ct);
         if (oldPlayer is not null && oldPlayer.Status != PlayerStatus.REMOVED_CONFIRMED)
         {
-            oldPlayer.Status = PlayerStatus.MISSING_PENDING_REVIEW;
-            await EnsureOpenEventAsync(oldPlayer.Id, "MISSING_IN_ROSTER", new { Username = oldPlayer.Username, Source = source, MissingAt = DateTimeOffset.UtcNow }, ct);
-            await EnsureOpenEventAsync(oldPlayer.Id, "TEMPLE_MISSING_ACTION_REQUIRED", new { Username = oldPlayer.Username, Source = source, MissingAt = DateTimeOffset.UtcNow }, ct);
+            await EnsureReleasedMissingReviewAsync(oldPlayer, newPlayer.Id, source, ct);
         }
 
         await CloseOpenLifecycleEventsAsync(newPlayer.Id, ct, "NEW_PLAYER", "MERGE_SUGGESTED", "MERGE_ACTION_REQUIRED");
@@ -87,6 +80,19 @@ public class MergeReviewService(TrackerDbContext db, IWiseOldManClient wiseOldMa
             x.Id != newPlayer.Id &&
             x.Username.ToLower() == normalizedPrevious.ToLower(), ct);
         if (oldPlayer is null) return new(false, $"Previous player '{previousUsername}' was not found.");
+
+        var originalMergeMetadata = await GetLatestMergeMetadataAsync(newPlayer.Id, ct);
+        var originalPreviousId = ParseInt(Pick(originalMergeMetadata, "SuggestedPreviousPlayerId", "PreviousPlayerId"));
+        var originalPreviousUsername = Pick(originalMergeMetadata, "SuggestedPrevious", "PreviousPlayer");
+        var originalPrevious = await FindPreviousPlayerAsync(
+            newPlayer.Id,
+            originalPreviousId,
+            originalPreviousUsername,
+            ct);
+        if (originalPrevious is not null && originalPrevious.Id != oldPlayer.Id)
+        {
+            await EnsureReleasedMissingReviewAsync(originalPrevious, newPlayer.Id, source, ct);
+        }
 
         var finalUsername = UsernameRules.NormalizeUsername(newPlayer.Username);
         var collided = await db.Players.AnyAsync(x => x.Id != oldPlayer.Id && x.Id != newPlayer.Id && x.Username.ToLower() == finalUsername.ToLower(), ct);
@@ -145,9 +151,6 @@ public class MergeReviewService(TrackerDbContext db, IWiseOldManClient wiseOldMa
         }
 
         var lifecycle = await db.LifecycleEvents.Where(x => x.PlayerId == newPlayer.Id).ToListAsync(ct);
-        foreach (var ev in lifecycle) ev.PlayerId = oldPlayer.Id;
-
-        db.Players.Remove(newPlayer);
         await CloseOpenLifecycleEventsAsync(oldPlayer.Id, ct,
             "NEW_PLAYER",
             "MERGE_SUGGESTED",
@@ -155,6 +158,19 @@ public class MergeReviewService(TrackerDbContext db, IWiseOldManClient wiseOldMa
             "MISSING_IN_ROSTER",
             "TEMPLE_MISSING_ACTION_REQUIRED",
             "WOM_MISSING_ACTION_REQUIRED");
+        foreach (var ev in lifecycle) ev.PlayerId = oldPlayer.Id;
+        foreach (var ev in lifecycle.Where(x => x.Status == "OPEN" &&
+                                                 (x.EventType == "NEW_PLAYER" ||
+                                                  x.EventType == "MERGE_SUGGESTED" ||
+                                                  x.EventType == "MERGE_ACTION_REQUIRED" ||
+                                                  x.EventType == "MISSING_IN_ROSTER" ||
+                                                  x.EventType == "TEMPLE_MISSING_ACTION_REQUIRED" ||
+                                                  x.EventType == "WOM_MISSING_ACTION_REQUIRED")))
+        {
+            ev.Status = "DONE";
+        }
+
+        db.Players.Remove(newPlayer);
         db.LifecycleEvents.Add(new LifecycleEvent
         {
             PlayerId = oldPlayer.Id,
@@ -197,6 +213,64 @@ public class MergeReviewService(TrackerDbContext db, IWiseOldManClient wiseOldMa
         return ev is null ? [] : ReadMetadata(ev.MetadataJson);
     }
 
+    private async Task<Player?> FindPreviousPlayerAsync(
+        int newPlayerId,
+        int? previousPlayerId,
+        string? previousUsername,
+        CancellationToken ct)
+    {
+        if (previousPlayerId.HasValue)
+        {
+            var byId = await db.Players.FirstOrDefaultAsync(
+                x => x.Id == previousPlayerId.Value && x.Id != newPlayerId,
+                ct);
+            if (byId is not null) return byId;
+        }
+
+        if (string.IsNullOrWhiteSpace(previousUsername)) return null;
+        var normalized = UsernameRules.NormalizeUsername(previousUsername);
+        return await db.Players.FirstOrDefaultAsync(x =>
+            x.Id != newPlayerId &&
+            x.Username.ToLower() == normalized.ToLower(), ct);
+    }
+
+    private async Task EnsureReleasedMissingReviewAsync(
+        Player previousPlayer,
+        int excludingMergePlayerId,
+        string source,
+        CancellationToken ct)
+    {
+        if (previousPlayer.Status == PlayerStatus.REMOVED_CONFIRMED ||
+            previousPlayer.Status != PlayerStatus.MISSING_PENDING_REVIEW)
+        {
+            return;
+        }
+
+        var openMergeReviews = await MergeReviewPolicy.GetOpenReferencesAsync(db, ct);
+        if (MergeReviewPolicy.ControlsPreviousIdentity(
+                openMergeReviews,
+                previousPlayer.Id,
+                previousPlayer.Username,
+                excludingMergePlayerId))
+        {
+            return;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        await EnsureOpenEventAsync(previousPlayer.Id, "MISSING_IN_ROSTER", new
+        {
+            Username = previousPlayer.Username,
+            Source = source,
+            MissingAt = now
+        }, ct);
+        await EnsureOpenEventAsync(previousPlayer.Id, "TEMPLE_MISSING_ACTION_REQUIRED", new
+        {
+            Username = previousPlayer.Username,
+            Source = source,
+            MissingAt = now
+        }, ct);
+    }
+
     private static Dictionary<string, string> ReadMetadata(string? json)
     {
         if (string.IsNullOrWhiteSpace(json)) return [];
@@ -229,6 +303,9 @@ public class MergeReviewService(TrackerDbContext db, IWiseOldManClient wiseOldMa
         }
         return null;
     }
+
+    private static int? ParseInt(string? value) =>
+        int.TryParse(value, out var result) ? result : null;
 
     private async Task EnsureOpenEventAsync(int playerId, string eventType, object metadata, CancellationToken ct)
     {

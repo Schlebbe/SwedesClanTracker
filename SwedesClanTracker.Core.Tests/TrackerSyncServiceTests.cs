@@ -229,6 +229,189 @@ public class TrackerSyncServiceTests
     }
 
     [Fact]
+    public async Task SyncRosterAndQueueAsync_does_not_create_missing_requirements_for_previous_username_while_merge_review_is_open()
+    {
+        await using var db = CreateDbContext();
+        var previousPlayer = new Player
+        {
+            Username = "Yntg",
+            CurrentRank = "Brassican",
+            EligibleRank = "Brassican",
+            Status = PlayerStatus.MISSING_PENDING_REVIEW,
+            LastSeen = DateTimeOffset.UtcNow.AddHours(-1)
+        };
+        var currentPlayer = new Player
+        {
+            Username = "Lindal",
+            CurrentRank = "Brassican",
+            EligibleRank = "Brassican",
+            Status = PlayerStatus.MERGE_SUGGESTED,
+            LastSeen = DateTimeOffset.UtcNow
+        };
+        db.Players.AddRange(previousPlayer, currentPlayer);
+        await db.SaveChangesAsync();
+        db.LifecycleEvents.AddRange(
+            new LifecycleEvent
+            {
+                PlayerId = currentPlayer.Id,
+                EventType = "MERGE_SUGGESTED",
+                MetadataJson = JsonUtil.Serialize(new { NewPlayer = currentPlayer.Username, SuggestedPrevious = previousPlayer.Username }),
+                Status = "OPEN",
+                CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-1)
+            },
+            new LifecycleEvent
+            {
+                PlayerId = currentPlayer.Id,
+                EventType = "MERGE_ACTION_REQUIRED",
+                MetadataJson = JsonUtil.Serialize(new { NewPlayer = currentPlayer.Username, SuggestedPrevious = previousPlayer.Username }),
+                Status = "OPEN",
+                CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-1)
+            });
+        await db.SaveChangesAsync();
+
+        var service = new TrackerSyncService(
+            db,
+            new FakeTempleClient([currentPlayer.Username]),
+            new FakeWiseOldManClient(new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                [currentPlayer.Username] = "brassican"
+            }));
+
+        for (var i = 0; i < 3; i++)
+        {
+            await service.SyncRosterAndQueueAsync(CancellationToken.None);
+        }
+
+        Assert.Empty(await db.LifecycleEvents
+            .Where(x => x.PlayerId == previousPlayer.Id &&
+                        (x.EventType == "MISSING_IN_ROSTER" || x.EventType == "TEMPLE_MISSING_ACTION_REQUIRED"))
+            .ToListAsync());
+        Assert.Equal(PlayerStatus.MISSING_PENDING_REVIEW, (await db.Players.SingleAsync(x => x.Id == previousPlayer.Id)).Status);
+    }
+
+    [Fact]
+    public async Task SyncRosterAndQueueAsync_preserves_existing_missing_event_ids_while_merge_review_is_open()
+    {
+        await using var db = CreateDbContext();
+        var previousPlayer = new Player
+        {
+            Username = "Yntg",
+            CurrentRank = "Brassican",
+            EligibleRank = "Brassican",
+            Status = PlayerStatus.MISSING_PENDING_REVIEW,
+            LastSeen = DateTimeOffset.UtcNow.AddHours(-1)
+        };
+        var currentPlayer = new Player
+        {
+            Username = "Lindal",
+            CurrentRank = "Brassican",
+            EligibleRank = "Brassican",
+            Status = PlayerStatus.MERGE_SUGGESTED,
+            LastSeen = DateTimeOffset.UtcNow
+        };
+        db.Players.AddRange(previousPlayer, currentPlayer);
+        await db.SaveChangesAsync();
+        db.LifecycleEvents.AddRange(
+            new LifecycleEvent
+            {
+                PlayerId = previousPlayer.Id,
+                EventType = "MISSING_IN_ROSTER",
+                MetadataJson = JsonUtil.Serialize(new { Username = previousPlayer.Username, Source = "test" }),
+                Status = "OPEN",
+                CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-2)
+            },
+            new LifecycleEvent
+            {
+                PlayerId = previousPlayer.Id,
+                EventType = "TEMPLE_MISSING_ACTION_REQUIRED",
+                MetadataJson = JsonUtil.Serialize(new { Username = previousPlayer.Username, Source = "test" }),
+                Status = "OPEN",
+                CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-2)
+            },
+            new LifecycleEvent
+            {
+                PlayerId = currentPlayer.Id,
+                EventType = "MERGE_SUGGESTED",
+                MetadataJson = JsonUtil.Serialize(new { NewPlayer = currentPlayer.Username, SuggestedPrevious = previousPlayer.Username }),
+                Status = "OPEN",
+                CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-1)
+            },
+            new LifecycleEvent
+            {
+                PlayerId = currentPlayer.Id,
+                EventType = "MERGE_ACTION_REQUIRED",
+                MetadataJson = JsonUtil.Serialize(new { NewPlayer = currentPlayer.Username, SuggestedPrevious = previousPlayer.Username }),
+                Status = "OPEN",
+                CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-1)
+            });
+        await db.SaveChangesAsync();
+
+        var expectedIds = await db.LifecycleEvents
+            .Where(x => x.PlayerId == previousPlayer.Id && x.Status == "OPEN")
+            .OrderBy(x => x.EventType)
+            .Select(x => new { x.EventType, x.Id })
+            .ToListAsync();
+        var service = new TrackerSyncService(
+            db,
+            new FakeTempleClient([currentPlayer.Username]),
+            new FakeWiseOldManClient(new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                [currentPlayer.Username] = "brassican"
+            }));
+
+        for (var i = 0; i < 3; i++)
+        {
+            await service.SyncRosterAndQueueAsync(CancellationToken.None);
+        }
+
+        var actualIds = await db.LifecycleEvents
+            .Where(x => x.PlayerId == previousPlayer.Id &&
+                        (x.EventType == "MISSING_IN_ROSTER" || x.EventType == "TEMPLE_MISSING_ACTION_REQUIRED") &&
+                        x.Status == "OPEN")
+            .OrderBy(x => x.EventType)
+            .Select(x => new { x.EventType, x.Id })
+            .ToListAsync();
+
+        Assert.Equal(expectedIds, actualIds);
+    }
+
+    [Fact]
+    public async Task SyncRosterAndQueueAsync_creates_one_missing_event_pair_across_repeated_syncs_without_pending_merge()
+    {
+        await using var db = CreateDbContext();
+        var player = new Player
+        {
+            Username = "Yntg",
+            CurrentRank = "Brassican",
+            EligibleRank = "Brassican",
+            Status = PlayerStatus.ACTIVE,
+            LastSeen = DateTimeOffset.UtcNow.AddHours(-1)
+        };
+        db.Players.Add(player);
+        await db.SaveChangesAsync();
+
+        var service = new TrackerSyncService(
+            db,
+            new FakeTempleClient([]),
+            new FakeWiseOldManClient(new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)));
+
+        for (var i = 0; i < 3; i++)
+        {
+            await service.SyncRosterAndQueueAsync(CancellationToken.None);
+        }
+
+        var missingEvents = await db.LifecycleEvents
+            .Where(x => x.PlayerId == player.Id &&
+                        (x.EventType == "MISSING_IN_ROSTER" || x.EventType == "TEMPLE_MISSING_ACTION_REQUIRED") &&
+                        x.Status == "OPEN")
+            .OrderBy(x => x.EventType)
+            .ToListAsync();
+
+        Assert.Equal(["MISSING_IN_ROSTER", "TEMPLE_MISSING_ACTION_REQUIRED"], missingEvents.Select(x => x.EventType));
+        Assert.Equal(2, missingEvents.Select(x => x.Id).Distinct().Count());
+    }
+
+    [Fact]
     public async Task SyncRosterAndQueueAsync_ignores_unknown_wom_roles_for_wom_only_and_rank_mismatch_reviews()
     {
         await using var db = CreateDbContext();

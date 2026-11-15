@@ -10,6 +10,7 @@ builder.Services.AddSystemd();
 builder.Services.AddTrackerCore(builder.Configuration);
 builder.Services.AddSingleton<IPlayerUpdateQueue, PlayerUpdateQueue>();
 builder.Services.AddSingleton<AppStatusReporter>();
+builder.Services.AddSingleton<TempleRosterCache>();
 builder.Services.AddHostedService<TrackerWorker>();
 builder.Services.AddHostedService<DiscordPromotionBotWorker>();
 

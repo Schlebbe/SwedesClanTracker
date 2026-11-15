@@ -125,6 +125,137 @@ public sealed class ReadOnlyConsoleQueryServiceTests
     }
 
     [Fact]
+    public async Task Review_projection_suppresses_previous_identity_actions_but_retains_evidence()
+    {
+        await using var db = CreateDatabase();
+        var now = DateTimeOffset.UtcNow;
+        var previous = new Player
+        {
+            Username = "Ironhold",
+            CurrentRank = "Captain",
+            EligibleRank = "Captain",
+            LastSeen = now.AddHours(-1),
+            Status = PlayerStatus.MISSING_PENDING_REVIEW
+        };
+        var current = new Player
+        {
+            Username = "Stonehall",
+            CurrentRank = "Captain",
+            EligibleRank = "Captain",
+            LastSeen = now,
+            Status = PlayerStatus.MERGE_SUGGESTED
+        };
+        db.Players.AddRange(previous, current);
+        await db.SaveChangesAsync();
+        db.LifecycleEvents.AddRange(
+            new LifecycleEvent
+            {
+                PlayerId = current.Id,
+                EventType = "MERGE_ACTION_REQUIRED",
+                MetadataJson = JsonUtil.Serialize(new
+                {
+                    current.Username,
+                    SuggestedPrevious = previous.Username,
+                    SuggestedPreviousPlayerId = previous.Id
+                }),
+                Status = "OPEN",
+                CreatedAt = now
+            },
+            new LifecycleEvent
+            {
+                PlayerId = previous.Id,
+                EventType = "TEMPLE_MISSING_ACTION_REQUIRED",
+                MetadataJson = JsonUtil.Serialize(new { previous.Username, InTemple = false }),
+                Status = "OPEN",
+                CreatedAt = now.AddMinutes(-1)
+            });
+        await db.SaveChangesAsync();
+        var service = CreateService(db);
+
+        var queue = await service.GetReviewQueueAsync(null, null, null, 1, 50, CancellationToken.None);
+        var suppressed = Assert.Single(queue.Items, x => x.Subject == previous.Username);
+
+        Assert.Equal("superseded", suppressed.State);
+        Assert.Empty(suppressed.Actions);
+        Assert.Contains(suppressed.Warnings, warning => warning.Contains("suppressed", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task Review_projection_uses_posted_merge_fallback_for_previous_identity_precedence()
+    {
+        await using var db = CreateDatabase();
+        var now = DateTimeOffset.UtcNow;
+        var previous = new Player
+        {
+            Username = "Ironhold",
+            Status = PlayerStatus.MISSING_PENDING_REVIEW,
+            LastSeen = now.AddHours(-1)
+        };
+        var current = new Player
+        {
+            Username = "Stonehall",
+            Status = PlayerStatus.MERGE_SUGGESTED,
+            LastSeen = now
+        };
+        var unrelated = new Player
+        {
+            Username = "Unrelated",
+            Status = PlayerStatus.MISSING_PENDING_REVIEW,
+            LastSeen = now.AddHours(-2)
+        };
+        db.Players.AddRange(previous, current, unrelated);
+        await db.SaveChangesAsync();
+        db.LifecycleEvents.AddRange(
+            new LifecycleEvent
+            {
+                PlayerId = current.Id,
+                EventType = "MERGE_ACTION_REQUIRED",
+                MetadataJson = JsonUtil.Serialize(new { NewPlayer = current.Username }),
+                Status = "OPEN",
+                CreatedAt = now
+            },
+            new LifecycleEvent
+            {
+                PlayerId = current.Id,
+                EventType = "MERGE_DISCORD_POSTED",
+                MetadataJson = JsonUtil.Serialize(new
+                {
+                    NewPlayer = current.Username,
+                    SuggestedPrevious = previous.Username,
+                    SuggestedPreviousPlayerId = previous.Id
+                }),
+                Status = "DONE",
+                CreatedAt = now.AddSeconds(-1)
+            },
+            new LifecycleEvent
+            {
+                PlayerId = previous.Id,
+                EventType = "TEMPLE_MISSING_ACTION_REQUIRED",
+                MetadataJson = JsonUtil.Serialize(new { previous.Username, InTemple = false }),
+                Status = "OPEN",
+                CreatedAt = now.AddMinutes(-1)
+            },
+            new LifecycleEvent
+            {
+                PlayerId = unrelated.Id,
+                EventType = "TEMPLE_MISSING_ACTION_REQUIRED",
+                MetadataJson = JsonUtil.Serialize(new { unrelated.Username, InTemple = false }),
+                Status = "OPEN",
+                CreatedAt = now.AddMinutes(-2)
+            });
+        await db.SaveChangesAsync();
+
+        var queue = await CreateService(db).GetReviewQueueAsync(null, null, null, 1, 50, CancellationToken.None);
+
+        var suppressed = Assert.Single(queue.Items, x => x.Subject == previous.Username);
+        Assert.Equal("superseded", suppressed.State);
+        Assert.Empty(suppressed.Actions);
+        var unrelatedCase = Assert.Single(queue.Items, x => x.Subject == unrelated.Username);
+        Assert.Equal("open", unrelatedCase.State);
+        Assert.NotEmpty(unrelatedCase.Actions);
+    }
+
+    [Fact]
     public async Task Overview_health_readiness_and_work_lanes_are_factual()
     {
         await using var db = CreateDatabase();
